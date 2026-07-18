@@ -2,14 +2,16 @@
  * src/app.js
  * ---------------------------------------------------------------------------
  * Express application entry point. Loads env, mounts the parent router, and
- * starts the HTTP server on PORT (from .env, default 5009).
+ * starts the HTTP server on PORT (from .env, default 5008).
  * ---------------------------------------------------------------------------
  */
 
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const parentRouter = require('./routers/parentRouter');
 const whatsappRouter = require('./routers/whatsappRouter');
+const trialRouter = require('./routers/trialRouter');
 
 const app = express();
 
@@ -17,19 +19,25 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Static pages (public/trial.html — the free-trial signup form).
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
 // Health check.
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'quizpe-back-end' }));
 
 // WhatsApp Cloud API webhook — mounted at root so Meta's callback URL stays
 // short: <PUBLIC_BASE_URL>/whatsapp/webhook
-app.use('/', whatsappRouter);
+
+// Free-trial signup form APIs (backs public/trial.html).
+app.use('/trial', trialRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
+app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
 
-const PORT = process.env.PORT || 5009;
+const PORT = process.env.PORT || 5008;
 app.listen(PORT, () => {
-  console.log(`quizpe-back-end listening on http://localhost:${PORT}`);
+  console.log(`✅quizpe-back-end listening on http://localhost:${PORT}`);
 });
 
 module.exports = app;

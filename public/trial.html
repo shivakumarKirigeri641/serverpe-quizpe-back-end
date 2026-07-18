@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>QuizPe — Start free trial</title>
+  <style>
+    :root {
+      --brand: #008069; --brand-dark: #075e54; --accent: #00a884;
+      --bg: #efeae2; --card: #ffffff; --text: #111b21; --muted: #667781;
+      --border: #d1d7db; --danger: #c0392b; --bubble: #d9fdd3; --warn: #fff4e5; --warn-text: #8a5300;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh; padding: 0 0 24px;
+    }
+    .head { background: var(--brand); color: #fff; padding: 16px; position: sticky; top: 0; z-index: 20; }
+    .head h1 { margin: 0; font-size: 17px; }
+    .head p { margin: 3px 0 0; font-size: 12px; opacity: .9; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 14px 12px; }
+
+    .card { background: var(--card); border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+    .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--brand-dark); }
+
+    .perk { display: flex; gap: 8px; font-size: 13px; padding: 5px 0; }
+    .perk span:first-child { color: var(--accent); font-weight: 700; }
+
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+    .field input, .field select {
+      width: 100%; padding: 11px 12px; border: 1.5px solid var(--border); border-radius: 8px;
+      font-size: 15px; background: #fff; color: var(--text); outline: none;
+    }
+    .field input:focus, .field select:focus { border-color: var(--accent); }
+    .field select:disabled { background: #f2f2f2; color: var(--muted); }
+    .row2 { display: flex; gap: 10px; }
+    .row2 .field { flex: 1; }
+
+    .disclaimer {
+      background: var(--warn); color: var(--warn-text); font-size: 12px; border-radius: 8px;
+      padding: 10px 12px; margin: 10px 0; line-height: 1.5;
+    }
+    .disclaimer a { color: var(--warn-text); font-weight: 700; }
+
+    .terms { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; margin: 12px 0 4px; }
+    .terms input { margin-top: 2px; width: 17px; height: 17px; accent-color: var(--accent); }
+    .terms a { color: var(--brand-dark); font-weight: 600; }
+
+    .submit-btn {
+      width: 100%; padding: 13px; border: none; border-radius: 22px; background: var(--accent);
+      color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; margin-top: 6px;
+    }
+    .submit-btn:disabled { background: #a9c7ba; cursor: not-allowed; }
+    .error { color: var(--danger); font-size: 13px; margin-top: 10px; text-align: center; }
+
+    .done { display: none; text-align: center; padding: 36px 20px; }
+    .done .tick { font-size: 46px; }
+    .done h2 { color: var(--brand-dark); margin: 10px 0 6px; }
+    .done p { font-size: 14px; color: var(--muted); margin: 6px 0; }
+    .done .hi { color: var(--text); font-weight: 700; }
+    .wa-btn {
+      display: inline-block; margin-top: 18px; padding: 13px 26px; border-radius: 24px;
+      background: var(--accent); color: #fff; font-size: 15px; font-weight: 700; text-decoration: none;
+    }
+    .redirect { font-size: 12px; color: var(--muted); margin-top: 12px; }
+    .foot { text-align: center; font-size: 11px; color: var(--muted); padding: 16px; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <h1>🎁 Start your free trial</h1>
+    <p id="sub">Loading…</p>
+  </div>
+
+  <div class="wrap" id="wrap" style="display:none">
+    <div class="card">
+      <h2 id="planName">Free trial</h2>
+      <div class="perk"><span>✓</span><span>A fresh <b>10-question quiz</b> every day</span></div>
+      <div class="perk"><span>✓</span><span>Answers &amp; explanations <b>after</b> each quiz</span></div>
+      <div class="perk"><span>✓</span><span>Daily summary &amp; weekly progress PDFs</span></div>
+      <div class="perk"><span>✓</span><span>Delivered on WhatsApp at <b>8:00 PM</b> daily</span></div>
+      <div class="disclaimer">
+        <b>No payment needed.</b> We never ask for card or UPI details and the trial ends on its own.
+        <br />Please read the <a id="termsLink" href="#" target="_blank" rel="noopener">Terms &amp; Disclaimer</a> before continuing.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Your child's details</h2>
+      <div class="field">
+        <label for="student_name">Child's name *</label>
+        <input id="student_name" type="text" maxlength="60" placeholder="e.g. Aarav" autocomplete="off" />
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label for="board">Board *</label>
+          <select id="board"><option value="">Select</option></select>
+        </div>
+        <div class="field">
+          <label for="medium">Medium *</label>
+          <select id="medium" disabled><option value="">Select board first</option></select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label for="grade">Grade *</label>
+          <select id="grade"><option value="">Select</option></select>
+        </div>
+        <div class="field">
+          <label for="state">State / UT *</label>
+          <select id="state"><option value="">Select</option></select>
+        </div>
+      </div>
+
+      <label class="terms">
+        <input id="accept" type="checkbox" />
+        <span>I am the parent/guardian and I accept the
+          <a id="termsLink2" href="#" target="_blank" rel="noopener">Terms &amp; Disclaimer</a>.</span>
+      </label>
+
+      <button class="submit-btn" id="submitBtn" disabled>Start free trial</button>
+      <div class="error" id="err"></div>
+    </div>
+    <div class="foot" id="foot"></div>
+  </div>
+
+  <div class="done" id="done">
+    <div class="tick">🎉</div>
+    <h2>Trial activated!</h2>
+    <p class="hi" id="doneStudent"></p>
+    <p id="doneDates"></p>
+    <p>We've sent a confirmation on WhatsApp.</p>
+    <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
+    <p class="redirect" id="redirectNote">Taking you back in 3…</p>
+  </div>
+
+<script>
+  const token = new URLSearchParams(location.search).get("token");
+  const $ = (id) => document.getElementById(id);
+  let ctx = null;
+
+  const fill = (sel, rows, valueKey, labelKey, placeholder) => {
+    sel.innerHTML = `<option value="">${placeholder}</option>` +
+      rows.map(r => `<option value="${r[valueKey]}">${r[labelKey]}</option>`).join("");
+  };
+
+  const validate = () => {
+    const ok = $("student_name").value.trim().length >= 2 &&
+      $("board").value && $("medium").value && $("grade").value && $("state").value && $("accept").checked;
+    $("submitBtn").disabled = !ok;
+  };
+
+  async function load() {
+    if (!token) { $("sub").textContent = "Invalid link."; return; }
+    try {
+      const res = await fetch(`/trial/api/context?token=${encodeURIComponent(token)}`);
+      const data = await res.json();
+      if (!data.success) { $("sub").textContent = data.error || "This link is no longer valid."; return; }
+      ctx = data;
+
+      $("sub").textContent = data.parentName ? `Hi ${data.parentName} · ${data.mobile}` : data.mobile;
+      $("planName").textContent = `${data.plan.plan_name} — ${data.plan.duration}-day free trial`;
+      const url = data.policy?.url || "#";
+      $("termsLink").href = url; $("termsLink2").href = url;
+      $("foot").textContent = `${data.business.company_name} · ${data.business.support_email}`;
+
+      fill($("board"), data.boards, "board_code", "board_code", "Select board");
+      fill($("grade"), data.grades, "grade_code", "grade_name", "Select grade");
+      fill($("state"), data.states, "state_code", "state_name", "Select state");
+      $("wrap").style.display = "block";
+    } catch {
+      $("sub").textContent = "Could not load. Please try again.";
+    }
+  }
+
+  // medium options depend on the board chosen
+  $("board").addEventListener("change", () => {
+    const list = (ctx?.mediumsByBoard || {})[$("board").value] || [];
+    const sel = $("medium");
+    sel.disabled = list.length === 0;
+    fill(sel, list, "medium_code", "label", list.length ? "Select medium" : "None available");
+    if (list.length === 1) sel.value = list[0].medium_code;   // auto-pick the only option
+    validate();
+  });
+
+  ["student_name", "medium", "grade", "state", "accept"].forEach(id =>
+    $(id).addEventListener(id === "accept" ? "change" : "input", validate));
+  $("medium").addEventListener("change", validate);
+  $("grade").addEventListener("change", validate);
+  $("state").addEventListener("change", validate);
+
+  $("submitBtn").addEventListener("click", async () => {
+    $("err").textContent = "";
+    $("submitBtn").disabled = true;
+    $("submitBtn").textContent = "Activating…";
+    try {
+      const res = await fetch("/trial/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token,
+          student_name: $("student_name").value.trim(),
+          board: $("board").value,
+          medium: $("medium").value,
+          grade: $("grade").value,
+          state: $("state").value,
+          accept_terms: $("accept").checked,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        $("err").textContent = data.error || "Could not activate. Please try again.";
+        $("submitBtn").disabled = false;
+        $("submitBtn").textContent = "Start free trial";
+        return;
+      }
+      const d = new Date(data.end_date).toLocaleDateString("en-IN",
+        { day: "2-digit", month: "short", year: "numeric" });
+      $("doneStudent").textContent = `${data.student_name} is all set!`;
+      $("doneDates").textContent = `Daily quiz at 8:00 PM · valid till ${d}`;
+      $("wrap").style.display = "none";
+      document.querySelector(".head p").textContent = "Activated";
+      $("done").style.display = "block";
+
+      // hand the parent straight back to the WhatsApp chat
+      const waUrl = data.whatsapp_url;
+      if (waUrl) {
+        $("waBtn").href = waUrl;
+        let n = 3;
+        const tick = setInterval(() => {
+          n -= 1;
+          if (n <= 0) {
+            clearInterval(tick);
+            $("redirectNote").textContent = "Opening WhatsApp…";
+            location.href = waUrl;
+          } else {
+            $("redirectNote").textContent = `Taking you back in ${n}…`;
+          }
+        }, 1000);
+      } else {
+        $("waBtn").style.display = "none";
+        $("redirectNote").textContent = "You can close this page.";
+      }
+    } catch {
+      $("err").textContent = "Network error. Please try again.";
+      $("submitBtn").disabled = false;
+      $("submitBtn").textContent = "Start free trial";
+    }
+  });
+
+  load();
+</script>
+</body>
+</html>

@@ -79,7 +79,24 @@
       "Bash(node ./_tracker2.js)",
       "Bash(rm -f ./_tracker2.js)",
       "Bash(node ./_hist.js)",
-      "Bash(rm -f ./_hist.js)"
+      "Bash(rm -f ./_hist.js)",
+      "Bash(node ./_wa.js)",
+      "Bash(rm -f ./_wa.js)",
+      "Bash(mkdir -p src/uploads/invoices)",
+      "Bash(node ./_inv.js)",
+      "Bash(rm -f ./_inv.js)",
+      "Bash(node ./_biz.js)",
+      "Bash(rm -f ./_biz.js)",
+      "Bash(node ./_gst.js)",
+      "Bash(rm -f ./_gst.js)",
+      "Bash(node ./_waflow.js)",
+      "Bash(rm -f ./_waflow.js)",
+      "Bash(node ./_sample.js)",
+      "Bash(rm -f ./_sample.js)",
+      "Bash(node ./_tmpl.js)",
+      "Bash(rm -f ./_tmpl.js)",
+      "Bash(node ./_testctx.js)",
+      "Bash(rm -f ./_testctx.js)"
     ],
     "additionalDirectories": [
       "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"

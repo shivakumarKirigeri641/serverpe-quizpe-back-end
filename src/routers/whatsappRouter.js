@@ -13,6 +13,8 @@
  */
 
 const express = require('express');
+const db = require('../database/connectDB');
+const { handleInbound } = require('../whatsapp/flow');
 
 const router = express.Router();
 
@@ -35,23 +37,35 @@ router.post('/whatsapp/webhook', (req, res) => {
   // ACK immediately so Meta does not retry; process the payload afterwards.
   res.sendStatus(200);
 
-  try {
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0]?.value;
-    const message = change?.messages?.[0];
+  const change = req.body?.entry?.[0]?.changes?.[0]?.value;
+  const message = change?.messages?.[0];
 
-    if (message) {
-      const from = message.from;
-      const type = message.type;
-      const text = message.text?.body;
-      console.log(`[whatsapp] inbound ${type} from ${from}${text ? `: ${text}` : ''}`);
-      // TODO: route into quiz flow (answer capture, next question, etc.)
-    } else if (change?.statuses) {
-      console.log(`[whatsapp] status update: ${change.statuses[0]?.status}`);
-    }
-  } catch (e) {
-    console.error('[whatsapp] failed to process webhook payload:', e.message);
+  if (message) {
+    const contactName = change?.contacts?.[0]?.profile?.name;
+    console.log(`[whatsapp] inbound ${message.type} from ${message.from}`);
+    // Processed after the ACK; never let a failure bubble into the response.
+    handleInbound(message, contactName).catch((e) => {
+      console.error('[whatsapp] flow error:', e.message, e.stack?.split('\n')[1]?.trim());
+    });
+  } else if (change?.statuses) {
+    const s = change.statuses[0];
+    console.log(`[whatsapp] status ${s?.status} for ${s?.id}`);
+    // Keep delivery state in sync (sent -> delivered -> read).
+    updateStatus(s).catch((e) => console.error('[whatsapp] status update failed:', e.message));
   }
 });
+
+/** Reflect Meta's delivery receipts back onto the outbound message row. */
+async function updateStatus(s) {
+  if (!s?.id || !s?.status) return;
+  const col = { delivered: 'delivered_at', read: 'read_at' }[s.status];
+  await db.query(
+    `UPDATE whatsapp_messages
+        SET status = $2 ${col ? `, ${col} = now()` : ''},
+            error_message = $3
+      WHERE wa_message_id = $1`,
+    [s.id, s.status, s.errors?.[0]?.title || null],
+  );
+}
 
 module.exports = router;
