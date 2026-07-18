@@ -96,7 +96,9 @@
       "Bash(node ./_tmpl.js)",
       "Bash(rm -f ./_tmpl.js)",
       "Bash(node ./_testctx.js)",
-      "Bash(rm -f ./_testctx.js)"
+      "Bash(rm -f ./_testctx.js)",
+      "Bash(cp src/assets/logo-full.png src/assets/logo-mark.png public/assets/)",
+      "Bash(node ./_concepts.js)"
     ],
     "additionalDirectories": [
       "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"

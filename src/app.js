@@ -12,6 +12,7 @@ const express = require('express');
 const parentRouter = require('./routers/parentRouter');
 const whatsappRouter = require('./routers/whatsappRouter');
 const trialRouter = require('./routers/trialRouter');
+const reportsRouter = require('./routers/reportsRouter');
 
 const app = express();
 
@@ -22,6 +23,9 @@ app.use(express.urlencoded({ extended: true }));
 // Static pages (public/trial.html — the free-trial signup form).
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Reports are served ONLY via unguessable tokens / OTP portal — never as
+// static files — so one parent can't reach another child's report.
+
 // Health check.
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'quizpe-back-end' }));
 
@@ -30,6 +34,9 @@ app.get('/health', (req, res) => res.json({ status: 'ok', service: 'quizpe-back-
 
 // Free-trial signup form APIs (backs public/trial.html).
 app.use('/trial', trialRouter);
+
+// Report PDFs — token download + OTP-gated portal (backs public/reports.html).
+app.use('/reports', reportsRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);

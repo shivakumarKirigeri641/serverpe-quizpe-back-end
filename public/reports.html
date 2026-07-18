@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>QuizPe — My Reports</title>
+  <style>
+    :root {
+      --brand:#008069; --brand-dark:#075e54; --accent:#00a884; --bg:#efeae2;
+      --card:#fff; --text:#111b21; --muted:#667781; --border:#d1d7db; --danger:#c0392b;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:var(--bg); color:var(--text); min-height:100vh; padding:0 0 24px; }
+    .head { background:var(--brand); color:#fff; padding:16px; position:sticky; top:0; }
+    .head h1 { margin:0; font-size:17px; }
+    .head p { margin:3px 0 0; font-size:12px; opacity:.9; }
+    .wrap { max-width:520px; margin:0 auto; padding:14px 12px; }
+    .card { background:var(--card); border-radius:14px; padding:18px; margin-bottom:14px; box-shadow:0 2px 10px rgba(0,0,0,.06); }
+    .field { margin-bottom:12px; }
+    .field label { display:block; font-size:12px; font-weight:600; color:var(--muted); margin-bottom:4px; }
+    .field input { width:100%; padding:12px; border:1.5px solid var(--border); border-radius:8px; font-size:16px; outline:none; letter-spacing:1px; }
+    .field input:focus { border-color:var(--accent); }
+    .btn { width:100%; padding:13px; border:none; border-radius:22px; background:var(--accent); color:#fff; font-size:15px; font-weight:700; cursor:pointer; }
+    .btn:disabled { background:#a9c7ba; }
+    .link { background:none; border:none; color:var(--brand-dark); font-size:13px; font-weight:600; cursor:pointer; margin-top:10px; }
+    .error { color:var(--danger); font-size:13px; margin-top:10px; text-align:center; }
+    .rep { display:flex; justify-content:space-between; align-items:center; border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; }
+    .rep .info { font-size:13px; }
+    .rep .info b { display:block; margin-bottom:2px; }
+    .rep .info span { color:var(--muted); font-size:12px; }
+    .rep .grade { font-size:20px; font-weight:800; color:var(--brand-dark); margin-right:10px; }
+    .rep a { padding:8px 14px; border-radius:16px; background:var(--accent); color:#fff; text-decoration:none; font-size:13px; font-weight:700; white-space:nowrap; }
+    .muted { color:var(--muted); font-size:13px; text-align:center; }
+    .foot { text-align:center; font-size:11px; color:var(--muted); padding:16px; }
+  </style>
+</head>
+<body>
+  <div class="head" style="display:flex;align-items:center;gap:12px;">
+    <img src="/assets/logo-mark.png" alt="QuizPe" style="width:40px;height:40px;border-radius:9px;background:#fff;padding:2px;" />
+    <div><h1>📊 My Quiz Reports</h1><p>Secure access with a one-time code</p></div>
+  </div>
+  <div class="wrap">
+
+    <div class="card" id="step1">
+      <div class="field">
+        <label for="mobile">Registered WhatsApp number</label>
+        <input id="mobile" type="tel" maxlength="10" inputmode="numeric" placeholder="10-digit mobile" />
+      </div>
+      <button class="btn" id="sendOtp">Send OTP on WhatsApp</button>
+      <div class="error" id="err1"></div>
+    </div>
+
+    <div class="card" id="step2" style="display:none">
+      <p class="muted" id="otpNote"></p>
+      <div class="field">
+        <label for="otp">Enter 6-digit OTP</label>
+        <input id="otp" type="tel" maxlength="6" inputmode="numeric" placeholder="______" />
+      </div>
+      <button class="btn" id="verifyOtp">Verify &amp; view reports</button>
+      <button class="link" id="resend">↻ Change number / resend</button>
+      <div class="error" id="err2"></div>
+    </div>
+
+    <div id="step3" style="display:none">
+      <div class="card"><p class="muted" id="repHead"></p><div id="repList"></div></div>
+    </div>
+
+    <div class="foot">QuizPe · Small quiz, Big progress</div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let mobile = "";
+
+  const show = (n) => { $("step1").style.display = n===1?"block":"none";
+    $("step2").style.display = n===2?"block":"none"; $("step3").style.display = n===3?"block":"none"; };
+
+  $("sendOtp").onclick = async () => {
+    $("err1").textContent = "";
+    mobile = $("mobile").value.replace(/\D/g,"").slice(-10);
+    if (mobile.length !== 10) { $("err1").textContent = "Enter a valid 10-digit number."; return; }
+    $("sendOtp").disabled = true; $("sendOtp").textContent = "Sending…";
+    try {
+      const r = await (await fetch("/reports/api/request-otp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mobile})})).json();
+      $("otpNote").textContent = `We've sent a code to WhatsApp on •••••${mobile.slice(-5)}.`;
+      show(2);
+    } catch { $("err1").textContent = "Could not send. Try again."; }
+    $("sendOtp").disabled = false; $("sendOtp").textContent = "Send OTP on WhatsApp";
+  };
+
+  $("resend").onclick = () => { show(1); $("otp").value=""; };
+
+  $("verifyOtp").onclick = async () => {
+    $("err2").textContent = "";
+    const otp = $("otp").value.trim();
+    if (otp.length !== 6) { $("err2").textContent = "Enter the 6-digit code."; return; }
+    $("verifyOtp").disabled = true; $("verifyOtp").textContent = "Verifying…";
+    try {
+      const v = await (await fetch("/reports/api/verify-otp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mobile,otp})})).json();
+      if (!v.success) { $("err2").textContent = v.error || "Incorrect OTP."; }
+      else { await loadReports(v.token); }
+    } catch { $("err2").textContent = "Something went wrong."; }
+    $("verifyOtp").disabled = false; $("verifyOtp").textContent = "Verify & view reports";
+  };
+
+  async function loadReports(token) {
+    const d = await (await fetch(`/reports/api/list?token=${encodeURIComponent(token)}`)).json();
+    if (!d.success) { show(2); $("err2").textContent = d.error; return; }
+    if (!d.reports.length) { $("repHead").textContent = "No reports yet — your first quiz report will appear here."; $("repList").innerHTML=""; show(3); return; }
+    $("repHead").textContent = `${d.reports.length} report(s) found`;
+    $("repList").innerHTML = d.reports.map(r => {
+      const dt = new Date(r.quiz_date).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+      return `<div class="rep">
+        <span class="grade">${r.grade||"-"}</span>
+        <div class="info"><b>${r.student_name} — ${r.subject_name||"Quiz"}</b>
+          <span>${dt} · ${r.score} (${r.pct}%)</span></div>
+        <a href="${r.url}" target="_blank" rel="noopener">Download</a>
+      </div>`;
+    }).join("");
+    show(3);
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+{
+  "version": "7.0",
+  "screens": [
+    {
+      "id": "QUESTION",
+      "title": "Quiz",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "serial": {
+          "type": "string",
+          "__example__": "1"
+        },
+        "total": {
+          "type": "string",
+          "__example__": "10"
+        },
+        "chapter": {
+          "type": "string",
+          "__example__": "Numbers up to 100"
+        },
+        "question": {
+          "type": "string",
+          "__example__": "4 tens and 8 ones make which number?"
+        },
+        "tracker_id": {
+          "type": "string",
+          "__example__": "1"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          },
+          "__example__": [
+            {
+              "id": "A",
+              "title": "A)  47"
+            },
+            {
+              "id": "B",
+              "title": "B)  48"
+            },
+            {
+              "id": "C",
+              "title": "C)  50"
+            },
+            {
+              "id": "D",
+              "title": "D)  84"
+            }
+          ]
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "Question ${data.serial} of ${data.total}"
+          },
+          {
+            "type": "TextCaption",
+            "text": "${data.chapter}"
+          },
+          {
+            "type": "TextBody",
+            "text": "${data.question}"
+          },
+          {
+            "type": "Form",
+            "name": "quiz_form",
+            "children": [
+              {
+                "type": "RadioButtonsGroup",
+                "name": "answer",
+                "label": "Choose your answer",
+                "required": true,
+                "data-source": "${data.options}"
+              },
+              {
+                "type": "Footer",
+                "label": "Submit & Next",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "answer": "${form.answer}",
+                    "tracker_id": "${data.tracker_id}",
+                    "serial": "${data.serial}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
