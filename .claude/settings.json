@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -o maths.docx -d \"C:/Users/shiva/AppData/Local/Temp/claude/c--Users-shiva-source-repos-quizpe-back-end/e2d235ee-4000-4b46-8fc7-1273bfabc3d7/scratchpad/docx\")",
+      "Bash(python -c \"import json;d=json.load\\(open\\('quiz-grade1-maths.json'\\)\\);print\\('Valid JSON. Quizzes:',[\\(q['month'],q['chapterTitle'],len\\(q['questions']\\)\\) for q in d['quizzes']]\\)\")",
+      "Bash(python gen.py)",
+      "Bash(python -c \"import openpyxl; print\\('openpyxl ok'\\)\")",
+      "Bash(python gen2.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python -)",
+      "Bash(python genall.py)",
+      "Bash(node -e ' *)",
+      "Bash(python -c \"import psycopg2; print\\('psycopg2 ok'\\)\")",
+      "Bash(python -c \"import psycopg; print\\('psycopg3 ok'\\)\")",
+      "Bash(node -e \"try{require.resolve\\('pg'\\);console.log\\('pg module ok'\\)}catch\\(e\\){console.log\\('pg module MISSING'\\)}\")",
+      "Bash(node insert-questions.js)",
+      "Bash(node insert-plans.js)",
+      "Bash(node insert-benefits.js)",
+      "Bash(node insert-offer.js)",
+      "Bash(find /c/Users/shiva/source/repos -maxdepth 2 -type d -iname \"*quizpe*\" 2>/dev/null; echo \"=== git dirs named serverpe-quizpe ===\"; find /c/Users/shiva -maxdepth 4 -type d -iname \"serverpe-quizpe-back-end\" 2>/dev/null | head; echo \"=== Downloads? ===\"; ls -d /c/Users/shiva/Downloads/*quizpe* 2>/dev/null)",
+      "Read(//c/Users/shiva/**)",
+      "Read(//c/Users/shiva/Downloads/**)",
+      "Bash(cp /c/Users/shiva/source/repos/quizpe-back-end/insert-questions.js /c/Users/shiva/source/repos/quizpe-back-end/insert-plans.js /c/Users/shiva/source/repos/quizpe-back-end/insert-benefits.js /c/Users/shiva/source/repos/quizpe-back-end/insert-offer.js /c/Users/shiva/source/repos/serverpe-quizpe-back-end/)",
+      "Bash(cp /c/Users/shiva/source/repos/quizpe-back-end/quiz-cbse-grade1-maths.json /c/Users/shiva/source/repos/quizpe-back-end/quiz-cbse-grade1-maths.xlsx /c/Users/shiva/source/repos/serverpe-quizpe-back-end/)",
+      "Bash(cp /c/Users/shiva/source/repos/quizpe-back-end/package.json /c/Users/shiva/source/repos/quizpe-back-end/package-lock.json /c/Users/shiva/source/repos/serverpe-quizpe-back-end/)",
+      "Bash(cp -r /c/Users/shiva/source/repos/quizpe-back-end/whatsapp /c/Users/shiva/source/repos/serverpe-quizpe-back-end/)",
+      "Bash(cp /c/Users/shiva/AppData/Local/Temp/claude/c--Users-shiva-source-repos-quizpe-back-end/e2d235ee-4000-4b46-8fc7-1273bfabc3d7/scratchpad/genall.py /c/Users/shiva/source/repos/serverpe-quizpe-back-end/generate-quiz-bank.py)",
+      "Bash(sed -i 's#import json, random#import json, random, os#' /c/Users/shiva/source/repos/serverpe-quizpe-back-end/generate-quiz-bank.py)",
+      "Bash(sed -i 's#open\\(\"c:/Users/shiva/source/repos/quizpe-back-end/quiz-cbse-grade1-maths.json\",\"w\",encoding=\"utf-8\"\\)#open\\(os.path.join\\(os.path.dirname\\(os.path.abspath\\(__file__\\)\\),\"quiz-cbse-grade1-maths.json\"\\),\"w\",encoding=\"utf-8\"\\)#' /c/Users/shiva/source/repos/serverpe-quizpe-back-end/generate-quiz-bank.py)",
+      "Bash(command -v psql)",
+      "Bash(node \"C:/Users/shiva/AppData/Local/Temp/claude/c--Users-shiva-source-repos-serverpe-quizpe-back-end/a2e9d5ed-2b16-422c-85c9-c08f384c2da1/scratchpad/introspect.js\")",
+      "Bash(cp \"C:/Users/shiva/AppData/Local/Temp/claude/c--Users-shiva-source-repos-serverpe-quizpe-back-end/a2e9d5ed-2b16-422c-85c9-c08f384c2da1/scratchpad/introspect.js\" ./_introspect.js)",
+      "Bash(node ./_introspect.js)",
+      "Bash(rm -f ./_introspect.js)",
+      "Bash(node ./_data.js)",
+      "Bash(rm -f ./_data.js)",
+      "Bash(node ./_v.js)",
+      "Bash(rm -f ./_v.js)",
+      "Bash(node -e \"const db=require\\('./src/database'\\); db.ping\\(\\).then\\(async ok=>{console.log\\('ping ok:',ok\\); const {rows}=await db.query\\('SELECT current_database\\(\\) db, count\\(*\\)::int tables FROM information_schema.tables WHERE table_schema=\\\\$1',['public']\\); console.log\\(rows[0]\\); await db.close\\(\\);}\\).catch\\(e=>{console.error\\('FAIL',e.message\\);process.exit\\(1\\);}\\)\")",
+      "Bash(node src/database/example.js)",
+      "Bash(rm -f src/database/example.js)",
+      "Bash(git mv *)",
+      "Bash(mv src/database/index.js src/database/connectDB.js)",
+      "Bash(node -e \"const db=require\\('./src/database/connectDB'\\); db.ping\\(\\).then\\(ok=>{console.log\\('connectDB ping:',ok\\); return db.close\\(\\);}\\).catch\\(e=>{console.error\\('FAIL',e.message\\);process.exit\\(1\\);}\\)\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"
+    ]
+  }
+}
