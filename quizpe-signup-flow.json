@@ -1,0 +1,280 @@
+{
+  "version": "7.0",
+  "screens": [
+    {
+      "id": "SIGNUP",
+      "title": "Start Free Trial",
+      "terminal": true,
+      "success": true,
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "signup_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Set up your free trial"
+              },
+              {
+                "type": "TextBody",
+                "text": "Just a few details and your child's daily quiz starts tonight at 8 PM."
+              },
+              {
+                "type": "TextInput",
+                "name": "student_name",
+                "label": "Child's name",
+                "input-type": "text",
+                "required": true,
+                "helper-text": "As it should appear on the report card"
+              },
+              {
+                "type": "Dropdown",
+                "name": "board",
+                "label": "Board",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "CBSE",
+                    "title": "CBSE"
+                  },
+                  {
+                    "id": "ICSE",
+                    "title": "ICSE"
+                  },
+                  {
+                    "id": "KSEAB",
+                    "title": "KSEAB"
+                  }
+                ]
+              },
+              {
+                "type": "Dropdown",
+                "name": "medium",
+                "label": "Medium of instruction",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "ENGLISH",
+                    "title": "English"
+                  }
+                ]
+              },
+              {
+                "type": "Dropdown",
+                "name": "grade",
+                "label": "Grade",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "G1",
+                    "title": "Grade 1"
+                  },
+                  {
+                    "id": "G2",
+                    "title": "Grade 2"
+                  },
+                  {
+                    "id": "G3",
+                    "title": "Grade 3"
+                  },
+                  {
+                    "id": "G4",
+                    "title": "Grade 4"
+                  },
+                  {
+                    "id": "G5",
+                    "title": "Grade 5"
+                  }
+                ]
+              },
+              {
+                "type": "Dropdown",
+                "name": "state",
+                "label": "State / UT",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "35",
+                    "title": "Andaman and Nicobar Islands"
+                  },
+                  {
+                    "id": "37",
+                    "title": "Andhra Pradesh"
+                  },
+                  {
+                    "id": "12",
+                    "title": "Arunachal Pradesh"
+                  },
+                  {
+                    "id": "18",
+                    "title": "Assam"
+                  },
+                  {
+                    "id": "10",
+                    "title": "Bihar"
+                  },
+                  {
+                    "id": "04",
+                    "title": "Chandigarh"
+                  },
+                  {
+                    "id": "22",
+                    "title": "Chhattisgarh"
+                  },
+                  {
+                    "id": "26",
+                    "title": "Dadra and Nagar Haveli and Daman and Diu"
+                  },
+                  {
+                    "id": "07",
+                    "title": "Delhi"
+                  },
+                  {
+                    "id": "30",
+                    "title": "Goa"
+                  },
+                  {
+                    "id": "24",
+                    "title": "Gujarat"
+                  },
+                  {
+                    "id": "06",
+                    "title": "Haryana"
+                  },
+                  {
+                    "id": "02",
+                    "title": "Himachal Pradesh"
+                  },
+                  {
+                    "id": "01",
+                    "title": "Jammu and Kashmir"
+                  },
+                  {
+                    "id": "20",
+                    "title": "Jharkhand"
+                  },
+                  {
+                    "id": "29",
+                    "title": "Karnataka"
+                  },
+                  {
+                    "id": "32",
+                    "title": "Kerala"
+                  },
+                  {
+                    "id": "38",
+                    "title": "Ladakh"
+                  },
+                  {
+                    "id": "31",
+                    "title": "Lakshadweep"
+                  },
+                  {
+                    "id": "23",
+                    "title": "Madhya Pradesh"
+                  },
+                  {
+                    "id": "27",
+                    "title": "Maharashtra"
+                  },
+                  {
+                    "id": "14",
+                    "title": "Manipur"
+                  },
+                  {
+                    "id": "17",
+                    "title": "Meghalaya"
+                  },
+                  {
+                    "id": "15",
+                    "title": "Mizoram"
+                  },
+                  {
+                    "id": "13",
+                    "title": "Nagaland"
+                  },
+                  {
+                    "id": "21",
+                    "title": "Odisha"
+                  },
+                  {
+                    "id": "97",
+                    "title": "Other Territory"
+                  },
+                  {
+                    "id": "34",
+                    "title": "Puducherry"
+                  },
+                  {
+                    "id": "03",
+                    "title": "Punjab"
+                  },
+                  {
+                    "id": "08",
+                    "title": "Rajasthan"
+                  },
+                  {
+                    "id": "11",
+                    "title": "Sikkim"
+                  },
+                  {
+                    "id": "33",
+                    "title": "Tamil Nadu"
+                  },
+                  {
+                    "id": "36",
+                    "title": "Telangana"
+                  },
+                  {
+                    "id": "16",
+                    "title": "Tripura"
+                  },
+                  {
+                    "id": "09",
+                    "title": "Uttar Pradesh"
+                  },
+                  {
+                    "id": "05",
+                    "title": "Uttarakhand"
+                  },
+                  {
+                    "id": "19",
+                    "title": "West Bengal"
+                  }
+                ]
+              },
+              {
+                "type": "OptIn",
+                "name": "accept_terms",
+                "required": true,
+                "label": "I am the parent/guardian and accept the Terms",
+                "on-click-action": {
+                  "name": "open_url",
+                  "url": "https://quizpe.in/trial-terms"
+                }
+              },
+              {
+                "type": "Footer",
+                "label": "Start Free Trial",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "student_name": "${form.student_name}",
+                    "board": "${form.board}",
+                    "medium": "${form.medium}",
+                    "grade": "${form.grade}",
+                    "state": "${form.state}",
+                    "accept_terms": "${form.accept_terms}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
