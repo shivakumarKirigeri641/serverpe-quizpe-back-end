@@ -174,12 +174,24 @@ function detect({ question = '', explanation = '', correctText = '' }) {
 
 /* ---------------------------------------------------------------- visuals */
 
+/** Text width available inside the panel (keeps long words inside the box). */
+const innerW = (w) => w - 16;
+
+/** How tall this place-value visual will be — the words line can wrap. */
+function placeHeight(doc, w, n) {
+  const words = `In words: ${toWords(n)}`;
+  const expanded = digits(n).map((d, i) => Number(d) * Math.pow(10, digits(n).length - 1 - i)).filter(v => v > 0);
+  doc.font('Helvetica-Bold').fontSize(9);
+  const hExp = doc.heightOfString(`${n} = ${expanded.join(' + ')}`, { width: innerW(w) });
+  const hWords = doc.heightOfString(words, { width: innerW(w) });
+  return 42 + hExp + 2 + hWords + 8;
+}
+
 /** Place-value boxes + expanded form + number in words. */
 function drawPlace(doc, x, y, w, { n }) {
   const ds = digits(n);
   const cw = Math.min(34, Math.floor((w - 20) / Math.max(ds.length, 3)));
-  const bx = x + 6;
-  // header + boxes
+  const bx = x + 8, tw = innerW(w);
   ds.forEach((d, i) => {
     const place = ds.length - 1 - i;                    // 0 = ones
     const cx = bx + i * (cw + 4);
@@ -188,13 +200,18 @@ function drawPlace(doc, x, y, w, { n }) {
     doc.fillColor(C.muted).font('Helvetica').fontSize(6)
        .text(PLACE_LABELS[place] || '', cx - 4, y + 2, { width: cw + 8, align: 'center' });
   });
-  // expanded form
+
   const expanded = ds.map((d, i) => Number(d) * Math.pow(10, ds.length - 1 - i)).filter(v => v > 0);
-  doc.fillColor(C.brand).font('Helvetica-Bold').fontSize(9)
-     .text(`${n} = ${expanded.join(' + ')}`, bx, y + 42, { width: w - 12 });
+  doc.fillColor(C.brand).font('Helvetica-Bold').fontSize(9);
+  const expTxt = `${n} = ${expanded.join(' + ')}`;
+  doc.text(expTxt, bx, y + 42, { width: tw });
+  const afterExp = y + 42 + doc.heightOfString(expTxt, { width: tw }) + 2;
+
+  // wrap the words line inside the panel instead of running past its edge
   doc.fillColor(C.accent).font('Helvetica-Bold').fontSize(9)
-     .text(`In words: ${toWords(n)}`, bx, y + 55, { width: w - 12 });
-  return 72;
+     .text(`In words: ${toWords(n)}`, bx, afterExp, { width: tw, lineBreak: true });
+
+  return placeHeight(doc, w, n);
 }
 
 /** Column arithmetic (supports chained operands) with a carry row. */
@@ -396,7 +413,7 @@ function drawVisual(doc, x, y, w, item) {
   };
   // heights are deterministic, so we can draw the panel before the content
   const est =
-    spec.kind === 'place'    ? 72 :
+    spec.kind === 'place'    ? placeHeight(doc, w, spec.n) :
     spec.kind === 'compare'  ? 50 :
     spec.kind === 'seq'      ? 48 :
     spec.kind === 'bars'     ? 56 :

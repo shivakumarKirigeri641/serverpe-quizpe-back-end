@@ -357,7 +357,7 @@ async function generateDailyReport(trackerId) {
     // drawn "working" for the question, when we can build one
     try {
       const { drawVisual } = require('./visualExplain');
-      const vw = Math.min(300, W - 30);
+      const vw = W - 30;   // full content width, so long number-words never clip
       if (doc.y + 90 > doc.page.height - 40) { doc.addPage(); doc.y = M; }
       const used = drawVisual(doc, M + 26, doc.y + 6, vw, it);
       if (used) doc.y += used + 10;

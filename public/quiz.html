@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>QuizPe — Today's Quiz</title>
+  <style>
+    :root{--brand:#075e54;--brand2:#13b48f;--accent:#00a884;--bg:#eef3f2;--card:#fff;
+          --text:#111b21;--muted:#667781;--border:#d7dedd;}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--text);min-height:100vh;}
+    .head{background:var(--brand);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;}
+    .head img{width:34px;height:34px;border-radius:8px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:15px;}.head p{margin:1px 0 0;font-size:11px;opacity:.85;}
+    .bar{height:6px;background:#0a4b44;overflow:hidden;}
+    .bar > i{display:block;height:100%;width:0;
+             background:linear-gradient(90deg,var(--brand2),#5fe3c0,var(--brand2));
+             background-size:200% 100%;
+             transition:width .7s cubic-bezier(.22,.9,.28,1);
+             animation:shimmer 2.6s linear infinite;}
+    @keyframes shimmer{to{background-position:-200% 0;}}
+
+    /* one question slides out, the next slides in — direction follows Next/Prev */
+    @keyframes inFwd {from{opacity:0;transform:translateX(34px) scale(.985);} to{opacity:1;transform:none;}}
+    @keyframes inBack{from{opacity:0;transform:translateX(-34px) scale(.985);} to{opacity:1;transform:none;}}
+    @keyframes rise  {from{opacity:0;transform:translateY(14px);} to{opacity:1;transform:none;}}
+    @keyframes pulse {0%{transform:scale(1);} 45%{transform:scale(1.035);} 100%{transform:scale(1);}}
+    @keyframes pop   {0%{transform:scale(.4);opacity:0;} 60%{transform:scale(1.15);} 100%{transform:scale(1);opacity:1;}}
+    .qcard.fwd {animation:inFwd .55s cubic-bezier(.22,.9,.28,1) both;}
+    .qcard.back{animation:inBack .55s cubic-bezier(.22,.9,.28,1) both;}
+    /* each option drifts up a beat after the one above it */
+    .qcard.fwd .opt,.qcard.back .opt{animation:rise .5s cubic-bezier(.22,.9,.28,1) both;}
+    .opt:nth-child(1){animation-delay:.10s;} .opt:nth-child(2){animation-delay:.19s;}
+    .opt:nth-child(3){animation-delay:.28s;} .opt:nth-child(4){animation-delay:.37s;}
+    .opt.justPicked{animation:pulse .34s ease-out;}
+    .opt.sel .k{animation:pop .34s cubic-bezier(.34,1.56,.64,1);}
+    @media (prefers-reduced-motion: reduce){
+      *,*::before,*::after{animation:none !important;transition-duration:.01ms !important;}
+    }
+    .wrap{max-width:560px;margin:0 auto;padding:16px 14px 34px;}
+    .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:8px;}
+    .meta b{color:var(--brand);}
+    .qcard{background:var(--card);border-radius:16px;padding:20px 18px;box-shadow:0 3px 14px rgba(0,0,0,.07);}
+    .chapter{font-size:11px;color:var(--muted);margin-bottom:8px;}
+    .qtext{font-size:19px;font-weight:700;line-height:1.4;margin:0 0 16px;}
+    .opts{display:grid;gap:10px;}
+    .opt{display:flex;align-items:center;gap:12px;width:100%;text-align:left;
+         background:#fff;border:2px solid var(--border);border-radius:12px;padding:14px 14px;
+         font-size:16px;line-height:1.35;cursor:pointer;transition:transform .06s,border-color .15s,background .15s;}
+    .opt:active{transform:scale(.99);}
+    .opt .k{flex:none;width:28px;height:28px;border-radius:50%;background:#eef3f2;color:var(--brand);
+            font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;}
+    .opt.sel{border-color:var(--accent);background:#e9f8f4;}
+    .opt.sel .k{background:var(--accent);color:#fff;}
+    .opt[disabled]{opacity:.75;cursor:default;}
+    .nav{display:flex;gap:10px;margin-top:18px;}
+    .btn{flex:1;padding:14px;border:0;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;}
+    .btn.prev{flex:0 0 40%;background:#fff;border:2px solid var(--border);color:var(--muted);}
+    .btn.next{background:var(--accent);color:#fff;}
+    .btn.next[disabled]{background:#b8ccc6;cursor:not-allowed;}
+    .btn.prev[disabled]{opacity:.4;cursor:not-allowed;}
+    .btn.submit{background:var(--brand);}
+    .foot{text-align:center;font-size:11px;color:var(--muted);margin-top:16px;}
+    .dots{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;margin-top:14px;}
+    .dots i{width:8px;height:8px;border-radius:50%;background:#cfdad7;
+            transition:background .35s ease,transform .35s cubic-bezier(.34,1.56,.64,1);}
+    .dots i.on{background:var(--accent);}
+    .dots i.here{background:var(--brand);transform:scale(1.35);}
+    .done{display:none;text-align:center;padding:44px 20px;}
+    .done .big{font-size:44px;animation:cheer 1.1s cubic-bezier(.34,1.56,.64,1) both;}
+    .done h2{margin:10px 0 4px;color:var(--brand);animation:rise .5s .18s both;}
+    .done .score{font-size:34px;font-weight:800;color:var(--accent);margin:8px 0;
+                 animation:pop .6s .38s cubic-bezier(.34,1.56,.64,1) both;}
+    .done p{color:var(--muted);font-size:14px;margin:6px 0;animation:rise .5s .55s both;}
+    @keyframes cheer{0%{transform:scale(0) rotate(-25deg);opacity:0;}
+                     55%{transform:scale(1.25) rotate(8deg);opacity:1;}
+                     100%{transform:scale(1) rotate(0);}}
+    .wa{display:inline-block;margin-top:18px;padding:13px 26px;border-radius:24px;background:var(--accent);
+        color:#fff;font-weight:700;text-decoration:none;font-size:15px;
+        animation:rise .5s .7s both, breathe 2.4s 1.2s ease-in-out infinite;}
+    @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(0,168,132,.45);} 50%{box-shadow:0 0 0 12px rgba(0,168,132,0);}}
+    .msg{text-align:center;padding:40px 18px;color:var(--muted);}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1 id="title">Today's Quiz</h1><p id="sub">Loading…</p></div>
+  </div>
+  <div class="bar"><i id="bar"></i></div>
+
+  <div class="wrap">
+    <div id="stage" style="display:none">
+      <div class="meta"><span id="qnum"></span><span id="left"></span></div>
+      <div class="qcard" id="card">
+        <div class="chapter" id="chapter"></div>
+        <p class="qtext" id="qtext"></p>
+        <div class="opts" id="opts"></div>
+        <div class="nav">
+          <button class="btn prev" id="prev">&laquo; Previous</button>
+          <button class="btn next" id="next" disabled>Next &raquo;</button>
+        </div>
+      </div>
+      <div class="dots" id="dots"></div>
+      <div class="foot" id="hint">Pick an answer, then tap Next. You can go back and change it.</div>
+    </div>
+
+    <div class="done" id="done">
+      <div class="big">🎉</div>
+      <h2>Quiz complete!</h2>
+      <div class="score" id="score"></div>
+      <p id="doneMsg">Your report is on its way to WhatsApp.</p>
+      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <p id="redir" style="font-size:12px;"></p>
+    </div>
+
+    <div class="msg" id="msg" style="display:none"></div>
+  </div>
+
+<script>
+  const token = new URLSearchParams(location.search).get('token');
+  const $ = (id) => document.getElementById(id);
+  let busy = false, waUrl = null;
+  let serial = 1, total = 0, picked = null, answered = new Set();
+
+  const show = (what) => {
+    $('stage').style.display = what === 'q' ? 'block' : 'none';
+    $('done').style.display  = what === 'done' ? 'block' : 'none';
+    $('msg').style.display   = what === 'msg' ? 'block' : 'none';
+  };
+  const fail = (t) => { $('msg').textContent = t; show('msg'); $('sub').textContent = ''; };
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function render(d, dir = 'fwd') {
+    const p = d.progress || { done: 0, total: 0 };
+    total = p.total;
+    const q = d.question;
+    if (!q) return fail('This quiz is no longer available.');
+
+    serial = q.serial;
+    picked = q.selected || null;                 // pre-select on "<< Previous"
+    if (q.selected) answered.add(serial);
+
+    $('bar').style.width = total ? `${Math.round(p.done * 100 / total)}%` : '0%';
+    $('qnum').innerHTML = `Question <b>${serial}</b> of <b>${total}</b>`;
+    $('left').textContent = `${total - p.done} left`;
+    $('chapter').textContent = q.chapter || '';
+    $('qtext').textContent = q.text;
+    $('opts').innerHTML = q.options.map(o =>
+      `<button class="opt${o.letter === picked ? ' sel' : ''}" data-k="${o.letter}">
+         <span class="k">${o.letter}</span><span>${escapeHtml(o.text)}</span></button>`).join('');
+    [...document.querySelectorAll('.opt')].forEach(b => b.onclick = () => pick(b));
+
+    $('dots').innerHTML = Array.from({ length: total }, (_, i) => {
+      const n = i + 1;
+      return `<i class="${n === serial ? 'here' : (answered.has(n) ? 'on' : '')}"></i>`;
+    }).join('');
+
+    const last = serial === total;
+    $('next').className = 'btn next' + (last ? ' submit' : '');
+    $('next').innerHTML = last ? 'Submit quiz &check;' : 'Next &raquo;';
+    $('next').disabled = !picked;
+    $('prev').disabled = serial <= 1;
+    $('hint').textContent = last
+      ? 'This is the last question — check your answers before submitting.'
+      : 'Pick an answer, then tap Next. You can go back and change it.';
+    show('q');
+
+    // restart the entrance animation for the incoming question
+    const card = $('card');
+    card.classList.remove('fwd', 'back');
+    void card.offsetWidth;                 // reflow, or the class swap won't replay it
+    card.classList.add(dir);
+  }
+
+  function pick(btn) {
+    picked = btn.dataset.k;
+    [...document.querySelectorAll('.opt')].forEach(b => {
+      b.classList.toggle('sel', b === btn);
+      b.classList.remove('justPicked');
+    });
+    void btn.offsetWidth;
+    btn.classList.add('justPicked');
+    $('next').disabled = false;
+  }
+
+  /** Save whatever is picked here, then move to `goto`. */
+  async function go(target) {
+    if (busy) return false; busy = true;
+    $('next').disabled = true; $('prev').disabled = true;
+    try {
+      const res = await fetch('/quiz/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, serial, answer: picked, goto: target }) });
+      const r = await res.json();
+      busy = false;
+      if (!r.success) { fail(r.error || 'Something went wrong.'); return false; }
+      if (picked) answered.add(serial);
+      render(r, target < serial ? 'back' : 'fwd');
+      return true;
+    } catch {
+      busy = false;
+      fail('Network problem — please check your connection and try again.');
+      return false;
+    }
+  }
+
+  $('prev').onclick = () => go(serial - 1);
+  $('next').onclick = () => {
+    if (!picked) return;
+    if (serial < total) return go(serial + 1);
+
+    // the answer on THIS question hasn't been saved yet, so count it as done —
+    // otherwise the last question reports itself as unanswered
+    const missing = [...Array(total).keys()].map(i => i + 1)
+      .find(n => n !== serial && !answered.has(n));
+    if (missing) {
+      if (confirm(`Question ${missing} is still unanswered. Go there now?`)) return go(missing);
+      return;
+    }
+    if (!confirm('Submit your quiz? You cannot change your answers after this.')) return;
+    // only submit once the last answer is safely saved
+    go(serial).then(ok => { if (ok) finish(); });
+  };
+
+  async function finish() {
+    $('sub').textContent = 'Submitting…';
+    show('msg'); $('msg').textContent = 'Submitting your answers…';
+    try {
+      const r = await (await fetch('/quiz/api/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }) })).json();
+      if (!r.success) return fail(r.error || 'Could not submit the quiz.');
+      if (r.score) $('score').textContent = `${r.score.correct}/${r.score.total}  (${r.score.pct}%)`;
+      waUrl = r.whatsapp_url;
+      $('bar').style.width = '100%';
+      $('sub').textContent = 'Done';
+      show('done');
+      if (waUrl) {
+        $('waBtn').href = waUrl;
+        let n = 3;
+        const t = setInterval(() => {
+          n--; $('redir').textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+          if (n <= 0) { clearInterval(t); location.href = waUrl; }
+        }, 1000);
+      } else { $('waBtn').style.display = 'none'; }
+    } catch { fail('Could not finish the quiz.'); }
+  }
+
+  (async () => {
+    if (!token) return fail('Invalid link.');
+    try {
+      const d = await (await fetch(`/quiz/api/context?token=${encodeURIComponent(token)}`)).json();
+      // a submitted or expired link is dead — say so, don't reopen the quiz
+      if (!d.success) return fail(d.error || 'This quiz link is no longer valid.');
+      (d.answered || []).forEach(n => answered.add(n));   // resume: keep the dots accurate
+      $('title').textContent = `${d.student}'s ${d.isTest ? 'Test' : 'Quiz'}`;
+      $('sub').textContent = d.subject;
+      render(d);
+    } catch { fail('Could not load the quiz.'); }
+  })();
+</script>
+</body>
+</html>

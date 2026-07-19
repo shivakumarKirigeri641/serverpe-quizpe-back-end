@@ -14,6 +14,7 @@ const whatsappRouter = require('./routers/whatsappRouter');
 const trialRouter = require('./routers/trialRouter');
 const reportsRouter = require('./routers/reportsRouter');
 const paymentRouter = require('./routers/paymentRouter');
+const quizWebRouter = require('./routers/quizWebRouter');
 
 const app = express();
 
@@ -41,6 +42,9 @@ app.use('/reports', reportsRouter);
 
 // Razorpay checkout for paid plans (backs public/pay.html).
 app.use('/pay', paymentRouter);
+
+// Web quiz — full option text, instant next question (backs public/quiz.html).
+app.use('/quiz', quizWebRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
