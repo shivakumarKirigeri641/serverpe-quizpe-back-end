@@ -19,6 +19,10 @@ const db = require('../database/connectDB');
 
 const DIR = path.join(__dirname, '..', 'uploads', 'invoices');
 const BUSINESS_STATE = '29';   // Karnataka — home state for intra/inter GST
+// ServerPe is an IT/software platform, so the supply is an IT service, not
+// coaching. 998314 = Information Technology (IT) design & development services.
+// (Alternative for pure SaaS licensing: 997331. Set QUIZPE_SAC_CODE to override.)
+const SAC_CODE = process.env.QUIZPE_SAC_CODE || '998314';
 
 const C = { brand: '#075e54', accent: '#00a884', ink: '#111b21', muted: '#667781', line: '#e2e6e9', soft: '#f6f8f9', white: '#fff' };
 const money = (n) => `Rs. ${Number(n).toFixed(2)}`;
@@ -178,12 +182,34 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db) {
 
   const base_url = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
   const accessToken = crypto.randomBytes(18).toString('hex');
-  await exec.query(
+  const invoiceDbId = (await exec.query(
     `INSERT INTO invoices (subscription_id, payment_id, invoice_id, invoice_path, access_token,
                            amount_base, gst_pct, cgst, sgst, igst, total)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
     [subscriptionId, paymentDbId, invoiceNo, `invoices/${fileName}`, accessToken,
-     base, gstPct, cgst, sgst, igst, gross]);
+     base, gstPct, cgst, sgst, igst, gross])).rows[0].id;
+
+  // ---- GSTR-1 monthly filing record (B2CS — sale to an unregistered parent) ----
+  const invDate = new Date();
+  const filingPeriod = `${invDate.getFullYear()}-${String(invDate.getMonth() + 1).padStart(2, '0')}`;
+  const posCode = head.state_code || BUSINESS_STATE;
+  const placeOfSupply = `${posCode}-${head.state_name || 'Karnataka'}`;
+  await exec.query(
+    `INSERT INTO gstr1_filing
+       (invoice_id, payment_id, invoice_number, invoice_date, filing_period,
+        seller_gstin, seller_state_code, customer_name, customer_mobile, customer_state_code,
+        place_of_supply, supply_type, gstr1_table, sac_code, description,
+        taxable_value, gst_rate, cgst_rate, cgst_amount, sgst_rate, sgst_amount,
+        igst_rate, igst_amount, invoice_value, payment_reference)
+     VALUES ($1,$2,$3,CURRENT_DATE,$4,$5,$6,$7,$8,$9,$10,$11,'B2CS',$12,$13,
+             $14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+     ON CONFLICT (invoice_id) DO NOTHING`,
+    [invoiceDbId, paymentDbId, invoiceNo, filingPeriod,
+     biz.gstin || '', biz.gst_state_code || BUSINESS_STATE,
+     head.parent_name || 'Customer', head.parent_mobile_number, posCode,
+     placeOfSupply, intra ? 'INTRA' : 'INTER', SAC_CODE, `${head.plan_name} (${head.duration} days)`,
+     base, gstPct, intra ? gstPct / 2 : 0, cgst, intra ? gstPct / 2 : 0, sgst,
+     intra ? 0 : gstPct, igst, gross, head.rzp_payment_id || null]);
 
   return {
     filePath, fileName, invoiceNo,
