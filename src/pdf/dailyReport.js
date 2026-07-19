@@ -87,7 +87,25 @@ async function fetchReportData(trackerId) {
             proprietor_name, gstin, pan, address, support_email, product_website, company_website
        FROM business_details WHERE is_active LIMIT 1`)).rows[0] || {};
 
-  return { head, items, chapters, biz };
+  // adaptive learning progress + speed/streak for this child+subject
+  let progress = null, speed = null, streak = 0;
+  try {
+    const M = require('../whatsapp/mastery');
+    const t = (await db.query(`SELECT student_id, subject_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+    if (t) {
+      progress = await M.progressSummary(t.student_id, t.subject_id);
+      streak = await M.currentStreak(t.student_id);
+      speed = (await db.query(
+        `SELECT ROUND(AVG(response_seconds))::int avg_s, MIN(response_seconds)::int fast_s,
+                (SELECT MIN(h2.response_seconds)::int FROM student_quizpe_histories h2
+                   JOIN quizpe_tracker t2 ON t2.id=h2.tracker_id
+                  WHERE t2.student_id=$2 AND h2.response_seconds IS NOT NULL AND h2.is_correct) best_s
+           FROM student_quizpe_histories WHERE tracker_id=$1 AND response_seconds IS NOT NULL`,
+        [trackerId, t.student_id])).rows[0];
+    }
+  } catch (e) { /* optional enrichment */ }
+
+  return { head, items, chapters, biz, progress, speed, streak };
 }
 
 /* ------------------------------------------------------------ draw helpers */
@@ -106,10 +124,26 @@ function kv(doc, k, v, x, y, w) {
      .text(v ?? '—', x, y, { width: w, align: 'right' });
 }
 
+/* ---- vector icons (PDF fonts can't render emoji, so we draw them) ---- */
+function iconCheck(doc, x, y, s, color = '#fff') {
+  doc.save().lineWidth(s * 0.16).strokeColor(color).lineCap('round').lineJoin('round')
+     .moveTo(x + s * 0.22, y + s * 0.55).lineTo(x + s * 0.42, y + s * 0.72)
+     .lineTo(x + s * 0.78, y + s * 0.28).stroke().restore();
+}
+function iconCross(doc, x, y, s, color = '#fff') {
+  doc.save().lineWidth(s * 0.16).strokeColor(color).lineCap('round')
+     .moveTo(x + s * 0.28, y + s * 0.28).lineTo(x + s * 0.72, y + s * 0.72)
+     .moveTo(x + s * 0.72, y + s * 0.28).lineTo(x + s * 0.28, y + s * 0.72).stroke().restore();
+}
+function iconDash(doc, x, y, s, color = '#fff') {
+  doc.save().lineWidth(s * 0.16).strokeColor(color).lineCap('round')
+     .moveTo(x + s * 0.28, y + s * 0.5).lineTo(x + s * 0.72, y + s * 0.5).stroke().restore();
+}
+
 /* ---------------------------------------------------------------- generate */
 
 async function generateDailyReport(trackerId) {
-  const { head, items, chapters, biz } = await fetchReportData(trackerId);
+  const { head, items, chapters, biz, progress, speed, streak } = await fetchReportData(trackerId);
   if (!head || !items.length) throw new Error(`no report data for tracker ${trackerId}`);
 
   const total = items.length;
@@ -190,12 +224,12 @@ async function generateDailyReport(trackerId) {
   const isTest = head.quiz_type === 'test';
   doc.fillColor(C.muted).font('Helvetica').fontSize(9);
   const metaBits = [
-    `📅 ${fmtDate(head.quiz_date)}`,
-    `📝 ${isTest ? 'TEST' : 'Daily quiz'}`,
-    `❓ ${total} questions`,
-    mins ? `⏱ ${mins} min` : null,
-    head.plan_name ? `💳 ${head.plan_name}` : null,
-  ].filter(Boolean).join('        ');
+    fmtDate(head.quiz_date),
+    isTest ? 'TEST' : 'Daily quiz',
+    `${total} questions`,
+    mins ? `${mins} min` : null,
+    head.plan_name ? head.plan_name : null,
+  ].filter(Boolean).join('     |     ');
   doc.text(metaBits, M + 12, y + 10, { width: W - 24 });
   y += 44;
 
@@ -226,7 +260,47 @@ async function generateDailyReport(trackerId) {
   });
   y += ph + 14;
 
+  /* ---------- speed & consistency ---------- */
+  if ((speed && speed.avg_s != null) || streak > 0) {
+    label(doc, 'Speed & consistency', M, y, C.brand, 10); y += 16;
+    const sw = (W - 24) / 3, sh = 52;
+    const isPB = speed?.fast_s != null && speed?.best_s != null && speed.fast_s <= speed.best_s;
+    const tiles = [
+      { t: 'Avg time / question', v: speed?.avg_s != null ? `${speed.avg_s}s` : '—', s: 'this quiz', c: C.ink },
+      { t: 'Fastest answer', v: speed?.fast_s != null ? `${speed.fast_s}s` : '—', s: isPB ? 'NEW PERSONAL BEST' : (speed?.best_s != null ? `best ever ${speed.best_s}s` : ''), c: isPB ? C.ok : C.accent },
+      { t: 'Daily streak', v: streak > 0 ? `${streak}` : '0', s: streak === 1 ? 'day' : 'days in a row', c: streak >= 3 ? C.warn : C.ink },
+    ];
+    tiles.forEach((tl, i) => {
+      const tx = M + i * (sw + 12);
+      card(doc, tx, y, sw, sh, { fill: C.soft, stroke: C.soft });
+      label(doc, tl.t, tx + 10, y + 8, C.muted, 7);
+      doc.fillColor(tl.c).font('Helvetica-Bold').fontSize(18).text(tl.v, tx + 10, y + 20, { width: sw - 20 });
+      if (tl.s) doc.fillColor(tl.s === 'NEW PERSONAL BEST' ? C.ok : C.faint).font(tl.s === 'NEW PERSONAL BEST' ? 'Helvetica-Bold' : 'Helvetica')
+                   .fontSize(7).text(tl.s, tx + 10, y + 40, { width: sw - 20 });
+    });
+    y += sh + 14;
+  }
+
+  /* ---------- adaptive learning progress ---------- */
+  if (progress && progress.total) {
+    label(doc, 'Learning progress', M, y, C.brand, 10); y += 16;
+    card(doc, M, y, W, 44, { fill: C.accentSoft, stroke: C.accentSoft });
+    const done = progress.status === 'completed';
+    doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(10)
+       .text(done ? 'Syllabus completed — now revising all chapters'
+                  : `Currently learning: ${progress.frontier_chapter}`, M + 12, y + 9, { width: W - 24 });
+    // progress bar over chapters
+    const barY = y + 26, barW = W - 24;
+    const frac = done ? 1 : progress.mastered / progress.total;
+    doc.roundedRect(M + 12, barY, barW, 8, 4).fill('#d4ede6');
+    if (frac > 0) doc.roundedRect(M + 12, barY, barW * frac, 8, 4).fill(C.accent);
+    doc.fillColor(C.brand).font('Helvetica').fontSize(8)
+       .text(`${progress.mastered} of ${progress.total} chapters mastered  ·  ${done ? 100 : Math.round(frac * 100)}%`, M + 12, barY + 11);
+    y += 58;
+  }
+
   /* ---------- chapter analytics ---------- */
+  if (y > doc.page.height - 130) { doc.addPage(); y = M; }
   label(doc, 'Chapter-wise analytics', M, y, C.brand, 10); y += 16;
   chapters.forEach(ch => {
     const chPct = Math.round((ch.correct * 100) / ch.asked);
@@ -243,9 +317,10 @@ async function generateDailyReport(trackerId) {
   if (strongest && weakest) {
     y += 4;
     card(doc, M, y, W, 30, { fill: C.accentSoft, stroke: C.accentSoft });
-    doc.font('Helvetica').fontSize(9).fillColor(C.brand);
-    doc.text(`💪 Strongest: ${strongest.chapter} (${Math.round(strongest.correct * 100 / strongest.asked)}%)`, M + 12, y + 10, { width: W / 2 - 12 });
-    doc.text(`🎯 Focus on: ${weakest.chapter} (${Math.round(weakest.correct * 100 / weakest.asked)}%)`, M + W / 2, y + 10, { width: W / 2 - 12 });
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.ok).text('Strongest: ', M + 12, y + 10, { continued: true })
+       .font('Helvetica').fillColor(C.brand).text(`${strongest.chapter} (${Math.round(strongest.correct * 100 / strongest.asked)}%)`);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.bad).text('Focus on: ', M + W / 2, y + 10, { continued: true })
+       .font('Helvetica').fillColor(C.brand).text(`${weakest.chapter} (${Math.round(weakest.correct * 100 / weakest.asked)}%)`);
     y += 42;
   }
 
@@ -259,10 +334,11 @@ async function generateDailyReport(trackerId) {
     if (doc.y > doc.page.height - 96) { doc.addPage(); doc.y = M; }
     const top = doc.y;
     const badge = it.is_correct ? C.ok : (it.answered_option ? C.bad : C.faint);
-    const mark = it.is_correct ? '✓' : (it.answered_option ? '✗' : '—');
 
     doc.roundedRect(M, top, 18, 18, 4).fill(badge);
-    doc.fillColor(C.white).font('Helvetica-Bold').fontSize(10).text(mark, M, top + 4, { width: 18, align: 'center' });
+    if (it.is_correct) iconCheck(doc, M, top, 18);
+    else if (it.answered_option) iconCross(doc, M, top, 18);
+    else iconDash(doc, M, top, 18);
 
     doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9.5)
        .text(`Q${it.serial_number}. `, M + 26, top + 2, { continued: true })
@@ -275,9 +351,17 @@ async function generateDailyReport(trackerId) {
          .text(`Correct: ${it.answer}) ${optText(it, it.answer) ?? ''}`, M + 26, doc.y + 1);
     }
     if (it.explanation) {
-      doc.fillColor(C.faint).font('Helvetica-Oblique').fontSize(8.5)
-         .text(`💡 ${it.explanation}`, M + 26, doc.y + 1, { width: W - 40 });
+      doc.fillColor(C.warn).font('Helvetica-Bold').fontSize(8.5).text('Why: ', M + 26, doc.y + 1, { continued: true })
+         .fillColor(C.faint).font('Helvetica-Oblique').text(it.explanation, { width: W - 40 });
     }
+    // drawn "working" for the question, when we can build one
+    try {
+      const { drawVisual } = require('./visualExplain');
+      const vw = Math.min(300, W - 30);
+      if (doc.y + 90 > doc.page.height - 40) { doc.addPage(); doc.y = M; }
+      const used = drawVisual(doc, M + 26, doc.y + 6, vw, it);
+      if (used) doc.y += used + 10;
+    } catch (e) { /* visual is a bonus, never break the report */ }
     doc.moveTo(M, doc.y + 6).lineTo(M + W, doc.y + 6).strokeColor(C.line).lineWidth(0.5).stroke();
     doc.y += 12;
   });
