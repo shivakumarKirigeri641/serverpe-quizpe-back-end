@@ -46,6 +46,9 @@ app.use('/pay', paymentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
 
+// Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
+require('./jobs/scheduler').startScheduler();
+
 const PORT = process.env.PORT || 5008;
 app.listen(PORT, () => {
   console.log(`✅quizpe-back-end listening on http://localhost:${PORT}`);

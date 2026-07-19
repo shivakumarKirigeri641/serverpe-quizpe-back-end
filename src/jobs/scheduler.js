@@ -1,0 +1,141 @@
+/**
+ * src/jobs/scheduler.js
+ * ---------------------------------------------------------------------------
+ * Daily WhatsApp jobs, checked every minute (IST):
+ *
+ *   reminder_time (default 19:00)  -> qp_quizstart_daily_v1  "quiz is at 8 PM"
+ *   quiz_time     (default 20:00)  -> qp_quizstart_daily_v2  [▶️ Start Quiz now]
+ *
+ * Anti-annoyance rules:
+ *   • max ONE of each kind per student per day (UNIQUE in notification_log)
+ *   • never remind a student who already finished today's quiz
+ *   • parents who replied STOP (reminders_enabled=false) get no reminders
+ *   • a template that is not APPROVED in Meta is skipped, never sent
+ * ---------------------------------------------------------------------------
+ */
+
+const cron = require('node-cron');
+const db = require('../database/connectDB');
+const wa = require('../whatsapp/client');
+
+const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
+const BASE_SUBJECT = 'MATHS';
+
+/** 'HH:MM' right now in the configured timezone. */
+function nowHHMM() {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date());
+}
+
+/** Only send templates Meta has actually approved. */
+async function approvedTemplate(name) {
+  const { rows } = await db.query(
+    `SELECT template_name, approval_status FROM whatsapp_templates
+      WHERE template_name=$1 AND is_active`, [name]);
+  if (!rows[0]) return null;
+  return rows[0].approval_status === 'APPROVED' ? rows[0] : null;
+}
+
+/**
+ * Everyone due at this HH:MM for a given job.
+ * `kind` = 'reminder' (reminder_time) or 'quiz_trigger' (quiz_time).
+ */
+async function dueNow(kind, hhmm) {
+  const timeCol = kind === 'reminder' ? 'reminder_time' : 'quiz_time';
+  const { rows } = await db.query(
+    `SELECT st.id  AS student_id, st.student_name,
+            p.id   AS parent_id, p.parent_name, p.parent_mobile_number,
+            sub.subject_name,
+            s.quiz_time,
+            (CURRENT_DATE - s.plan_start_date) + 1 AS day_number,
+            w.id AS session_id
+       FROM parents_quizpe_subscriptions s
+       JOIN parents  p  ON p.id = s.parent_id AND p.is_active
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       JOIN subjects sub ON sub.subject_code = $3
+       LEFT JOIN LATERAL (SELECT id FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+        AND to_char(s.${timeCol}, 'HH24:MI') = $1
+        -- reminders respect the STOP opt-out; the quiz trigger always goes
+        AND ($2 <> 'reminder' OR p.reminders_enabled)
+        -- one per student per kind per day
+        AND NOT EXISTS (SELECT 1 FROM notification_log n
+                         WHERE n.student_id = st.id AND n.kind = $2 AND n.send_date = CURRENT_DATE)
+        -- never chase someone who already finished today
+        AND NOT EXISTS (
+              SELECT 1 FROM quizpe_tracker t
+                JOIN quizpe_status qs ON qs.id = t.status_id
+               WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                 AND qs.status_code IN ('completed','closed'))`,
+    [hhmm, kind, BASE_SUBJECT]);
+  return rows;
+}
+
+async function logSend(row, kind, templateName, waId, error) {
+  await db.query(
+    `INSERT INTO notification_log (parent_id, student_id, mobile_number, kind, template_name,
+                                   wa_message_id, status, error_message)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (student_id, kind, send_date) DO NOTHING`,
+    [row.parent_id, row.student_id, row.parent_mobile_number, kind, templateName,
+     waId || null, error ? 'failed' : 'sent', error || null]);
+}
+
+const fmtTime = (t) => {
+  const [h, m] = String(t).split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+};
+
+/** Send one job's batch, gently paced so we stay under Meta's rate limits. */
+async function runJob(kind, templateName) {
+  const tpl = await approvedTemplate(templateName);
+  if (!tpl) return;                                  // not approved yet -> skip silently
+
+  const hhmm = nowHHMM();
+  const due = await dueNow(kind, hhmm);
+  if (!due.length) return;
+
+  console.log(`[scheduler] ${kind} @${hhmm}: ${due.length} to send (${templateName})`);
+  for (const row of due) {
+    try {
+      // v1/v2 body params: parent, student, day, subject, start time
+      const params = [
+        row.parent_name || 'there',
+        row.student_name,
+        String(row.day_number),
+        row.subject_name,
+        fmtTime(row.quiz_time),
+      ];
+      const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, templateName, params);
+      await logSend(row, kind, templateName, id, null);
+    } catch (e) {
+      console.error(`[scheduler] ${kind} failed for ${row.parent_mobile_number}: ${e.message}`);
+      await logSend(row, kind, templateName, null, e.message);
+    }
+    await new Promise(r => setTimeout(r, 250));      // ~4 msg/sec
+  }
+}
+
+let started = false;
+function startScheduler() {
+  if (started || process.env.SCHEDULER_ENABLED === '0') return;
+  started = true;
+
+  // every minute — the per-student/day UNIQUE makes re-runs harmless
+  cron.schedule('* * * * *', async () => {
+    try {
+      await runJob('reminder', 'qp_quizstart_daily_v1');
+      await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
+    } catch (e) {
+      console.error('[scheduler] tick failed:', e.message);
+    }
+  }, { timezone: TZ });
+
+  console.log(`[scheduler] started (${TZ}) — reminder=v1, quiz trigger=v2 (skipped until APPROVED)`);
+}
+
+module.exports = { startScheduler, runJob, dueNow, nowHHMM };

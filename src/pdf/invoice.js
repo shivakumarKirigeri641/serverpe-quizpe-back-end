@@ -25,6 +25,11 @@ const BUSINESS_STATE = '29';   // Karnataka — home state for intra/inter GST
 const SAC_CODE = process.env.QUIZPE_SAC_CODE || '998314';
 
 const C = { brand: '#075e54', accent: '#00a884', ink: '#111b21', muted: '#667781', line: '#e2e6e9', soft: '#f6f8f9', white: '#fff' };
+const SUBJECT_LABEL = {
+  SCIENCE: 'Science', ENGLISH: 'English', HINDI: 'Hindi', SOCIAL: 'Social Science',
+  EVS: 'Environmental Studies', KANNADA: 'Kannada', SANSKRIT: 'Sanskrit',
+  COMPUTER: 'Computer Science', GENERAL_KNOWLEDGE: 'General Knowledge',
+};
 const money = (n) => `Rs. ${Number(n).toFixed(2)}`;
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -36,7 +41,7 @@ async function nextInvoiceNumber(exec = db) {
   return `${ymd}${String(rows[0].n + 1).padStart(4, '0')}`;
 }
 
-async function generateInvoice(subscriptionId, paymentDbId = null, exec = db) {
+async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, cart = null) {
   const head = (await exec.query(
     `SELECT s.id AS subscription_id, s.plan_start_date, s.plan_end_date,
             pl.plan_code, pl.plan_name, pl.price, pl.student_count, pl.duration,
@@ -58,8 +63,22 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db) {
   const gstRow = (await exec.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
   const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
 
-  // price is GST-inclusive
-  const gross = Number(head.price);
+  // Line items: base plan (Maths) + any subject add-ons chosen in the cart.
+  // All prices are GST-inclusive; taxable value is derived per line.
+  const taxableOf = (g) => +(g * 100 / (100 + gstPct)).toFixed(2);
+  const lineItems = [{ desc: `${head.plan_name} — Mathematics (${head.duration} days)`, plan: head.plan_code, qty: head.student_count, gross: Number(head.price) }];
+  if (cart && Array.isArray(cart.students)) {
+    const addonAgg = {};   // subject_code -> { count, price }
+    cart.students.forEach(st => (st.addons || []).forEach(a => {
+      addonAgg[a.subject_code] ||= { count: 0, price: Number(a.price) };
+      addonAgg[a.subject_code].count += 1;
+    }));
+    for (const [code, v] of Object.entries(addonAgg)) {
+      lineItems.push({ desc: `${SUBJECT_LABEL[code] || code} — add-on`, plan: 'ADDON', qty: v.count, gross: +(v.price * v.count).toFixed(2) });
+    }
+  }
+
+  const gross = cart ? Number(cart.total) : Number(head.price);
   const base = +(gross * 100 / (100 + gstPct)).toFixed(2);
   const gstAmt = +(gross - base).toFixed(2);
   const intra = (head.state_code || BUSINESS_STATE) === BUSINESS_STATE;
@@ -126,17 +145,21 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db) {
   cols.forEach(c => { doc.text(c.t.toUpperCase(), cx + 6, y + 7, { width: c.w - 12, align: c.a }); cx += c.w; });
   y += 22;
 
-  const desc = `${head.plan_name} — daily quizzes for ${head.duration} days\n` +
-               `${head.student_count} child${head.student_count > 1 ? 'ren' : ''} · ${fmtDate(head.plan_start_date)} to ${fmtDate(head.plan_end_date)}`;
-  doc.rect(M, y, W, 40).fillAndStroke(C.white, C.line);
-  cx = M;
-  const cells = [desc, head.plan_code, '1', money(base), money(gross)];
-  cols.forEach((c, i) => {
-    doc.fillColor(C.ink).font(i === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(i === 0 ? 9 : 9)
-       .text(cells[i], cx + 6, y + 8, { width: c.w - 12, align: c.a });
-    cx += c.w;
+  // one row per line item (base plan + each add-on subject)
+  lineItems.forEach((li, idx) => {
+    const rowH = idx === 0 ? 34 : 22;
+    doc.rect(M, y, W, rowH).fillAndStroke(C.white, C.line);
+    const sub = idx === 0 ? `\n${head.student_count} child${head.student_count > 1 ? 'ren' : ''} · ${fmtDate(head.plan_start_date)} to ${fmtDate(head.plan_end_date)}` : '';
+    const cells = [li.desc + sub, li.plan, String(li.qty), money(taxableOf(li.gross)), money(li.gross)];
+    cx = M;
+    cols.forEach((c, i) => {
+      doc.fillColor(C.ink).font(i === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9)
+         .text(cells[i], cx + 6, y + (idx === 0 ? 6 : 6), { width: c.w - 12, align: c.a });
+      cx += c.w;
+    });
+    y += rowH;
   });
-  y += 52;
+  y += 12;
 
   // totals
   const tW = W * 0.42, tx = M + W - tW;
