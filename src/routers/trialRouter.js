@@ -146,6 +146,13 @@ router.post('/api/submit', async (req, res) => {
                medium_id=EXCLUDED.medium_id, modified_at=now()`,
         [parentId, checks[0].rows[0].id, checks[2].rows[0].id, checks[1].rows[0].id, name]);
 
+      // Supersede any earlier subscription for this parent — only one may be
+      // active at a time, so the daily sweep can never pick up two.
+      await c.query(
+        `UPDATE parents_quizpe_subscriptions
+            SET is_active=false, modified_at=now()
+          WHERE parent_id=$1 AND is_active`, [parentId]);
+
       const sub = (await c.query(
         `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
          VALUES ($1,(SELECT id FROM quizpe_plans WHERE plan_code='TRY0'),
@@ -181,8 +188,8 @@ router.post('/api/submit', async (req, res) => {
         student_name: name,
         end_date: sub.plan_end_date,
         quiz_time: sub.quiz_time,
-        // deep link back into the WhatsApp chat the parent came from
-        whatsapp_url: waDeepLink(`Hi! I've just activated the free trial for ${name}.`),
+        // deep link back into the WhatsApp chat (no prefilled message)
+        whatsapp_url: waDeepLink(),
       });
     } catch (e) {
       await c.query('ROLLBACK');

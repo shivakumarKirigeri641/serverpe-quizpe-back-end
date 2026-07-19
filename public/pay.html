@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>QuizPe — Secure Checkout</title>
+  <style>
+    :root{--brand:#008069;--brand-dark:#075e54;--accent:#00a884;--bg:#efeae2;--card:#fff;--text:#111b21;--muted:#667781;--border:#d1d7db;--danger:#c0392b;}
+    *{box-sizing:border-box;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:0 0 30px;}
+    .head{background:var(--brand);color:#fff;padding:16px;position:sticky;top:0;z-index:9;display:flex;align-items:center;gap:12px;}
+    .head img{width:40px;height:40px;border-radius:9px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:17px;}.head p{margin:2px 0 0;font-size:12px;opacity:.9;}
+    .wrap{max-width:560px;margin:0 auto;padding:14px 12px;}
+    .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.06);}
+    .card h2{margin:0 0 10px;font-size:14px;color:var(--brand-dark);}
+    .sum-row{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px dashed var(--border);}
+    .sum-row:last-child{border-bottom:none;}
+    .sum-row .k{color:var(--muted);}.sum-row .v{font-weight:700;}
+    .sum-total{display:flex;justify-content:space-between;font-size:18px;font-weight:800;color:var(--brand-dark);margin-top:8px;padding-top:8px;border-top:2px solid var(--border);}
+    .student{border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px;}
+    .student .tag{font-size:11px;font-weight:700;color:#fff;background:var(--accent);padding:3px 9px;border-radius:10px;display:inline-block;margin-bottom:10px;}
+    .field{margin-bottom:10px;}.field label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;}
+    .field input,.field select{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:15px;background:#fff;outline:none;}
+    .field input:focus,.field select:focus{border-color:var(--accent);}
+    .field select:disabled{background:#f2f2f2;color:var(--muted);}
+    .row2{display:flex;gap:10px;}.row2 .field{flex:1;}
+    .terms{display:flex;gap:9px;align-items:flex-start;font-size:13px;margin:6px 0;}
+    .terms input{margin-top:2px;width:17px;height:17px;accent-color:var(--accent);}
+    .terms a{color:var(--brand-dark);font-weight:600;}
+    .btn{width:100%;padding:14px;border:none;border-radius:24px;background:var(--accent);color:#fff;font-size:16px;font-weight:800;cursor:pointer;}
+    .btn:disabled{background:#a9c7ba;cursor:not-allowed;}
+    .error{color:var(--danger);font-size:13px;margin-top:10px;text-align:center;}
+    .secure{text-align:center;font-size:11px;color:var(--muted);margin-top:10px;}
+    .done{display:none;text-align:center;padding:40px 20px;}
+    .done .tick{font-size:48px;}.done h2{color:var(--brand-dark);margin:10px 0 6px;}.done p{color:var(--muted);font-size:14px;}
+    .wa-btn{display:inline-block;margin-top:16px;padding:12px 24px;border-radius:22px;background:var(--accent);color:#fff;font-weight:700;text-decoration:none;}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1>Secure Checkout</h1><p id="sub">Loading…</p></div>
+  </div>
+
+  <div class="wrap" id="wrap" style="display:none">
+    <div class="card">
+      <h2 id="planName">Plan</h2>
+      <div id="summary"></div>
+    </div>
+
+    <div class="card">
+      <h2>Parent / Guardian</h2>
+      <div class="field">
+        <label for="parentName">Your name (billed to) *</label>
+        <input id="parentName" maxlength="80" placeholder="Parent / guardian full name" autocomplete="name" />
+      </div>
+      <div class="field">
+        <label for="state">Your State / UT (for billing) *</label>
+        <select id="state"><option value="">Select state</option></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 id="studentsHead">Student details</h2>
+      <div id="students"></div>
+    </div>
+
+    <div class="card">
+      <label class="terms"><input id="accept" type="checkbox" />
+        <span>I have read and accept the <a id="terms" href="#" target="_blank" rel="noopener">Terms &amp; Privacy Policy</a>, and I am the parent/guardian.</span></label>
+      <button class="btn" id="payBtn" disabled>Pay</button>
+      <div class="error" id="err"></div>
+      <div class="secure">🔒 Payments are processed securely by Razorpay. We never store your card details.</div>
+      <div class="secure" style="margin-top:6px;font-weight:600;">Powered by ServerPe App Solutions</div>
+    </div>
+  </div>
+
+  <div class="done" id="done">
+    <div class="tick">🎉</div>
+    <h2>Payment successful!</h2>
+    <p id="doneMsg"></p>
+    <p>We've sent your confirmation and invoice on WhatsApp.</p>
+    <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
+  </div>
+
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script>
+    const token = new URLSearchParams(location.search).get("token");
+    const $ = (id) => document.getElementById(id);
+    let ctx = null;
+    const inr = (n) => "₹" + Number(n).toFixed(2);
+
+    const fill = (sel, rows, val, lab, ph) => {
+      sel.innerHTML = `<option value="">${ph}</option>` + rows.map(r => `<option value="${r[val]}">${r[lab]}</option>`).join("");
+    };
+
+    function studentBlock(i, boards, grades) {
+      return `<div class="student" data-i="${i}">
+        <span class="tag">Child ${i + 1}</span>
+        <div class="field"><label>Name *</label><input class="s-name" maxlength="60" placeholder="Child's name" /></div>
+        <div class="row2">
+          <div class="field"><label>Board *</label><select class="s-board"><option value="">Select</option>${boards.map(b => `<option value="${b.board_code}">${b.board_code}</option>`).join("")}</select></div>
+          <div class="field"><label>Medium *</label><select class="s-medium" disabled><option value="">Board first</option></select></div>
+        </div>
+        <div class="field"><label>Grade *</label><select class="s-grade"><option value="">Select</option>${grades.map(g => `<option value="${g.grade_code}">${g.grade_name}</option>`).join("")}</select></div>
+      </div>`;
+    }
+
+    function renderSummary(p, gst) {
+      $("planName").textContent = `${p.name} — ${p.duration} days`;
+      $("summary").innerHTML =
+        `<div class="sum-row"><span class="k">${p.name} (${p.student_count} child${p.student_count>1?"ren":""})</span><span class="v">${inr(gst.base)}</span></div>
+         <div class="sum-row"><span class="k">CGST @ ${gst.pct/2}%</span><span class="v" id="cgst">${inr(gst.cgst)}</span></div>
+         <div class="sum-row"><span class="k">SGST @ ${gst.pct/2}%</span><span class="v" id="sgst">${inr(gst.sgst)}</span></div>
+         <div class="sum-row" id="igstRow" style="display:none"><span class="k">IGST @ ${gst.pct}%</span><span class="v" id="igst">₹0.00</span></div>
+         <div class="sum-total"><span>Total payable</span><span>${inr(gst.total)}</span></div>`;
+    }
+
+    async function load() {
+      if (!token) { $("sub").textContent = "Invalid link."; return; }
+      const r = await (await fetch(`/pay/api/context?token=${encodeURIComponent(token)}`)).json();
+      if (!r.success) { $("sub").textContent = r.error; return; }
+      ctx = r;
+      $("sub").textContent = `${r.business.product_name} · ${r.mobile}`;
+      $("terms").href = r.policy?.url || "#";
+      renderSummary(r.plan, r.gst);
+      $("studentsHead").textContent = r.plan.student_count > 1 ? `Details for ${r.plan.student_count} children` : "Student details";
+      $("students").innerHTML = Array.from({ length: r.plan.student_count }, (_, i) => studentBlock(i, r.boards, r.grades)).join("");
+      fill($("state"), r.states, "state_code", "state_name", "Select state");
+      $("payBtn").textContent = `Pay ${inr(r.plan.price)}`;
+      bind();
+      $("wrap").style.display = "block";
+    }
+
+    function bind() {
+      document.querySelectorAll(".student").forEach(el => {
+        const board = el.querySelector(".s-board"), medium = el.querySelector(".s-medium");
+        board.addEventListener("change", () => {
+          const list = (ctx.mediumsByBoard || {})[board.value] || [];
+          medium.disabled = list.length === 0;
+          medium.innerHTML = `<option value="">${list.length?"Select":"None"}</option>` + list.map(m => `<option value="${m.medium_code}">${m.label}</option>`).join("");
+          if (list.length === 1) medium.value = list[0].medium_code;
+          validate();
+        });
+        el.querySelectorAll("input,select").forEach(x => x.addEventListener("input", validate));
+      });
+      $("parentName").addEventListener("input", validate);
+      $("state").addEventListener("change", () => { recomputeGst(); validate(); });
+      $("accept").addEventListener("change", validate);
+    }
+
+    // CGST/SGST for Karnataka (29), else IGST
+    function recomputeGst() {
+      const intra = $("state").value === "29" || $("state").value === "";
+      const g = ctx.gst;
+      $("igstRow").style.display = intra ? "none" : "flex";
+      document.querySelectorAll("#cgst,#sgst").forEach(e => e.parentElement.style.display = intra ? "flex" : "none");
+      if (!intra) $("igst").textContent = inr(g.cgst + g.sgst);
+    }
+
+    function collect() {
+      const parent = $("parentName").value.trim();
+      return [...document.querySelectorAll(".student")].map(el => ({
+        name: el.querySelector(".s-name").value.trim(),
+        board: el.querySelector(".s-board").value,
+        medium: el.querySelector(".s-medium").value,
+        grade: el.querySelector(".s-grade").value,
+        parent_name: parent,
+      }));
+    }
+
+    function validate() {
+      const students = collect();
+      const ok = $("parentName").value.trim().length >= 2 &&
+        students.every(s => s.name.length >= 2 && s.board && s.medium && s.grade) &&
+        $("state").value && $("accept").checked;
+      $("payBtn").disabled = !ok;
+    }
+
+    $("payBtn").addEventListener("click", async () => {
+      $("err").textContent = ""; $("payBtn").disabled = true; $("payBtn").textContent = "Starting…";
+      const students = collect(), state = $("state").value;
+      try {
+        const o = await (await fetch("/pay/api/create-order", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, students, state }) })).json();
+        if (!o.success) { $("err").textContent = o.error; reset(); return; }
+        if (o.already_paid) { showDone("Already paid — your subscription is active."); return; }
+        const rzp = new Razorpay({
+          key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency,
+          name: ctx.business.product_name, description: ctx.plan.name,
+          prefill: { contact: ctx.mobile }, theme: { color: "#075e54" },
+          handler: async (resp) => {
+            $("payBtn").textContent = "Verifying…";
+            const v = await (await fetch("/pay/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token, ...resp, students, state }) })).json();
+            if (!v.success) { $("err").textContent = v.error; reset(); return; }
+            showDone(`Invoice ${v.invoice} · valid till ${new Date(v.end_date).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}`);
+          },
+          modal: { ondismiss: reset },
+        });
+        rzp.open();
+      } catch { $("err").textContent = "Something went wrong."; reset(); }
+    });
+    function reset(){ $("payBtn").disabled = false; $("payBtn").textContent = `Pay ${inr(ctx.plan.price)}`; }
+    function showDone(msg){
+      $("doneMsg").textContent = msg;
+      const wa = "https://wa.me/916363271302";
+      $("waBtn").href = wa;
+      $("wrap").style.display = "none"; $("done").style.display = "block";
+      // auto-return to the WhatsApp chat after a short countdown
+      let n = 3;
+      const note = document.createElement("p");
+      note.className = "redirect"; note.style.cssText = "font-size:12px;color:#667781;margin-top:10px;";
+      $("done").appendChild(note);
+      const t = setInterval(() => {
+        n -= 1;
+        note.textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : "Opening WhatsApp…";
+        if (n <= 0) { clearInterval(t); location.href = wa; }
+      }, 1000);
+    }
+
+    load();
+  </script>
+</body>
+</html>

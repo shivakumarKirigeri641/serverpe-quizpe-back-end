@@ -96,7 +96,15 @@
       "Bash(node ./_tmpl.js)",
       "Bash(rm -f ./_tmpl.js)",
       "Bash(node ./_testctx.js)",
-      "Bash(rm -f ./_testctx.js)"
+      "Bash(rm -f ./_testctx.js)",
+      "Bash(cp src/assets/logo-full.png src/assets/logo-mark.png public/assets/)",
+      "Bash(node ./_concepts.js)",
+      "Bash(node -e \"require\\('./src/whatsapp/flow'\\);require\\('./src/routers/paymentRouter'\\);require\\('./src/pdf/invoice'\\);require\\('./src/whatsapp/messages'\\);console.log\\('all modules load OK'\\)\")",
+      "Bash(node ./_paytest.js)",
+      "Bash(node ./_paylive.js)",
+      "Bash(WA_DRY_RUN=1 node -e ' *)",
+      "Bash(grep -v \"injected env\\\\|WhatsApp OUT\\\\|messaging_product\\\\|\\\\\"to\\\\\"\\\\|\\\\\"type\\\\\"\\\\|\\\\\"interactive\\\\\"\\\\|\\\\\"body\\\\\"\\\\|\\\\\"text\\\\\"\\\\|\\\\\"footer\\\\\"\\\\|\\\\\"action\\\\\"\\\\|\\\\\"button\\\\\"\\\\|\\\\\"sections\\\\\"\\\\|\\\\\"rows\\\\\"\\\\|\\\\\"id\\\\\"\\\\|\\\\\"title\\\\\"\\\\|\\\\\"description\\\\\"\\\\|preview_url\\\\|^\\\\s*[{}\\\\[\\\\]]*\\\\s*$\")",
+      "Bash(node ./_audit.js)"
     ],
     "additionalDirectories": [
       "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"
