@@ -13,6 +13,7 @@ const parentRouter = require('./routers/parentRouter');
 const whatsappRouter = require('./routers/whatsappRouter');
 const trialRouter = require('./routers/trialRouter');
 const reportsRouter = require('./routers/reportsRouter');
+const paymentRouter = require('./routers/paymentRouter');
 
 const app = express();
 
@@ -37,6 +38,9 @@ app.use('/trial', trialRouter);
 
 // Report PDFs — token download + OTP-gated portal (backs public/reports.html).
 app.use('/reports', reportsRouter);
+
+// Razorpay checkout for paid plans (backs public/pay.html).
+app.use('/pay', paymentRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);

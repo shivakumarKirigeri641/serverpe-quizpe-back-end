@@ -51,6 +51,24 @@ router.get('/dl/:token', async (req, res) => {
   }
 });
 
+/* ------------------------------------------------------- invoice by token */
+router.get('/dl-invoice/:token', async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT invoice_path, invoice_id FROM invoices WHERE access_token=$1 AND is_active`, [req.params.token]);
+    if (!rows.length) return res.status(404).send('Invoice not found.');
+    const abs = path.join(__dirname, '..', 'uploads', rows[0].invoice_path);
+    if (!fs.existsSync(abs)) return res.status(404).send('File missing.');
+    await db.query(`UPDATE invoices SET download_count = download_count + 1 WHERE access_token=$1`, [req.params.token]);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="QuizPe-Invoice-${rows[0].invoice_id}.pdf"`);
+    fs.createReadStream(abs).pipe(res);
+  } catch (e) {
+    console.error('[reports] invoice dl failed:', e.message);
+    res.status(500).send('Something went wrong.');
+  }
+});
+
 /* ------------------------------------------------------------- OTP: request */
 
 router.post('/api/request-otp', async (req, res) => {
