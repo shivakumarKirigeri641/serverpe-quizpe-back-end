@@ -17,6 +17,7 @@
 const cron = require('node-cron');
 const db = require('../database/connectDB');
 const wa = require('../whatsapp/client');
+const Q = require('../whatsapp/quiz');
 
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 const BASE_SUBJECT = 'MATHS';
@@ -102,6 +103,17 @@ async function runJob(kind, templateName) {
   console.log(`[scheduler] ${kind} @${hhmm}: ${due.length} to send (${templateName})`);
   for (const row of due) {
     try {
+      // At quiz time, create today's trackers BEFORE announcing the quiz, so
+      // "Start Quiz now" always has something to open. Idempotent — the
+      // (student, subject, day) UNIQUE makes a re-run a no-op.
+      if (kind === 'quiz_trigger') {
+        try {
+          await Q.scheduleDailyQuizzes(row.student_id);
+        } catch (e) {
+          console.error(`[scheduler] tracker setup failed for student ${row.student_id}: ${e.message}`);
+        }
+      }
+
       // v1/v2 body params: parent, student, day, subject, start time
       const params = [
         row.parent_name || 'there',
@@ -135,7 +147,7 @@ function startScheduler() {
     }
   }, { timezone: TZ });
 
-  console.log(`[scheduler] started (${TZ}) — reminder=v1, quiz trigger=v2 (skipped until APPROVED)`);
+  console.log(`[scheduler] started (${TZ}) — reminder=v1 @reminder_time, quiz trigger=v2 @quiz_time`);
 }
 
 module.exports = { startScheduler, runJob, dueNow, nowHHMM };

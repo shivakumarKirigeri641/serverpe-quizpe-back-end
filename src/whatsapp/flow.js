@@ -684,11 +684,50 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
   }
 }
 
+const QUIZ_TZ = process.env.TZ_NAME || 'Asia/Kolkata';
+
+/** 'HH:MM' right now in the quiz timezone. */
+function nowHHMM() {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: QUIZ_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date());
+}
+
+/**
+ * Quizzes open at the subscription's quiz_time (20:00) and not a minute before,
+ * so every child answers the same paper on the same schedule. Returns null when
+ * the window is open, or the 'HH:MM' it opens at when it is not.
+ */
+async function quizNotYetOpen(studentId) {
+  const { rows } = await db.query(
+    `SELECT sub.quiz_time
+       FROM students st
+       JOIN parents_quizpe_subscriptions sub
+         ON sub.parent_id = st.parent_id AND sub.is_active
+      WHERE st.id = $1
+      ORDER BY sub.id DESC LIMIT 1`, [studentId]);
+  if (!rows.length) return null;                       // no subscription -> other checks handle it
+  const opensAt = String(rows[0].quiz_time).slice(0, 5);
+  return nowHHMM() < opensAt ? opensAt : null;
+}
+
 /** Schedule + start today's quiz for one specific child. */
 async function beginQuizFor(session, mobile, st, siblingCount) {
   try {
-      // TEMPORARY: the 8 PM job will do this scheduling step. Until then we
-      // schedule on demand so the flow can be tested end to end.
+      // Nothing is created before the quiz window opens — no tracker, no
+      // questions, no link. Otherwise an early tap would consume today's
+      // questions and the 8 PM message would announce a quiz already taken.
+      const opensAt = await quizNotYetOpen(st.id);
+      if (opensAt) {
+        await wa.sendText(session.id, mobile,
+          `⏰ ${st.student_name}'s quiz opens at *${M.fmtTime(opensAt)}* today.\n\n` +
+          `We'll message you the moment it's ready — see you then! 🌙`);
+        return;
+      }
+
+      // The 8 PM job already creates today's trackers; this is the safety net
+      // for anyone starting a quiz outside that path (menu, or a first quiz on
+      // signup day). Idempotent, so calling it twice costs nothing.
       await Q.scheduleDailyQuizzes(st.id);
 
       const pending = await Q.pendingTrackers(st.id);

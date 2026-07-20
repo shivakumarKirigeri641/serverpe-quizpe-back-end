@@ -147,7 +147,7 @@ function buildMainMenu(ctx) {
   }
   if (ctx.isSubscribed) {
     rows.push({ id: 'start_quiz', title: '▶️ Start quiz now',
-                description: "Take today's 10-question quiz right away" });
+                description: "Today's quiz — opens at your daily quiz time" });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
