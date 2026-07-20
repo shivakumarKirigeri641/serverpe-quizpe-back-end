@@ -11,6 +11,7 @@
 const db = require('../database/connectDB');
 const wa = require('./client');
 const mastery = require('./mastery');
+const reportQueue = require('../utils/reportQueue');
 
 const QUESTIONS_PER_QUIZ = 10;   // default; per-quiz count lives on quizpe_tracker.question_count
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -355,8 +356,12 @@ _Full answers & explanations are in the report below._ 📄`);
   // because the PDF report carries it with the drawn explanations.
 
   // ---- daily report PDF ---------------------------------------------------
-  // Never let a PDF/send failure lose the quiz result — it is already saved.
-  try {
+  // Rendering a PDF and uploading it to Meta takes seconds of single-threaded
+  // work. At 8 PM many children finish within the same minute, so this runs
+  // AFTER the caller is answered rather than inside the request — the score
+  // card is instant and the report follows. The result is already saved, so a
+  // PDF or send failure can never lose it.
+  const sendReport = async () => {
     const { generateDailyReport } = require('../pdf/dailyReport');
     const rep = await generateDailyReport(trackerId);
     // Upload the actual bytes (filePath) — reliable behind ngrok, unlike link.
@@ -367,12 +372,11 @@ _Full answers & explanations are in the report below._ 📄`);
                `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · Grade *${rep.score.grade}* — ${rep.score.label}\n` +
                `_Includes every question, the correct answer and why._`,
     });
-  } catch (e) {
-    console.error('[quiz] daily report failed:', e.message);
-  }
+  };
 
   // Thank the parent — and ask for feedback only when it's actually due
   // (every day on trial, once a week on a paid plan).
+  const askFeedback = async () => {
   try {
     const fb = require('./feedback');
     const info = (await db.query(
@@ -405,6 +409,19 @@ ${fb.askText(due.type, info?.student_name)}`,
   } catch (e) {
     console.error('[quiz] feedback ask failed:', e.message);
   }
+  };
+
+  // One queued job, run in order: the score card promised the report "below",
+  // so the report must reach the parent before the thank-you/feedback ask.
+  // A failed report still leaves the feedback ask to go out.
+  reportQueue.push(async () => {
+    try {
+      await sendReport();
+    } catch (e) {
+      console.error(`[quiz] daily report failed (tracker ${trackerId}):`, e.message);
+    }
+    await askFeedback();
+  }, `report + feedback for tracker ${trackerId}`);
 
   return { total, correct, pct };
 }

@@ -81,6 +81,15 @@
         animation:rise .5s .7s both, breathe 2.4s 1.2s ease-in-out infinite;}
     @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(0,168,132,.45);} 50%{box-shadow:0 0 0 12px rgba(0,168,132,0);}}
     .msg{text-align:center;padding:40px 18px;color:var(--muted);}
+    .offline{position:fixed;left:0;right:0;bottom:0;display:none;gap:10px;align-items:center;
+             background:#3a2f1b;color:#ffe9b0;padding:12px 14px;font-size:13px;line-height:1.35;
+             box-shadow:0 -3px 14px rgba(0,0,0,.25);z-index:50;}
+    .offline.on{display:flex;animation:rise .3s both;}
+    .offline button{margin-left:auto;flex:none;background:#ffe9b0;color:#3a2f1b;border:0;
+                    border-radius:8px;padding:8px 12px;font-weight:700;font-size:12px;cursor:pointer;}
+    .spin{flex:none;width:14px;height:14px;border:2px solid rgba(255,233,176,.35);
+          border-top-color:#ffe9b0;border-radius:50%;animation:spin .8s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
   </style>
 </head>
 <body>
@@ -118,6 +127,14 @@
     <div class="msg" id="msg" style="display:none"></div>
   </div>
 
+  <!-- Connection trouble never hides the quiz — it sits on top so the chosen
+       answer stays on screen and is re-sent the moment the line comes back. -->
+  <div class="offline" id="offline">
+    <span class="spin"></span>
+    <span id="offlineText">No internet — your answer is saved and will send automatically.</span>
+    <button id="retryBtn">Retry now</button>
+  </div>
+
 <script>
   const token = new URLSearchParams(location.search).get('token');
   const $ = (id) => document.getElementById(id);
@@ -132,6 +149,47 @@
   const fail = (t) => { $('msg').textContent = t; show('msg'); $('sub').textContent = ''; };
 
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  /* ----------------------------------------------------------- connection */
+  let pendingRetry = null;                 // the call to repeat when we're back
+  const banner = (on, text) => {
+    $('offline').classList.toggle('on', on);
+    if (text) $('offlineText').textContent = text;
+  };
+
+  /**
+   * A request that survives a flaky line. Transport failures (no internet,
+   * dropped connection, 5xx) are retried with backoff and keep the question on
+   * screen; a real rejection from the server (expired/submitted link, bad
+   * answer) is returned so the caller can stop. The child never loses a tap.
+   */
+  async function api(path, opts, { retries = 4 } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (!navigator.onLine) throw new Error('offline');
+        const res = await fetch(path, opts);
+        // 5xx is worth repeating; 4xx is the server saying no — don't hammer it
+        if (res.status >= 500) throw new Error('server ' + res.status);
+        banner(false);
+        return await res.json();
+      } catch (e) {
+        if (attempt >= retries) {
+          banner(true, 'Still no connection. Your answers so far are safe — tap retry.');
+          return null;                     // caller keeps the screen as-is
+        }
+        banner(true, navigator.onLine
+          ? 'Connection problem — retrying…'
+          : 'No internet — your answer is saved and will send automatically.');
+        await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
+      }
+    }
+  }
+
+  // Coming back online resumes immediately rather than waiting for a backoff.
+  window.addEventListener('online', () => { if (pendingRetry) pendingRetry(); });
+  window.addEventListener('offline', () => banner(true,
+    'No internet — your answer is saved and will send automatically.'));
+  $('retryBtn').onclick = () => { if (pendingRetry) pendingRetry(); };
 
   function render(d, dir = 'fwd') {
     const p = d.progress || { done: 0, total: 0 };
@@ -188,22 +246,28 @@
 
   /** Save whatever is picked here, then move to `goto`. */
   async function go(target) {
-    if (busy) return false; busy = true;
+    if (busy) return false;
+    busy = true;
     $('next').disabled = true; $('prev').disabled = true;
-    try {
-      const res = await fetch('/quiz/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, serial, answer: picked, goto: target }) });
-      const r = await res.json();
-      busy = false;
-      if (!r.success) { fail(r.error || 'Something went wrong.'); return false; }
-      if (picked) answered.add(serial);
-      render(r, target < serial ? 'back' : 'fwd');
-      return true;
-    } catch {
-      busy = false;
-      fail('Network problem — please check your connection and try again.');
-      return false;
-    }
+
+    const from = serial, chosen = picked;
+    pendingRetry = () => { busy = false; serial = from; picked = chosen; go(target); };
+
+    const r = await api('/quiz/api/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, serial: from, answer: chosen, goto: target }),
+    });
+    busy = false;
+
+    // null = we ran out of retries; keep the question and the chosen answer on
+    // screen so the child can carry on the moment the line is back
+    if (!r) { $('next').disabled = !picked; $('prev').disabled = serial <= 1; return false; }
+    pendingRetry = null;
+    if (!r.success) { fail(r.error || 'Something went wrong.'); return false; }
+
+    if (chosen) answered.add(from);
+    render(r, target < from ? 'back' : 'fwd');
+    return true;
   }
 
   $('prev').onclick = () => go(serial - 1);
@@ -224,14 +288,38 @@
     go(serial).then(ok => { if (ok) finish(); });
   };
 
+  let finishTried = false;
+
   async function finish() {
     $('sub').textContent = 'Submitting…';
     show('msg'); $('msg').textContent = 'Submitting your answers…';
-    try {
-      const r = await (await fetch('/quiz/api/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }) })).json();
-      if (!r.success) return fail(r.error || 'Could not submit the quiz.');
-      if (r.score) $('score').textContent = `${r.score.correct}/${r.score.total}  (${r.score.pct}%)`;
+    pendingRetry = () => finish();
+
+    // mark BEFORE sending: if the request lands but its reply is lost, the
+    // retry must recognise "already submitted" as our own success
+    const firstTry = !finishTried;
+    finishTried = true;
+
+    const r = await api('/quiz/api/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    if (!r) { $('msg').textContent = 'Waiting for a connection to submit…'; return; }
+    pendingRetry = null;
+
+    // If a previous attempt actually landed and only its reply was lost, the
+    // server now calls the link spent. That's a success, not an error.
+    if (!r.success) {
+      if (!firstTry) {
+        $('score').textContent = '';
+        $('doneMsg').textContent = 'Already submitted — your score and report are in WhatsApp.';
+        $('waBtn').style.display = 'none'; $('redir').textContent = '';
+        show('done');
+        return;
+      }
+      return fail(r.error || 'Could not submit the quiz.');
+    }
+    if (r.score) $('score').textContent = `${r.score.correct}/${r.score.total}  (${r.score.pct}%)`;
       waUrl = r.whatsapp_url;
       $('bar').style.width = '100%';
       $('sub').textContent = 'Done';

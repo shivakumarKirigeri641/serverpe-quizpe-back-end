@@ -21,6 +21,9 @@ const Q = require('../whatsapp/quiz');
 
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 const BASE_SUBJECT = 'MATHS';
+// How late a missed send may still go out (minutes). Beyond this the batch is
+// abandoned for the day rather than surprising parents hours after the fact.
+const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 
 /** 'HH:MM' right now in the configured timezone. */
 function nowHHMM() {
@@ -44,6 +47,14 @@ async function approvedTemplate(name) {
  */
 async function dueNow(kind, hhmm) {
   const timeCol = kind === 'reminder' ? 'reminder_time' : 'quiz_time';
+  // Match a WINDOW, not an exact minute. A tick that is skipped (previous run
+  // still going) or missed (restart, clock hiccup) must not drop everyone
+  // whose time fell in that minute — they get picked up on the next tick.
+  // CATCH_UP_MIN caps how late a message may arrive, so a server started at
+  // 11 PM never fires the 8 PM batch. Once-per-day is guaranteed by
+  // notification_log, not by the exact time match.
+  const [h, m] = hhmm.split(':').map(Number);
+  const nowMin = h * 60 + m;
   const { rows } = await db.query(
     `SELECT st.id  AS student_id, st.student_name,
             p.id   AS parent_id, p.parent_name, p.parent_mobile_number,
@@ -60,7 +71,8 @@ async function dueNow(kind, hhmm) {
                            ORDER BY x.id DESC LIMIT 1) w ON true
       WHERE s.is_active
         AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
-        AND to_char(s.${timeCol}, 'HH24:MI') = $1
+        AND (EXTRACT(HOUR FROM s.${timeCol}) * 60 + EXTRACT(MINUTE FROM s.${timeCol}))
+              BETWEEN $1::int - $4::int AND $1::int
         -- reminders respect the STOP opt-out; the quiz trigger always goes
         AND ($2 <> 'reminder' OR p.reminders_enabled)
         -- one per student per kind per day
@@ -72,7 +84,7 @@ async function dueNow(kind, hhmm) {
                 JOIN quizpe_status qs ON qs.id = t.status_id
                WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
                  AND qs.status_code IN ('completed','closed'))`,
-    [hhmm, kind, BASE_SUBJECT]);
+    [nowMin, kind, BASE_SUBJECT, CATCH_UP_MIN]);
   return rows;
 }
 
@@ -138,12 +150,20 @@ function startScheduler() {
   started = true;
 
   // every minute — the per-student/day UNIQUE makes re-runs harmless
+  let ticking = false;
   cron.schedule('* * * * *', async () => {
+    // With many parents a send run can outlast the minute (250ms apart, so
+    // ~240 sends per minute). Skip overlapping ticks rather than starting a
+    // second pass over people the first pass hasn't reached yet.
+    if (ticking) { console.warn('[scheduler] previous tick still running — skipping'); return; }
+    ticking = true;
     try {
       await runJob('reminder', 'qp_quizstart_daily_v1');
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
+    } finally {
+      ticking = false;
     }
   }, { timezone: TZ });
 
