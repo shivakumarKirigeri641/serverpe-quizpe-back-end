@@ -64,7 +64,8 @@ router.get('/api/context', async (req, res) => {
                  ORDER BY b.display_order, m.display_order`),
       db.query(`SELECT grade_code, grade_name FROM grades WHERE is_active ORDER BY display_order`),
       db.query(`SELECT state_code, state_name FROM states_unions WHERE is_active ORDER BY state_name`),
-      db.query(`SELECT plan_name, plan_description, duration FROM quizpe_plans WHERE plan_code='TRY0'`),
+      db.query(`SELECT plan_name, plan_description, duration FROM quizpe_plans
+                  WHERE is_trial AND is_active ORDER BY id LIMIT 1`),
       db.query(`SELECT title, url FROM policies WHERE policy_code='trial_conditions' AND is_active ORDER BY id DESC LIMIT 1`),
       db.query(`SELECT product_name, product_tagline, company_name, support_email FROM business_details WHERE is_active LIMIT 1`),
     ]);
@@ -153,11 +154,17 @@ router.post('/api/submit', async (req, res) => {
             SET is_active=false, modified_at=now()
           WHERE parent_id=$1 AND is_active`, [parentId]);
 
+      // The trial is whichever plan is flagged is_trial — its length comes from
+      // the plan row, so changing `duration` in the DB changes the trial with
+      // no code edit. Refuse rather than guess if no trial is on offer.
+      const trial = (await c.query(
+        `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
+      if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
+
       const sub = (await c.query(
         `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-         VALUES ($1,(SELECT id FROM quizpe_plans WHERE plan_code='TRY0'),
-                 CURRENT_DATE + (SELECT duration FROM quizpe_plans WHERE plan_code='TRY0'))
-         RETURNING id, plan_end_date, quiz_time`, [parentId])).rows[0];
+         VALUES ($1, $2, CURRENT_DATE + $3::int)
+         RETURNING id, plan_end_date, quiz_time`, [parentId, trial.id, trial.duration])).rows[0];
 
       await c.query(`UPDATE signup_links SET used_at=now(), is_active=false WHERE id=$1`, [link.id]);
       if (link.session_id) {
@@ -177,7 +184,7 @@ router.post('/api/submit', async (req, res) => {
         const gradeName = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0].grade_name;
         await wa.sendText(link.session_id, link.mobile_number, M.trialActivated({
           studentName: name, boardCode: board, gradeName,
-          endDate: sub.plan_end_date, quizTime: sub.quiz_time,
+          endDate: sub.plan_end_date, quizTime: sub.quiz_time, duration: trial.duration,
         }));
       } catch (e) {
         console.error('[trial] confirmation message failed:', e.message);

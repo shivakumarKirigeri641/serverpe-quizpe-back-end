@@ -68,11 +68,13 @@ async function getUserContext(rawMobile, exec = db) {
   );
 
   // is a free trial plan currently on offer at all?
-  const trialOffered = (await exec.query(
-    `SELECT 1 FROM quizpe_plans WHERE is_trial AND is_active LIMIT 1`)).rowCount > 0;
+  const trialPlan = (await exec.query(
+    `SELECT duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
+  const trialOffered = !!trialPlan;
+  const trialDays = trialPlan?.duration || null;
 
   if (!rows.length) {
-    return { mobile, exists: false, status: 'NEW', trialUsed: false, canStartTrial: trialOffered };
+    return { mobile, exists: false, status: 'NEW', trialUsed: false, canStartTrial: trialOffered, trialDays };
   }
 
   const r = rows[0];
@@ -103,6 +105,7 @@ async function getUserContext(rawMobile, exec = db) {
     studentCount: r.student_count_actual,
     seatLimit: r.student_count,
     trialUsed: r.trial_used,
+    trialDays,
     // policy: one free trial per mobile number
     canStartTrial: trialOffered && !r.trial_used && ['INCOMPLETE', 'NO_SUBSCRIPTION'].includes(status),
     isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status),
@@ -135,7 +138,7 @@ function buildMainMenu(ctx) {
   // free trial first when it's on offer and unused — it's the easiest yes
   if (ctx.canStartTrial) {
     rows.push({ id: 'start_trial', title: '🎁 Start free trial',
-                description: '7 days free · no payment details needed' });
+                description: `${ctx.trialDays || 7} days free · no payment details needed` });
   }
   if (!ctx.isSubscribed && ctx.status !== 'EXPIRED') {
     rows.push({ id: 'subscribe', title: '🚀 Subscribe',

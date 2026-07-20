@@ -46,7 +46,9 @@ _${terms.summary}_`,
 }
 
 async function trialTerms() {
-  const plan = (await db.query(`SELECT * FROM quizpe_plans WHERE plan_code='TRY0'`)).rows[0];
+  // the trial plan is whichever plan is flagged is_trial — not a fixed code
+  const plan = (await db.query(
+    `SELECT * FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
   const pol = (await db.query(
     `SELECT * FROM policies WHERE policy_code='trial_conditions' AND is_active ORDER BY id DESC LIMIT 1`)).rows[0];
   const benefits = (await db.query(
@@ -100,9 +102,14 @@ _All plans include daily quizzes, explanations, spiral revision and PDF report c
 async function subscriptionDetails(ctx, students) {
   const b = await business();
   if (!ctx.isSubscribed) {
+    // only dangle the trial if one is actually on offer, and name its real length
+    const trial = (await db.query(
+      `SELECT duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
+    const offer = (!ctx.trialUsed && trial)
+      ? `\n\nGood news — your *${trial.duration}-day free trial* is still available! 🎁` : '';
     return `📄 *Your Subscription*
 
-You don't have an active subscription right now.${ctx.trialUsed ? '' : '\n\nGood news — your *7-day free trial* is still available! 🎁'}
+You don't have an active subscription right now.${offer}
 
 Type *menu* to see your options.`;
   }
@@ -191,8 +198,8 @@ GSTIN: ${b.gstin}
 _Reply with your question and we'll get back to you within 24 hours._`;
 }
 
-function trialActivated({ parentName, studentName, boardCode, gradeName, endDate, quizTime }) {
-  return `🎉 *Your 7-day FREE trial is ACTIVE!*
+function trialActivated({ parentName, studentName, boardCode, gradeName, endDate, quizTime, duration }) {
+  return `🎉 *Your ${duration || 7}-day FREE trial is ACTIVE!*
 
 👦 *Student:* ${studentName}
 📚 *Board / Grade:* ${boardCode} · ${gradeName}

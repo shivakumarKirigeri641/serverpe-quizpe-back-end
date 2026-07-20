@@ -50,6 +50,10 @@ app.use('/quiz', quizWebRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
 
+// Report filename sequences — created once, seeded past existing reports.
+require('./pdf/reportNumber').ensureSequences()
+  .catch((e) => console.error('[startup] report sequences failed:', e.message));
+
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
 

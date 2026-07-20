@@ -385,6 +385,13 @@ _Full answers & explanations are in the report below._ 📄`);
         WHERE t.id = $1`, [trackerId])).rows[0];
     const due = await fb.feedbackDue(info?.parent_id);
 
+    // name the parent's OWN quiz time rather than assuming everyone is on 8 PM
+    const t = (await db.query(
+      `SELECT to_char(quiz_time,'HH12:MI AM') AS at
+         FROM parents_quizpe_subscriptions
+        WHERE parent_id=$1 AND is_active ORDER BY id DESC LIMIT 1`, [info?.parent_id])).rows[0];
+    const nextAt = t ? ` at *${t.at}*` : '';
+
     if (due.due) {
       // mark the period as asked BEFORE sending, so ignoring it doesn't
       // cause us to ask again tomorrow
@@ -395,7 +402,7 @@ _Full answers & explanations are in the report below._ 📄`);
       await wa.sendButtons(sessionId, mobile,
 `🙏 *Thank you!*
 
-That's today's quiz done. See you tomorrow at 8 PM for the next one! 🚀
+That's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀
 
 ${fb.askText(due.type, info?.student_name)}`,
         [{ id: `fb_${trackerId}_5`, title: '😀 Loved it' },
@@ -404,7 +411,7 @@ ${fb.askText(due.type, info?.student_name)}`,
         'Your feedback helps us improve');
     } else {
       await wa.sendText(sessionId, mobile,
-        `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow at 8 PM for the next one! 🚀`);
+        `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀`);
     }
   } catch (e) {
     console.error('[quiz] feedback ask failed:', e.message);

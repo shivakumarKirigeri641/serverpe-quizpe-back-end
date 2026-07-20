@@ -91,6 +91,12 @@ function extractId(msg) {
 
 const isGreeting = (t) => /^(hi|hii+|hello+|hey|start|menu|namaste|hi quizpe)$/i.test(t.trim());
 
+/** 'HH:MM' shifted by whole hours, wrapping within the day. */
+function shiftHour(hhmm, by) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return `${String((h + by + 24) % 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 /**
  * Detect the "Start Quiz now" tap from the 8 PM template (v2). Template
  * quick-reply buttons arrive as a `button` message whose text/payload is the
@@ -265,11 +271,15 @@ async function activateTrial(session, mobile, stateCode) {
       `UPDATE parents_quizpe_subscriptions SET is_active=false, modified_at=now()
         WHERE parent_id=$1 AND is_active`, [parent]);
 
+    // whichever plan is flagged is_trial — length comes from the plan row
+    const trial = (await c.query(
+      `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
+    if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
+
     const sub = (await c.query(
       `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-       VALUES ($1,(SELECT id FROM quizpe_plans WHERE plan_code='TRY0'),
-               CURRENT_DATE + (SELECT duration FROM quizpe_plans WHERE plan_code='TRY0'))
-       RETURNING id, plan_end_date, quiz_time`, [parent])).rows[0];
+       VALUES ($1, $2, CURRENT_DATE + $3::int)
+       RETURNING id, plan_end_date, quiz_time`, [parent, trial.id, trial.duration])).rows[0];
 
     await c.query(
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
@@ -287,7 +297,36 @@ async function activateTrial(session, mobile, stateCode) {
 
 /* ------------------------------------------------------------- main handler */
 
-async function handleInbound(msg, contactName) {
+/**
+ * One conversation at a time, per mobile number.
+ *
+ * Meta delivers each tap as its own webhook, so an impatient parent tapping a
+ * menu row three times produces three concurrent runs of this state machine.
+ * Without serialising, they interleave: two sessions get created, a plan is
+ * chosen twice, the same question is answered twice. Queueing per number keeps
+ * each conversation strictly sequential while different parents still run in
+ * parallel — which is what matters at 8 PM.
+ */
+const inFlight = new Map();
+
+// How long an identical repeated tap is treated as an accidental double-tap.
+const REPEAT_TAP_SECONDS = Number(process.env.REPEAT_TAP_SECONDS) || 4;
+
+function serialise(mobile, work) {
+  const prev = inFlight.get(mobile) || Promise.resolve();
+  const next = prev.then(work, work);          // run even if the previous failed
+  const tail = next.catch(() => {});           // the chain must survive a failure
+  inFlight.set(mobile, tail);
+  // drop the entry once this number goes quiet, so the map can't grow forever
+  tail.then(() => { if (inFlight.get(mobile) === tail) inFlight.delete(mobile); });
+  return next;
+}
+
+function handleInbound(msg, contactName) {
+  return serialise(normaliseMobile(msg.from), () => processInbound(msg, contactName));
+}
+
+async function processInbound(msg, contactName) {
   const mobile = normaliseMobile(msg.from);
   const session = await getOrCreateSession(mobile);
 
@@ -295,6 +334,25 @@ async function handleInbound(msg, contactName) {
   if (!fresh) {
     console.log(`[flow] duplicate webhook ${msg.id} — skipped`);
     return;
+  }
+
+  // An impatient parent taps the same row three times. Those are three real
+  // messages with different ids, so the wamid check above lets them through —
+  // and they'd get three identical menus. Answer the first, ignore the rest.
+  // Scoped to the same body within a few seconds, so deliberate repeats later
+  // (or two different answers) are never swallowed.
+  const body = extractText(msg);
+  if (body) {
+    const { rows: [r] } = await db.query(
+      `SELECT COUNT(*)::int n FROM whatsapp_messages
+        WHERE mobile_number = $1 AND direction = 'inbound' AND body = $2
+          AND wa_message_id <> $3
+          AND created_at > now() - ($4 || ' seconds')::interval`,
+      [mobile, body, msg.id, String(REPEAT_TAP_SECONDS)]);
+    if (r.n > 0) {
+      console.log(`[flow] repeated "${body.slice(0, 24)}" from ${mobile} — ignored`);
+      return;
+    }
   }
 
   // A completed Flow arrives as one nfm_reply. Two flows use this: the signup
@@ -308,6 +366,22 @@ async function handleInbound(msg, contactName) {
     } else {
       await handleFlowSubmission(session, mobile, flowReply);
     }
+    return;
+  }
+
+  // Anything that isn't text or a tap — photos, voice notes, stickers,
+  // location, contacts. extractText() returns '' for these, which would
+  // silently fall through to the state handler (and could even be stored as
+  // feedback), so say plainly that we can't read it.
+  const READABLE = ['text', 'button', 'interactive'];
+  if (!READABLE.includes(msg.type)) {
+    const what = {
+      image: 'a photo', video: 'a video', audio: 'a voice note', sticker: 'a sticker',
+      document: 'a file', location: 'a location', contacts: 'a contact',
+    }[msg.type] || 'that';
+    await wa.sendText(session.id, mobile,
+      `🙈 Sorry, I can't read ${what} yet — I understand typed messages and the buttons below.\n\n` +
+      `_Type *menu* to see your options._`);
     return;
   }
 
@@ -331,6 +405,22 @@ async function handleInbound(msg, contactName) {
     return;
   }
 
+  // HELP — a way out from any state, for parents who don't know what to type.
+  if (/^(help|\?|commands)$/i.test(text.trim())) {
+    await wa.sendText(session.id, mobile,
+`❓ *How to use QuizPe*
+
+• *menu* — all your options
+• *report* — recent scores
+• *stop* — pause daily reminders
+• *start reminders* — turn them back on
+
+Your child's quiz link arrives automatically each evening — just tap the button in that message.
+
+Still stuck? Type *menu* and choose *💬 Support*.`);
+    return;
+  }
+
   // Feedback rating tap — valid from ANY state (the prompt arrives after a
   // quiz, but the parent may tap it much later).
   if (id.startsWith('fb_')) {
@@ -348,6 +438,44 @@ async function handleInbound(msg, contactName) {
     } else {
       await wa.sendText(session.id, mobile, `${ack}\n\n${await nextQuizSignOff(ctx)}`);
     }
+    return;
+  }
+
+  // "Change quiz time" — the second quick-reply on the missed-quiz template,
+  // and a typed request. Offers the evening slots; the tap is handled below.
+  if (id.startsWith('qt_')) {
+    const at = id.slice(3);                                  // 'qt_20:00' -> '20:00'
+    if (/^\d{2}:\d{2}$/.test(at) && ctx.parentId) {
+      await db.query(
+        `UPDATE parents_quizpe_subscriptions
+            SET quiz_time = $2::time,
+                reminder_time = ($2::time - interval '1 hour')::time,
+                modified_at = now()
+          WHERE parent_id = $1 AND is_active`, [ctx.parentId, at]);
+      await wa.sendText(session.id, mobile,
+        `✅ Quiz time updated to *${M.fmtTime(at)}*.\n\n` +
+        `Your reminder will now come an hour earlier, at *${M.fmtTime(shiftHour(at, -1))}*.\n\n` +
+        `_Type *menu* for other options._`);
+    } else {
+      await wa.sendText(session.id, mobile, `Couldn't update the time. Type *menu* to try again.`);
+    }
+    return;
+  }
+  if (/change\s*quiz\s*time|change\s*time/i.test(`${text} ${id}`)) {
+    if (!ctx.isSubscribed) {
+      await wa.sendText(session.id, mobile, `You don't have an active subscription yet. Type *menu* to get started.`);
+      return;
+    }
+    await wa.sendList(session.id, mobile, {
+      header: 'Daily quiz time',
+      text: `⏰ *When should the daily quiz arrive?*\n\nCurrently *${M.fmtTime(ctx.quizTime)}*.\n\n` +
+            `_The reminder comes one hour before._`,
+      buttonText: 'Choose a time',
+      rows: ['17:00', '18:00', '19:00', '20:00', '21:00'].map(t => ({
+        id: `qt_${t}`, title: M.fmtTime(t),
+        description: t === String(ctx.quizTime).slice(0, 5) ? 'Current setting' : `Reminder at ${M.fmtTime(shiftHour(t, -1))}`,
+      })),
+    });
     return;
   }
 
@@ -698,7 +826,7 @@ function nowHHMM() {
  * so every child answers the same paper on the same schedule. Returns null when
  * the window is open, or the 'HH:MM' it opens at when it is not.
  */
-async function quizNotYetOpen(studentId) {
+async function quizTimeOf(studentId) {
   const { rows } = await db.query(
     `SELECT sub.quiz_time
        FROM students st
@@ -706,8 +834,12 @@ async function quizNotYetOpen(studentId) {
          ON sub.parent_id = st.parent_id AND sub.is_active
       WHERE st.id = $1
       ORDER BY sub.id DESC LIMIT 1`, [studentId]);
-  if (!rows.length) return null;                       // no subscription -> other checks handle it
-  const opensAt = String(rows[0].quiz_time).slice(0, 5);
+  return rows.length ? String(rows[0].quiz_time).slice(0, 5) : null;
+}
+
+async function quizNotYetOpen(studentId) {
+  const opensAt = await quizTimeOf(studentId);
+  if (!opensAt) return null;                           // no subscription -> other checks handle it
   return nowHHMM() < opensAt ? opensAt : null;
 }
 
@@ -732,8 +864,10 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
 
       const pending = await Q.pendingTrackers(st.id);
       if (!pending.length) {
+        const at = await quizTimeOf(st.id);
         await wa.sendText(session.id, mobile,
-          `✅ ${st.student_name} has finished all of today's quizzes. See you tomorrow at 8 PM! 🌙`);
+          `✅ ${st.student_name} has finished all of today's quizzes. ` +
+          `See you tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}! 🌙`);
         return;
       }
 

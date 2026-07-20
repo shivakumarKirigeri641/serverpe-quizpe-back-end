@@ -24,6 +24,9 @@ const BASE_SUBJECT = 'MATHS';
 // How late a missed send may still go out (minutes). Beyond this the batch is
 // abandoned for the day rather than surprising parents hours after the fact.
 const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
+// How long after quiz_time before a skipped quiz is called missed. Long enough
+// that a parent still mid-quiz is never accused of skipping.
+const MISSED_AFTER_MIN = Number(process.env.MISSED_AFTER_MIN) || 90;
 
 /** 'HH:MM' right now in the configured timezone. */
 function nowHHMM() {
@@ -45,7 +48,7 @@ async function approvedTemplate(name) {
  * Everyone due at this HH:MM for a given job.
  * `kind` = 'reminder' (reminder_time) or 'quiz_trigger' (quiz_time).
  */
-async function dueNow(kind, hhmm) {
+async function dueNow(kind, hhmm, offsetMin = 0) {
   const timeCol = kind === 'reminder' ? 'reminder_time' : 'quiz_time';
   // Match a WINDOW, not an exact minute. A tick that is skipped (previous run
   // still going) or missed (restart, clock hiccup) must not drop everyone
@@ -61,6 +64,16 @@ async function dueNow(kind, hhmm) {
             sub.subject_name,
             s.quiz_time,
             (CURRENT_DATE - s.plan_start_date) + 1 AS day_number,
+            CURRENT_DATE AS quiz_date_label,
+            -- questions still waiting in today's quiz, for the missed nudge
+            COALESCE((SELECT COUNT(*)::int
+                        FROM student_quizpe_histories h
+                        JOIN quizpe_tracker t2 ON t2.id = h.tracker_id
+                       WHERE t2.student_id = st.id AND t2.quiz_date = CURRENT_DATE
+                         AND h.answered_option IS NULL),
+                     (SELECT t3.question_count FROM quizpe_tracker t3
+                       WHERE t3.student_id = st.id AND t3.quiz_date = CURRENT_DATE LIMIT 1),
+                     10) AS pending_questions,
             w.id AS session_id
        FROM parents_quizpe_subscriptions s
        JOIN parents  p  ON p.id = s.parent_id AND p.is_active
@@ -71,8 +84,11 @@ async function dueNow(kind, hhmm) {
                            ORDER BY x.id DESC LIMIT 1) w ON true
       WHERE s.is_active
         AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
-        AND (EXTRACT(HOUR FROM s.${timeCol}) * 60 + EXTRACT(MINUTE FROM s.${timeCol}))
+        AND (EXTRACT(HOUR FROM s.${timeCol}) * 60 + EXTRACT(MINUTE FROM s.${timeCol}) + $5::int)
               BETWEEN $1::int - $4::int AND $1::int
+        -- a missed-quiz nudge is never sent on the parent's very first day,
+        -- when a skipped quiz is usually setup confusion rather than a skip
+        AND ($2 <> 'quiz_missed' OR (CURRENT_DATE - s.plan_start_date) + 1 > 1)
         -- reminders respect the STOP opt-out; the quiz trigger always goes
         AND ($2 <> 'reminder' OR p.reminders_enabled)
         -- one per student per kind per day
@@ -84,7 +100,7 @@ async function dueNow(kind, hhmm) {
                 JOIN quizpe_status qs ON qs.id = t.status_id
                WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
                  AND qs.status_code IN ('completed','closed'))`,
-    [nowMin, kind, BASE_SUBJECT, CATCH_UP_MIN]);
+    [nowMin, kind, BASE_SUBJECT, CATCH_UP_MIN, offsetMin]);
   return rows;
 }
 
@@ -98,18 +114,21 @@ async function logSend(row, kind, templateName, waId, error) {
      waId || null, error ? 'failed' : 'sent', error || null]);
 }
 
+const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
+  { day: '2-digit', month: 'short', year: 'numeric' });
+
 const fmtTime = (t) => {
   const [h, m] = String(t).split(':').map(Number);
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 };
 
 /** Send one job's batch, gently paced so we stay under Meta's rate limits. */
-async function runJob(kind, templateName) {
+async function runJob(kind, templateName, offsetMin = 0) {
   const tpl = await approvedTemplate(templateName);
   if (!tpl) return;                                  // not approved yet -> skip silently
 
   const hhmm = nowHHMM();
-  const due = await dueNow(kind, hhmm);
+  const due = await dueNow(kind, hhmm, offsetMin);
   if (!due.length) return;
 
   console.log(`[scheduler] ${kind} @${hhmm}: ${due.length} to send (${templateName})`);
@@ -126,14 +145,20 @@ async function runJob(kind, templateName) {
         }
       }
 
-      // v1/v2 body params: parent, student, day, subject, start time
-      const params = [
-        row.parent_name || 'there',
-        row.student_name,
-        String(row.day_number),
-        row.subject_name,
-        fmtTime(row.quiz_time),
-      ];
+      // v1/v2: parent, student, day, subject, start time
+      // missed: student, parent, date, time, subject, day, questions, streak
+      if (kind === 'quiz_missed') {
+        try {
+          row.streak = await require('../whatsapp/mastery').currentStreak(row.student_id);
+        } catch { row.streak = 0; }
+      }
+
+      const params = kind === 'quiz_missed'
+        ? [row.student_name, row.parent_name || 'there', fmtDate(row.quiz_date_label),
+           fmtTime(row.quiz_time), row.subject_name, String(row.day_number),
+           String(row.pending_questions || 10), `${row.streak || 0} days`]
+        : [row.parent_name || 'there', row.student_name, String(row.day_number),
+           row.subject_name, fmtTime(row.quiz_time)];
       const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, templateName, params);
       await logSend(row, kind, templateName, id, null);
     } catch (e) {
@@ -160,6 +185,8 @@ function startScheduler() {
     try {
       await runJob('reminder', 'qp_quizstart_daily_v1');
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
+      // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
+      await runJob('quiz_missed', 'qp_quiz_missed_daily_v1', MISSED_AFTER_MIN);
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {

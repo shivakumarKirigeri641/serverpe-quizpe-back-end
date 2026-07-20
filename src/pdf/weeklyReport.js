@@ -21,6 +21,7 @@ const path = require('path');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../database/connectDB');
+const { nextReportFileName } = require('./reportNumber');
 const { REPORTS_ROOT, TYPES, gradeFor } = require('./dailyReport');
 
 const ROOT = path.join(REPORTS_ROOT, TYPES.weekly);
@@ -204,7 +205,10 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   })();
   const dir = path.join(ROOT, folder);
   fs.mkdirSync(dir, { recursive: true });
-  const fileName = `week-${compact}-${head.student_id}-${head.subject_name.toLowerCase().replace(/\W+/g, '')}.pdf`;
+  // same sequential scheme as the daily report, on its own 'weekly' series
+  const fileName = await nextReportFileName({
+    reportType: 'weekly', trackerId: null, date: weekEnd, studentId: head.student_id,
+  });
   const filePath = path.join(dir, fileName);
   const relPath = `${TYPES.weekly}/${folder}/${fileName}`;
 
@@ -396,7 +400,11 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   await db.query(
     `INSERT INTO quiz_reports (tracker_id, student_id, quiz_date, report_type, file_name, file_path,
                                public_url, access_token, score_correct, score_total, score_pct, grade)
-     VALUES (NULL,$1,$2,'weekly',$3,$4,$5,$6,$7,$8,$9,$10)`,
+     VALUES (NULL,$1,$2,'weekly',$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (student_id, quiz_date, report_type) WHERE tracker_id IS NULL DO UPDATE SET
+       file_name=EXCLUDED.file_name, file_path=EXCLUDED.file_path, public_url=EXCLUDED.public_url,
+       access_token=EXCLUDED.access_token, score_correct=EXCLUDED.score_correct,
+       score_total=EXCLUDED.score_total, score_pct=EXCLUDED.score_pct, grade=EXCLUDED.grade, modified_at=now()`,
     [head.student_id, weekEnd, fileName, relPath, publicUrl, accessToken, totalC, totalQ, overallPct, g.grade]);
 
   return {

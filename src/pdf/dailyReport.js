@@ -18,6 +18,7 @@ const path = require('path');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../database/connectDB');
+const { nextReportFileName } = require('./reportNumber');
 
 const REPORTS_ROOT = path.join(__dirname, '..', 'uploads', 'reports');
 const TYPES = { daily: 'daily_reports', weekly: 'weekly_reports', final: 'final_reports', certificate: 'certificates' };
@@ -160,8 +161,14 @@ async function generateDailyReport(trackerId) {
   const mins = head.started_at && head.finished_at
     ? Math.max(1, Math.round((new Date(head.finished_at) - new Date(head.started_at)) / 60000)) : null;
 
-  fs.mkdirSync(path.dirname(pathFor(head)), { recursive: true });
-  const filePath = pathFor(head);
+  // Sequential name (<YYYYMMDD><n>.pdf), reused if this tracker already has a
+  // report — so regenerating overwrites rather than orphaning the old file.
+  const fileName = await nextReportFileName({
+    reportType: 'daily', trackerId, date: head.quiz_date, studentId: head.student_id,
+  });
+  const relPath = `${TYPES.daily}/${dateParts(head.quiz_date).folder}/${fileName}`;
+  const filePath = path.join(REPORTS_ROOT, relPath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
     info: { Title: `QuizPe Report — ${head.student_name}`, Author: biz.company_name || 'QuizPe' } });
@@ -382,7 +389,6 @@ async function generateDailyReport(trackerId) {
 
   // ---- persist + token ----
   const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
-  const relPath = relPathFor(head);
   const accessToken = crypto.randomBytes(18).toString('hex');
   const publicUrl = `${base}/reports/dl/${accessToken}`;
   await db.query(
@@ -409,11 +415,6 @@ function dateParts(d0) {
   const folder = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return { folder, compact: folder.replace(/-/g, '') };
 }
-function baseName(head) {
-  const { compact } = dateParts(head.quiz_date);
-  return `${compact}-${head.student_id}-${head.subject_name.toLowerCase().replace(/\W+/g, '')}.pdf`;
-}
-function relPathFor(head) { return `${TYPES.daily}/${dateParts(head.quiz_date).folder}/${baseName(head)}`; }
-function pathFor(head) { return path.join(REPORTS_ROOT, relPathFor(head)); }
+
 
 module.exports = { generateDailyReport, gradeFor, REPORTS_ROOT, TYPES };
