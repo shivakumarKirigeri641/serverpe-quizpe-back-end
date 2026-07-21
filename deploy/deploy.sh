@@ -33,6 +33,10 @@ echo "==> back-end"
 cd "$HERE"
 npm ci --omit=dev
 
+# Schema first: the code deployed below assumes these exist.
+echo "==> database schema"
+node scripts/migrate.js
+
 echo "==> public site  (VITE_API_BASE=$API_BASE)"
 cd "$SITE_SRC"
 npm ci

@@ -25,6 +25,17 @@ const CFG = {
   REINFORCE_RATIO: 0.4,       // daily share for weak (unmastered) earlier chapters
   FRONTIER_RATIO: 0.4,        // daily share for the current/newest chapter
   // remaining ~0.2 = spaced revision of already-mastered chapters
+
+  // A child who is clearly on top of the current chapter gets a small taste of
+  // the NEXT one before the frontier formally moves. Two reasons to keep it
+  // small: the school may not have taught it yet, so these are a stretch rather
+  // than an expectation — and a child who meets a whole quiz of unfamiliar work
+  // reads it as failure. One or two questions is curiosity; five is a wall.
+  PREVIEW_ACCURACY: 0.85,     // must be doing better than "mastered" to earn it
+  PREVIEW_MIN_ANSWERED: 8,    // and have answered enough for that to mean anything
+  PREVIEW_MAX: 2,             // never more than this many, whatever the quiz length
+
+  MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
   BASE_QUESTIONS: 10,         // doing well -> standard quiz
   MID_QUESTIONS: 15,          // wobbling  -> more practice
   MAX_QUESTIONS: 20,          // struggling -> most practice (hard ceiling)
@@ -111,25 +122,78 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     .sort((a, b) => a.accuracy - b.accuracy).map(s => s.chapter);      // weakest first
   const masteredEarlier = stats.filter(s => s.seq < frontierSeq && s.mastered).map(s => s.chapter);
 
-  const pick = async (chapterList, n, exclude) => {
+  /**
+   * Pick `n` questions, spread across question SHAPES rather than drawn purely
+   * at random.
+   *
+   * A plain ORDER BY random() is uniform over rows, not over kinds of question.
+   * Where a chapter is dominated by one template — "Which is the GREATEST? …"
+   * exists dozens of times, differing only in the numbers — a fair draw lands
+   * on it again and again, and a child gets six near-identical questions in a
+   * ten-question quiz. That reads as broken and teaches one skill instead of
+   * the chapter.
+   *
+   * So each question is reduced to a `stem`: lowercased, with digits, emoji and
+   * punctuation stripped, truncated to its opening words. Questions that differ
+   * only by their numbers collapse to the same stem. Ranking within each stem
+   * and ordering by that rank takes one of every shape first, then a second of
+   * each, and so on — variety when the pool allows it, and a graceful fall back
+   * to repeats only once the shapes are exhausted.
+   */
+  const pick = async (chapterList, n, exclude, maxPerShape = CFG.MAX_PER_SHAPE) => {
     if (!n || !chapterList.length) return [];
     const { rows } = await exec.query(
-      `SELECT qb.id
-         FROM question_bank qb JOIN students st ON st.id = $1
-        WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
-          AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active
-          AND qb.revision = qb.current_month
-          AND qb.chapter = ANY($3)
-          AND NOT ( qb.id = ANY($5::bigint[]) )
-          AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
-                            JOIN quizpe_tracker t ON t.id = h.tracker_id
-                           WHERE t.student_id = $1 AND h.question_id = qb.id)
-        ORDER BY random() LIMIT $4`,
-      [studentId, subjectId, chapterList, n, exclude]);
+      `WITH pool AS (
+         SELECT qb.id,
+                -- digits go first, then spelled-out numbers: "Thirty-nine" is
+                -- as interchangeable as "39", and leaving them in makes nine
+                -- copies of one template look like nine different shapes.
+                -- Then keep only the opening words. Three is coarse on purpose,
+                -- so "which number is …" collapses to a SINGLE shape.
+                (regexp_split_to_array(btrim(regexp_replace(
+                   regexp_replace(
+                     regexp_replace(lower(qb.question_whatsapp), '[^a-z ]', ' ', 'g'),
+                     '\y(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|million|crore)\y', ' ', 'g'),
+                   '\s+', ' ', 'g')), ' '))[1:3]::text AS stem
+           FROM question_bank qb JOIN students st ON st.id = $1
+          WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
+            AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active
+            AND qb.revision = qb.current_month
+            AND qb.chapter = ANY($3)
+            AND NOT ( qb.id = ANY($5::bigint[]) )
+            AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
+                              JOIN quizpe_tracker t ON t.id = h.tracker_id
+                             WHERE t.student_id = $1 AND h.question_id = qb.id)
+       ), ranked AS (
+         SELECT id, row_number() OVER (PARTITION BY stem ORDER BY random()) AS rn
+           FROM pool
+       )
+       -- Hard cap per shape. Some chapters are genuinely thin — KSEAB Grade 7
+       -- "Fractions" is 3,600 questions built from only 3 shapes — and without
+       -- this the draw fills the whole quiz from those three. Returning FEWER
+       -- than asked is deliberate: the caller then tops up from other unlocked
+       -- chapters, which is a better quiz than four copies of one question.
+       SELECT id FROM ranked WHERE rn <= $6 ORDER BY rn, random() LIMIT $4`,
+      [studentId, subjectId, chapterList, n, exclude, maxPerShape]);
     return rows.map(r => r.id);
   };
 
   let ids = [];
+
+  // Stretch questions from the next chapter, for a child who has the current
+  // one well in hand. Deliberately taken BEFORE the frontier fills up, so they
+  // are not squeezed out when the frontier pool is large.
+  const fStat = stats.find(s => s.seq === frontierSeq) || { answered: 0, accuracy: 0 };
+  const nextChapter = chapters[frontierSeq]?.chapter || null;
+  const earnsPreview = nextChapter
+    && fStat.answered >= CFG.PREVIEW_MIN_ANSWERED
+    && fStat.accuracy >= CFG.PREVIEW_ACCURACY;
+  let previewIds = [];
+  if (earnsPreview) {
+    previewIds = await pick([nextChapter], Math.min(CFG.PREVIEW_MAX, Math.max(1, Math.floor(count * 0.1))), ids);
+    ids = ids.concat(previewIds);
+  }
+
   const reinforceN = weakEarlier.length ? Math.round(count * CFG.REINFORCE_RATIO) : 0;
   // if there's no mastered-revision pool, the frontier takes that share too
   const frontierN = Math.round(count * CFG.FRONTIER_RATIO) + (masteredEarlier.length ? 0 : Math.round(count * 0.2));
@@ -137,11 +201,21 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   ids = ids.concat(await pick(weakEarlier, reinforceN, ids));
   ids = ids.concat(await pick([frontierChapter], Math.max(frontierN, count - ids.length - (masteredEarlier.length ? Math.round(count * 0.2) : 0)), ids));
   if (ids.length < count && masteredEarlier.length) ids = ids.concat(await pick(masteredEarlier, count - ids.length, ids));
-  // final top-up from any unlocked chapter, so the quiz is always full
-  if (ids.length < count) ids = ids.concat(await pick(chapters.slice(0, frontierSeq).map(c => c.chapter), count - ids.length, ids));
+  // Top up from any unlocked chapter — still shape-capped, so a thin frontier
+  // chapter borrows VARIETY from earlier work rather than repeating itself.
+  const unlocked = chapters.slice(0, frontierSeq).map(c => c.chapter);
+  if (ids.length < count) ids = ids.concat(await pick(unlocked, count - ids.length, ids));
+
+  // Last resort: every chapter the child has unlocked is genuinely out of fresh
+  // shapes. Relax the cap rather than send a short quiz — a repeated shape is a
+  // worse quiz, but eight questions instead of ten is a broken one.
+  if (ids.length < count) {
+    ids = ids.concat(await pick(unlocked, count - ids.length, ids, 99));
+  }
 
   ids = [...new Set(ids)].slice(0, count);
-  return { ids, progress, chapters, frontierChapter, weakChapters: weakEarlier };
+  return { ids, progress, chapters, frontierChapter, weakChapters: weakEarlier,
+           previewChapter: previewIds.length ? nextChapter : null, previewCount: previewIds.length };
 }
 
 /**

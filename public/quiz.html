@@ -310,21 +310,28 @@
   }
 
   $('prev').onclick = () => go(serial - 1);
-  $('next').onclick = () => {
-    if (!picked) return;
+  $('next').onclick = async () => {
+    if (!picked || busy) return;
     if (serial < total) return go(serial + 1);
 
-    // the answer on THIS question hasn't been saved yet, so count it as done —
-    // otherwise the last question reports itself as unanswered
-    const missing = [...Array(total).keys()].map(i => i + 1)
-      .find(n => n !== serial && !answered.has(n));
+    // SAVE THE LAST ANSWER FIRST, then ask.
+    //
+    // Asking first meant the confirmation appeared while this answer was still
+    // only on screen — so the progress bar and the "N left" counter behind the
+    // dialog said 9 of 10, and a child who had just answered the last question
+    // was told the quiz was incomplete. Saving first makes every number the
+    // dialog is sitting on top of true.
+    const saved = await go(serial);
+    if (!saved) return;                    // offline or rejected — go() has shown why
+
+    const missing = [...Array(total).keys()].map(i => i + 1).find(n => !answered.has(n));
     if (missing) {
       if (confirm(`Question ${missing} is still unanswered. Go there now?`)) return go(missing);
       return;
     }
-    if (!confirm('Submit your quiz? You cannot change your answers after this.')) return;
-    // only submit once the last answer is safely saved
-    go(serial).then(ok => { if (ok) finish(); });
+
+    if (!confirm(`All ${total} questions answered. Submit your quiz?\n\nYou cannot change your answers after this.`)) return;
+    finish();
   };
 
   let finishTried = false;
