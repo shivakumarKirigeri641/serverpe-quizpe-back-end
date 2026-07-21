@@ -30,7 +30,7 @@ const fail = (res, code, error) => res.status(code).json({ success: false, error
 async function tokens() {
   const b = (await db.query(
     `SELECT company_name, company_tagline, product_name, product_tagline, proprietor_name,
-            gstin, pan, address, support_email, product_website,
+            gstin, pan, address, support_email, product_support_email, product_website,
             grievance_officer_name, grievance_officer_designation,
             grievance_officer_email, grievance_officer_phone,
             grievance_response_hours, grievance_resolution_days
@@ -71,7 +71,10 @@ router.get('/', async (req, res) => {
       documents: rows.map((d) => ({ ...d, summary: fill(d.summary, t) })),
       business: {
         company_name: t.company_name, product_name: t.product_name,
-        address: t.address, support_email: t.support_email, gstin: t.gstin,
+        address: t.address, gstin: t.gstin,
+        // what a PARENT should use; the company address is the grievance one
+        support_email: t.product_support_email || t.support_email,
+        company_email: t.support_email,
       },
       grievance_officer: {
         name: t.grievance_officer_name, designation: t.grievance_officer_designation,
