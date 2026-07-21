@@ -171,6 +171,26 @@ async function generateDailyReport(trackerId) {
   const filePath = path.join(REPORTS_ROOT, relPath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
+  // The child's previous daily report, so the parent can see movement rather
+  // than a number in isolation. Absent for a first quiz, and the whole band is
+  // simply skipped then — no "0% change" against nothing.
+  const prev = (await db.query(
+    `SELECT score_correct, score_total, score_pct, grade, quiz_date::text
+       FROM quiz_reports
+      WHERE student_id = $1 AND report_type = 'daily' AND is_active
+        AND quiz_date < $2::date
+      ORDER BY quiz_date DESC, id DESC LIMIT 1`,
+    [head.student_id, head.quiz_date])).rows[0] || null;
+
+  // average seconds per question last time, for the speed comparison
+  const prevSpeed = prev ? (await db.query(
+    `SELECT ROUND(AVG(h.response_seconds))::int avg_s
+       FROM student_quizpe_histories h
+       JOIN quizpe_tracker t ON t.id = h.tracker_id
+      WHERE t.student_id = $1 AND t.quiz_date = $2::date
+        AND h.response_seconds IS NOT NULL`,
+    [head.student_id, prev.quiz_date])).rows[0] : null;
+
   const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
     info: { Title: `QuizPe Report — ${head.student_name}`, Author: biz.company_name || 'QuizPe' } });
   // Bind fonts to this document, not a module variable — reports render two
@@ -273,6 +293,55 @@ async function generateDailyReport(trackerId) {
     doc.fillColor(C.ink).font(doc._F.bold).fontSize(9).text(String(r[1]), cx + 12, ry, { width: q - 24, align: 'right' });
   });
   y += ph + 14;
+
+  /* ---------- progress since the last quiz ---------- */
+  if (prev && prev.score_total) {
+    label(doc, `Since last quiz (${fmtDate(prev.quiz_date)})`, M, y, C.brand, 10); y += 16;
+
+    const dPct = pct - prev.score_pct;
+    const dCorrect = correct - prev.score_correct;
+    const dSpeed = (speed?.avg_s != null && prevSpeed?.avg_s != null)
+      ? speed.avg_s - prevSpeed.avg_s : null;
+
+    // a lower time is better, so the arrow for speed is inverted on purpose
+    const band = [
+      { t: 'Score', now: `${pct}%`, was: `${prev.score_pct}%`, d: dPct, unit: '%', better: dPct > 0 },
+      { t: 'Correct answers', now: `${correct}/${total}`, was: `${prev.score_correct}/${prev.score_total}`,
+        d: dCorrect, unit: '', better: dCorrect > 0 },
+      { t: 'Grade', now: g.grade, was: prev.grade || '—', d: null, unit: '', better: null },
+    ];
+    if (dSpeed != null) {
+      band.push({ t: 'Avg time / question', now: `${speed.avg_s}s`, was: `${prevSpeed.avg_s}s`,
+                  d: dSpeed, unit: 's', better: dSpeed < 0 });
+    }
+
+    const bw = (W - 12 * (band.length - 1)) / band.length, bh = 56;
+    band.forEach((b, i) => {
+      const bx = M + i * (bw + 12);
+      const tone = b.better === null ? C.soft : b.better ? '#e9f8f0' : '#fdeceb';
+      card(doc, bx, y, bw, bh, { fill: tone, stroke: tone });
+      label(doc, b.t, bx + 10, y + 8, C.muted, 7);
+      doc.fillColor(C.ink).font(doc._F.bold).fontSize(16).text(b.now, bx + 10, y + 20, { width: bw - 20 });
+      let sub = `was ${b.was}`;
+      if (b.d != null && b.d !== 0) {
+        sub = `${b.d > 0 ? '+' : ''}${b.d}${b.unit}  (was ${b.was})`;
+      } else if (b.d === 0) {
+        sub = `no change (was ${b.was})`;
+      }
+      doc.fillColor(b.better === null ? C.faint : b.better ? C.ok : C.warn)
+         .font(doc._F.bold).fontSize(7).text(sub, bx + 10, y + 42, { width: bw - 20 });
+    });
+    y += bh + 8;
+
+    // one plain sentence, because most parents read this and nothing else
+    const verdict = dPct > 0
+      ? `${head.student_name} improved by ${dPct} percentage points since the last quiz.`
+      : dPct < 0
+        ? `${head.student_name} scored ${Math.abs(dPct)} points lower than last time — worth a look at the chapters below.`
+        : `${head.student_name} held steady at ${pct}%.`;
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(9).text(verdict, M, y, { width: W });
+    y += 20;
+  }
 
   /* ---------- speed & consistency ---------- */
   if ((speed && speed.avg_s != null) || streak > 0) {

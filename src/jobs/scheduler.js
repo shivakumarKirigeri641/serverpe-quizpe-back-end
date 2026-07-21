@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * Daily WhatsApp jobs, checked every minute (IST):
  *
- *   reminder_time (default 19:00)  -> qp_quizstart_daily_v1  "quiz is at 8 PM"
+ *   reminder_time (default 19:00)  -> qp_remainder_daily_v3 (falls back to v1)
  *   quiz_time     (default 20:00)  -> qp_quizstart_daily_v2  [▶️ Start Quiz now]
  *
  * Anti-annoyance rules:
@@ -31,6 +31,9 @@ const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 const MISSED_AFTER_MIN = Number(process.env.MISSED_AFTER_MIN) || 90;
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
+// Preference order for the evening reminder. The first APPROVED one is used,
+// so a newly created template takes over automatically once Meta clears it.
+const REMINDER_TEMPLATES = ['qp_remainder_daily_v3', 'qp_quizstart_daily_v1'];
 // Meta's business-initiated conversation limit for the 24h window. Set this to
 // your current messaging limit; 0 disables the guard.
 const WA_DAILY_CAP = Number(process.env.WA_DAILY_CAP) || 0;
@@ -42,13 +45,23 @@ function nowHHMM() {
   }).format(new Date());
 }
 
-/** Only send templates Meta has actually approved. */
-async function approvedTemplate(name) {
+/**
+ * The first APPROVED template from the preference list.
+ *
+ * Passing a list lets a new template take over the moment Meta approves it,
+ * while the previous one keeps working until then — so swapping templates can
+ * never leave an evening with no reminder going out at all.
+ */
+async function approvedTemplate(names) {
+  const list = Array.isArray(names) ? names : [names];
   const { rows } = await db.query(
     `SELECT template_name, approval_status FROM whatsapp_templates
-      WHERE template_name=$1 AND is_active`, [name]);
-  if (!rows[0]) return null;
-  return rows[0].approval_status === 'APPROVED' ? rows[0] : null;
+      WHERE template_name = ANY($1::text[]) AND is_active`, [list]);
+  for (const name of list) {
+    const hit = rows.find(r => r.template_name === name);
+    if (hit && hit.approval_status === 'APPROVED') return hit;
+  }
+  return null;
 }
 
 /**
@@ -155,9 +168,10 @@ const fmtTime = (t) => {
 };
 
 /** Send one job's batch, gently paced so we stay under Meta's rate limits. */
-async function runJob(kind, templateName, offsetMin = 0) {
-  const tpl = await approvedTemplate(templateName);
-  if (!tpl) return;                                  // not approved yet -> skip silently
+async function runJob(kind, templateNames, offsetMin = 0) {
+  const tpl = await approvedTemplate(templateNames);
+  if (!tpl) return;                                  // none approved yet -> skip silently
+  const templateName = tpl.template_name;
 
   const hhmm = nowHHMM();
   const due = await dueNow(kind, hhmm, offsetMin);
@@ -257,7 +271,8 @@ function startScheduler() {
     }
 
     try {
-      await runJob('reminder', 'qp_quizstart_daily_v1');
+      // prefer the new reminder template; fall back to v1 until it is approved
+      await runJob('reminder', REMINDER_TEMPLATES);
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
       // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
       await runJob('quiz_missed', 'qp_quiz_missed_daily_v1', MISSED_AFTER_MIN);

@@ -111,6 +111,12 @@ router.get('/activity', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
 });
 
+/** Tonight's per-student status board. */
+router.get('/tonight', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/activity').tonight() }); }
+  catch (e) { console.error('[admin] tonight:', e.message); fail(res, 500, 'Could not load tonight.'); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }

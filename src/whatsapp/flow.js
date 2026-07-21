@@ -395,6 +395,18 @@ async function processInbound(msg, contactName) {
   if (contactName && !session.context.parent_name) {
     await mergeContext(session, { parent_name: contactName });
   }
+  // Meta only sends the WhatsApp profile name on an INBOUND message — there is
+  // no API to look it up. So capture it whenever it arrives, and fill in a
+  // parent whose name is still blank or a placeholder (e.g. after an admin
+  // changed their number). Never overwrite a name a human actually typed.
+  if (contactName && ctx.parentId) {
+    await db.query(
+      `UPDATE parents
+          SET parent_name = $2, modified_at = now()
+        WHERE id = $1
+          AND (parent_name IS NULL OR btrim(parent_name) = '' OR parent_name = 'Parent')`,
+      [ctx.parentId, contactName.slice(0, 120)]).catch(() => {});
+  }
 
   // STOP / START — reminder opt-out, honoured from any state.
   if (/^(stop|unsubscribe|stop reminders)$/i.test(text.trim())) {

@@ -52,6 +52,24 @@ router.patch('/parents/:id', requireAdmin, express.json(), async (req, res) => {
   } catch (e) { console.error('[admin] edit parent:', e.message); fail(res, 400, e.message); }
 });
 
+/* ---------------------------------------------------- change mobile number */
+router.get('/parents/:id/mobile-preview', requireAdmin, async (req, res) => {
+  try {
+    const p = await require('./mobileChange').previewMobileChange(parseInt(req.params.id, 10));
+    if (!p) return fail(res, 404, 'Parent not found.');
+    ok(res, p);
+  } catch (e) { console.error('[admin] mobile preview:', e.message); fail(res, 500, 'Could not check.'); }
+});
+
+router.post('/parents/:id/mobile', requireAdmin, express.json(), async (req, res) => {
+  try {
+    const r = await require('./mobileChange')
+      .changeMobile(parseInt(req.params.id, 10), req.body?.mobile, req.body?.confirm);
+    if (r.error) return fail(res, 400, r.error);
+    ok(res, r);
+  } catch (e) { console.error('[admin] mobile change:', e.message); fail(res, 500, e.message); }
+});
+
 /* ----------------------------------------------------------------- impact */
 async function parentImpact(id) {
   const { rows: [r] } = await db.query(

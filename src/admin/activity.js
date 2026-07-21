@@ -139,4 +139,56 @@ async function todayCounts() {
   return r;
 }
 
-module.exports = { feed, todayCounts };
+/**
+ * Tonight's board: every active child and exactly where they are in today's
+ * quiz. This is a STATE view, not an event stream — the question it answers is
+ * "who is mid-quiz right now, who finished, who hasn't started".
+ *
+ * A child with no tracker yet is 'waiting' before their quiz time and
+ * 'not_started' after it, because those mean very different things: the first
+ * is normal, the second is a child who has been sent a quiz and ignored it.
+ */
+async function tonight() {
+  const { rows } = await db.query(
+    `SELECT st.id AS student_id, st.student_name, st.school_name,
+            b.board_code, g.grade_name,
+            p.id AS parent_id, p.parent_name, p.parent_mobile_number,
+            to_char(sub.quiz_time, 'HH12:MI AM') AS quiz_time,
+            sub.quiz_time AS quiz_time_raw,
+            pl.plan_name, pl.is_trial,
+            t.id AS tracker_id, t.question_count, qs.status_code,
+            COALESCE(h.answered, 0)::int AS answered,
+            r.id AS report_id, r.file_name, r.quiz_date::text AS report_date,
+            r.score_correct, r.score_total, r.score_pct, r.grade,
+            ${IST('t.modified_at')} AS last_activity,
+            (now() AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::time >= sub.quiz_time AS window_open
+       FROM students st
+       JOIN parents p ON p.id = st.parent_id AND p.is_active
+       JOIN parents_quizpe_subscriptions sub
+         ON sub.parent_id = p.id AND sub.is_active
+        AND CURRENT_DATE BETWEEN sub.plan_start_date AND sub.plan_end_date
+       JOIN quizpe_plans pl ON pl.id = sub.plan_id
+       JOIN boards b ON b.id = st.board_id
+       JOIN grades g ON g.id = st.grade_id
+       LEFT JOIN quizpe_tracker t ON t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+       LEFT JOIN quizpe_status qs ON qs.id = t.status_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE answered_option IS NOT NULL) AS answered
+           FROM student_quizpe_histories WHERE tracker_id = t.id) h ON true
+       LEFT JOIN quiz_reports r ON r.tracker_id = t.id
+      WHERE st.is_active
+      ORDER BY sub.quiz_time, st.student_name`);
+
+  return rows.map((r) => {
+    let state = 'waiting';
+    if (r.status_code === 'completed') state = 'completed';
+    else if (r.status_code === 'in_progress') state = 'in_progress';
+    else if (r.status_code === 'skipped') state = 'skipped';
+    else if (r.status_code === 'closed') state = 'partial';
+    else if (r.tracker_id) state = r.window_open ? 'not_started' : 'ready';
+    else state = r.window_open ? 'not_started' : 'waiting';
+    return { ...r, state };
+  });
+}
+
+module.exports = { feed, todayCounts, tonight };
