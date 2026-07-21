@@ -294,6 +294,15 @@ async function finalize(c, pay) {
 
     await client.query(`UPDATE parents_quizpe_subscriptions SET is_active=false, modified_at=now() WHERE parent_id=$1 AND is_active`, [parentId]);
 
+    // spread the evening load instead of putting everyone at 8 PM; a renewal
+    // keeps whatever time the parent already had rather than being reshuffled
+    const prev = (await client.query(
+      `SELECT quiz_time, reminder_time FROM parents_quizpe_subscriptions
+        WHERE parent_id=$1 ORDER BY id DESC LIMIT 1`, [parentId])).rows[0];
+    const slot = prev
+      ? { quiz_time: String(prev.quiz_time).slice(0, 5), reminder_time: String(prev.reminder_time).slice(0, 5) }
+      : require('../whatsapp/quizSlot').slotFor(parentId);
+
     for (const s of students) {
       const studentId = (await client.query(
         `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
@@ -320,9 +329,11 @@ async function finalize(c, pay) {
     }
 
     const subId = (await client.query(
-      `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-       VALUES ($1,$2, CURRENT_DATE + $3::int) RETURNING id, plan_end_date, quiz_time`,
-      [parentId, c.plan_id, c.duration])).rows[0];
+      `INSERT INTO parents_quizpe_subscriptions
+         (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
+       VALUES ($1,$2, CURRENT_DATE + $3::int, $4::time, $5::time)
+       RETURNING id, plan_end_date, quiz_time`,
+      [parentId, c.plan_id, c.duration, slot.quiz_time, slot.reminder_time])).rows[0];
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);

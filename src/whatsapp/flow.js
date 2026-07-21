@@ -276,10 +276,14 @@ async function activateTrial(session, mobile, stateCode) {
       `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
     if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
 
+    const slot = require('./quizSlot').slotFor(parent);   // spread the evening load
+
     const sub = (await c.query(
-      `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-       VALUES ($1, $2, CURRENT_DATE + $3::int)
-       RETURNING id, plan_end_date, quiz_time`, [parent, trial.id, trial.duration])).rows[0];
+      `INSERT INTO parents_quizpe_subscriptions
+         (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
+       VALUES ($1, $2, CURRENT_DATE + $3::int, $4::time, $5::time)
+       RETURNING id, plan_end_date, quiz_time`,
+      [parent, trial.id, trial.duration, slot.quiz_time, slot.reminder_time])).rows[0];
 
     await c.query(
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,

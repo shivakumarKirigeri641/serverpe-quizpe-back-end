@@ -181,10 +181,16 @@ router.post('/api/submit', async (req, res) => {
         `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
       if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
 
+      // spread the evening load instead of putting everyone at 8 PM
+      const { slotFor } = require('../whatsapp/quizSlot');
+      const slot = slotFor(parentId);
+
       const sub = (await c.query(
-        `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-         VALUES ($1, $2, CURRENT_DATE + $3::int)
-         RETURNING id, plan_end_date, quiz_time`, [parentId, trial.id, trial.duration])).rows[0];
+        `INSERT INTO parents_quizpe_subscriptions
+           (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
+         VALUES ($1, $2, CURRENT_DATE + $3::int, $4::time, $5::time)
+         RETURNING id, plan_end_date, quiz_time`,
+        [parentId, trial.id, trial.duration, slot.quiz_time, slot.reminder_time])).rows[0];
 
       await c.query(`UPDATE signup_links SET used_at=now(), is_active=false WHERE id=$1`, [link.id]);
       if (link.session_id) {

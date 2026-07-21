@@ -11,7 +11,7 @@
  *     must reuse the SAME filename, or every rerun would leave another orphan
  *     PDF on disk while the DB row points only at the newest.
  *
- *  2. CONCURRENCY. Reports render in parallel (see utils/reportQueue), so two
+ *  2. CONCURRENCY. Reports render in parallel (see jobs/jobQueue), so two
  *     jobs can read the same count and pick the same number. A transaction-
  *     scoped advisory lock serialises just the numbering, per report type.
  * ---------------------------------------------------------------------------

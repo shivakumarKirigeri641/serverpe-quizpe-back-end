@@ -11,7 +11,7 @@
 const db = require('../database/connectDB');
 const wa = require('./client');
 const mastery = require('./mastery');
-const reportQueue = require('../utils/reportQueue');
+const jobs = require('../jobs/jobQueue');
 
 const QUESTIONS_PER_QUIZ = 10;   // default; per-quiz count lives on quizpe_tracker.question_count
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -361,96 +361,12 @@ _Full answers & explanations are in the report below._ 📄`);
   // AFTER the caller is answered rather than inside the request — the score
   // card is instant and the report follows. The result is already saved, so a
   // PDF or send failure can never lose it.
-  const sendReport = async () => {
-    const { generateDailyReport } = require('../pdf/dailyReport');
-    const rep = await generateDailyReport(trackerId);
-    // Upload the actual bytes (filePath) — reliable behind ngrok, unlike link.
-    await wa.sendDocument(sessionId, mobile, {
-      filePath: rep.filePath,
-      filename: `${rep.head.student_name}-${rep.head.subject_name}-report.pdf`,
-      caption: `📄 *${rep.head.student_name}'s report* — ${rep.head.subject_name}\n` +
-               `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · Grade *${rep.score.grade}* — ${rep.score.label}\n` +
-               `_Includes every question, the correct answer and why._`,
-    });
-  };
-
-  // Thank the parent — and ask for feedback only when it's actually due
-  // (every day on trial, once a week on a paid plan).
-  const askFeedback = async () => {
-  try {
-    const fb = require('./feedback');
-    const info = (await db.query(
-      `SELECT t.student_id, st.student_name, st.parent_id
-         FROM quizpe_tracker t JOIN students st ON st.id = t.student_id
-        WHERE t.id = $1`, [trackerId])).rows[0];
-    const due = await fb.feedbackDue(info?.parent_id);
-
-    // name the parent's OWN quiz time rather than assuming everyone is on 8 PM
-    const t = (await db.query(
-      `SELECT to_char(quiz_time,'HH12:MI AM') AS at
-         FROM parents_quizpe_subscriptions
-        WHERE parent_id=$1 AND is_active ORDER BY id DESC LIMIT 1`, [info?.parent_id])).rows[0];
-    const nextAt = t ? ` at *${t.at}*` : '';
-
-    if (due.due) {
-      // mark the period as asked BEFORE sending, so ignoring it doesn't
-      // cause us to ask again tomorrow
-      await fb.markAsked({
-        parentId: info.parent_id, studentId: info.student_id, trackerId,
-        mobile, userName: null, type: due.type, planType: due.planType, periodKey: due.periodKey,
-      });
-      // Feedback now happens on a web page: star rating, quick tags and a
-      // comment in one screen, instead of a two-step chat exchange.
-      const { createFeedbackLink } = require('../routers/feedbackWebRouter');
-      const { url } = await createFeedbackLink({
-        sessionId, mobile, trackerId,
-        parentId: info.parent_id, studentId: info.student_id,
-        type: due.type, planType: due.planType, periodKey: due.periodKey,
-      });
-      await wa.sendCtaUrl(sessionId, mobile, {
-        header: 'How was the quiz?',
-        body: `🙏 *Thank you!*
-
-That's today's quiz done. ${fb.askText(due.type, info?.student_name)}
-
-_Takes 10 seconds._`,
-        displayText: '⭐ Rate the quiz',
-        url,
-        footer: 'QuizPe by ServerPe App Solutions',
-      });
-    } else {
-      await wa.sendText(sessionId, mobile,
-        `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀`);
-    }
-  } catch (e) {
-    console.error('[quiz] feedback ask failed:', e.message);
-  }
-  };
-
-  // One queued job, run in order: the score card promised the report "below",
-  // so the report must reach the parent before the thank-you/feedback ask.
-  // A failed report still leaves the feedback ask to go out.
-  reportQueue.push(async () => {
-    try {
-      await sendReport();
-    } catch (e) {
-      console.error(`[quiz] daily report failed (tracker ${trackerId}):`, e.message);
-    }
-
-    // ⚠️ TEMPORARY test drive — the report has gone out, so wipe the scratch
-    // rows it needed. Remove this block with testDrive.js before launch.
-    try {
-      const TD = require('./testDrive');
-      if (await TD.isTestTracker(trackerId)) {
-        const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
-        if (t) await TD.purgeStudent(t.student_id);
-        console.log(`[testDrive] scratch rows for tracker ${trackerId} removed`);
-        return;                       // no feedback ask for a test drive
-      }
-    } catch (e) { console.error('[testDrive] cleanup failed:', e.message); }
-
-    await askFeedback();
-  }, `report + feedback for tracker ${trackerId}`);
+  // Durable enqueue: only ids, so the job survives a restart and can run in
+  // any process. dedupeKey means a retried finishQuiz cannot queue two reports
+  // for the same quiz. The score is already committed above, so nothing here
+  // can lose a child's result.
+  await jobs.push('daily_report', { trackerId, sessionId, mobile },
+    { dedupeKey: `report:${trackerId}` });
 
   return { total, correct, pct };
 }

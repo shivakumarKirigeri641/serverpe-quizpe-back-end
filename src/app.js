@@ -17,8 +17,19 @@ const paymentRouter = require('./routers/paymentRouter');
 const quizWebRouter = require('./routers/quizWebRouter');
 const feedbackWebRouter = require('./routers/feedbackWebRouter');
 const supportWebRouter = require('./routers/supportWebRouter');
+const adminRouter = require('./routers/adminRouter');
 
 const app = express();
+
+// The admin panel runs on its own dev server, so it needs CORS. Locked to an
+// allow-list rather than '*' — this API serves children's and payment data.
+const cors = require('cors');
+const ADMIN_ORIGINS = String(process.env.ADMIN_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use('/admin', cors({
+  origin: (origin, cb) => cb(null, !origin || ADMIN_ORIGINS.includes(origin)),
+  credentials: true,
+}));
 
 // Body parsers — WhatsApp posts JSON.
 app.use(express.json());
@@ -54,6 +65,10 @@ app.use('/feedback', feedbackWebRouter);
 // Support request form (backs public/support.html).
 app.use('/support', supportWebRouter);
 
+// Admin panel API (serverpe-quizpe-admin-front-end). Everything except
+// /admin/api/login requires a bearer token.
+app.use('/admin/api', adminRouter);
+
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
@@ -65,6 +80,11 @@ require('./pdf/reportNumber').ensureSequences()
 // Invoice numbering sequence — atomic, so concurrent payments can never collide.
 require('./pdf/invoice').ensureInvoiceSequence()
   .catch((e) => console.error('[startup] invoice sequence failed:', e.message));
+
+// Durable background worker (report rendering, feedback asks). Survives a
+// restart and is safe to run from several processes at once.
+require('./jobs/handlers').registerAll();
+require('./jobs/jobQueue').start();
 
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();

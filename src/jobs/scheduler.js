@@ -19,6 +19,7 @@ const db = require('../database/connectDB');
 const wa = require('../whatsapp/client');
 const Q = require('../whatsapp/quiz');
 const { closeOutDay, CUTOFF_HHMM } = require('./dayCutoff');
+const { sendAll } = require('./sendPool');
 
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 const BASE_SUBJECT = 'MATHS';
@@ -30,6 +31,9 @@ const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 const MISSED_AFTER_MIN = Number(process.env.MISSED_AFTER_MIN) || 90;
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
+// Meta's business-initiated conversation limit for the 24h window. Set this to
+// your current messaging limit; 0 disables the guard.
+const WA_DAILY_CAP = Number(process.env.WA_DAILY_CAP) || 0;
 
 /** 'HH:MM' right now in the configured timezone. */
 function nowHHMM() {
@@ -159,8 +163,26 @@ async function runJob(kind, templateName, offsetMin = 0) {
   const due = await dueNow(kind, hhmm, offsetMin);
   if (!due.length) return;
 
+  // Meta caps business-initiated conversations per 24h. Attempting sends past
+  // it just produces failures, and repeated failures dent the quality rating
+  // that decides the cap — so stop early and say so loudly.
+  if (WA_DAILY_CAP) {
+    const { rows: [c] } = await db.query(
+      `SELECT COUNT(DISTINCT student_id)::int n FROM notification_log WHERE send_date = CURRENT_DATE`);
+    if (c.n >= WA_DAILY_CAP) {
+      console.error(`[scheduler] DAILY CAP REACHED (${c.n}/${WA_DAILY_CAP}) — ${due.length} ${kind} not sent. Raise WA_DAILY_CAP once Meta lifts your messaging limit.`);
+      return;
+    }
+    if (c.n + due.length > WA_DAILY_CAP) {
+      const room = WA_DAILY_CAP - c.n;
+      console.warn(`[scheduler] only ${room} of ${due.length} ${kind} fit under today's cap`);
+      due.length = room;
+    }
+  }
+
   console.log(`[scheduler] ${kind} @${hhmm}: ${due.length} to send (${templateName})`);
-  for (const row of due) {
+
+  const { count, seconds } = await sendAll(due, async (row) => {
     try {
       // At quiz time, create today's trackers BEFORE announcing the quiz, so
       // "Start Quiz now" always has something to open. Idempotent — the
@@ -173,24 +195,25 @@ async function runJob(kind, templateName, offsetMin = 0) {
         }
       }
 
-      // v1/v2: parent, student, day, subject, start time
-      // missed: student, parent, date, time, subject, day, questions, streak
       if (kind === 'quiz_missed') {
         try {
           row.streak = await require('../whatsapp/mastery').currentStreak(row.student_id);
         } catch { row.streak = 0; }
       }
 
+      // v1/v2: parent, student, day, subject, start time
+      // missed: student, parent, date, time, subject, day, questions, streak
       const params = kind === 'quiz_missed'
         ? [row.student_name, row.parent_name || 'there', fmtDate(row.quiz_date_label),
            fmtTime(row.quiz_time), row.subject_name, String(row.day_number),
            String(row.pending_questions || 10), `${row.streak || 0} days`]
         : [row.parent_name || 'there', row.student_name, String(row.day_number),
            row.subject_name, fmtTime(row.quiz_time)];
+
       // claim first, send second — never the other way round
       if (!await claimSend(row, kind, templateName)) {
         console.log(`[scheduler] ${kind} for student ${row.student_id} already claimed — skipping`);
-        continue;
+        return;
       }
       const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, templateName, params);
       await finishSend(row, kind, id, null);
@@ -198,8 +221,10 @@ async function runJob(kind, templateName, offsetMin = 0) {
       console.error(`[scheduler] ${kind} failed for ${row.parent_mobile_number}: ${e.message}`);
       await finishSend(row, kind, null, e.message);
     }
-    await new Promise(r => setTimeout(r, 250));      // ~4 msg/sec
-  }
+  });
+
+  console.log(`[scheduler] ${kind}: ${count} sent in ${seconds.toFixed(1)}s ` +
+              `(${(count / Math.max(seconds, 0.001)).toFixed(1)}/sec)`);
 }
 
 let started = false;
