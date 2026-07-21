@@ -20,6 +20,12 @@ const metrics = require('../admin/metrics');
 
 const router = express.Router();
 
+// Customer CRUD + guarded deletion lives in its own module — see the delete
+// policy documented there before changing anything.
+router.use(require('../admin/customerRoutes'));
+// question_bank grid, CRUD and the Excel import pipeline
+router.use(require('../admin/questionRoutes'));
+
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 const ok = (res, data) => res.json({ success: true, ...data });
 const fail = (res, code, error) => res.status(code).json({ success: false, error });
@@ -35,6 +41,30 @@ router.post('/login', express.json(), async (req, res) => {
   } catch (e) {
     console.error('[admin] login failed:', e.message);
     fail(res, 500, e.message.startsWith('ADMIN AUTH') ? e.message : 'Could not sign in.');
+  }
+});
+
+/**
+ * Branding for the panel — company name, tagline, GSTIN, logo paths. Public on
+ * purpose: the login screen needs it before a token exists. Contains only what
+ * already appears on public invoices and the website, never customer data.
+ */
+router.get('/branding', async (req, res) => {
+  try {
+    const b = (await db.query(
+      `SELECT company_name, company_tagline, product_name, product_tagline,
+              proprietor_name, gstin, address, support_email, product_website
+         FROM business_details WHERE is_active LIMIT 1`)).rows[0] || {};
+    const fs2 = require('fs');
+    const dir = path.join(__dirname, '..', '..', 'public', 'assets');
+    const logos = fs2.existsSync(dir)
+      ? fs2.readdirSync(dir).filter(f => /\.(png|svg|jpg)$/i.test(f))
+          .reduce((a, f) => (a[f.replace(/\.\w+$/, '')] = `/assets/${f}`, a), {})
+      : {};
+    ok(res, { business: b, logos });
+  } catch (e) {
+    console.error('[admin] branding:', e.message);
+    fail(res, 500, 'Could not load branding.');
   }
 });
 
@@ -68,6 +98,19 @@ router.get('/analytics/engagement', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] engagement:', e.message); fail(res, 500, 'Could not load engagement.'); }
 });
 
+/** Unified activity stream: quizzes, subscriptions, feedback, support. */
+router.get('/activity', requireAdmin, async (req, res) => {
+  try {
+    const activity = require('../admin/activity');
+    const kinds = req.query.kinds ? String(req.query.kinds).split(',').filter(Boolean) : null;
+    const [rows, counts] = await Promise.all([
+      activity.feed({ limit: clamp(req.query.limit, 60, 200), since: req.query.since || null, kinds }),
+      activity.todayCounts(),
+    ]);
+    ok(res, { rows, counts });
+  } catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }
@@ -96,6 +139,8 @@ router.get('/parents', requireAdmin, async (req, res) => {
                             WHERE x.parent_id=p.id ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
         LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
        WHERE ($1 = '%%' OR p.parent_name ILIKE $1 OR p.parent_mobile_number ILIKE $1)
+         -- ⚠️ TEMPORARY: hide the test-drive scratch account. Remove with testDrive.js
+         AND p.parent_mobile_number <> '0000000000'
        ORDER BY p.id DESC LIMIT $2 OFFSET $3`, [q, limit, offset]);
     ok(res, { rows, total: rows[0]?.total || 0 });
   } catch (e) { console.error('[admin] parents:', e.message); fail(res, 500, 'Could not load parents.'); }
@@ -132,6 +177,107 @@ router.get('/parents/:id', requireAdmin, async (req, res) => {
 });
 
 /* ---------------------------------------------------------------- students */
+
+/** Board/grade/medium options the admin form can offer — content-driven. */
+router.get('/lookups', requireAdmin, async (req, res) => {
+  try {
+    const { getAvailability } = require('../content/availability');
+    const a = await getAvailability();
+    ok(res, { availability: a.availability, boards: a.boards, grades: a.grades });
+  } catch (e) { console.error('[admin] lookups:', e.message); fail(res, 500, 'Could not load options.'); }
+});
+
+/**
+ * Add a child to an existing parent.
+ *
+ * Two guards that matter commercially:
+ *   • the plan's student_count is a SEAT LIMIT — quietly exceeding it gives
+ *     away subscriptions, so it is refused unless the admin passes override
+ *   • the board/grade/medium must have questions, or the child would get a
+ *     broken quiz on day one
+ */
+router.post('/parents/:id/students', requireAdmin, express.json(), async (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const { student_name, school_name, board, grade, medium, override } = req.body || {};
+  if (!parentId) return fail(res, 400, 'Bad parent id.');
+  if (!String(student_name || '').trim()) return fail(res, 400, "Please give the child's name.");
+  if (!board || !grade || !medium) return fail(res, 400, 'Board, grade and medium are all required.');
+
+  try {
+    const { isDeliverable } = require('../content/availability');
+    if (!await isDeliverable(board, grade, medium)) {
+      return fail(res, 400, `No quiz content for ${board} · ${grade} · ${medium} yet.`);
+    }
+
+    // seat check against the parent's current plan
+    const seat = (await db.query(
+      `SELECT pl.student_count, pl.plan_name, pl.is_trial,
+              (SELECT COUNT(*)::int FROM students st WHERE st.parent_id=$1 AND st.is_active) AS used
+         FROM parents_quizpe_subscriptions s JOIN quizpe_plans pl ON pl.id=s.plan_id
+        WHERE s.parent_id=$1 AND s.is_active
+        ORDER BY s.id DESC LIMIT 1`, [parentId])).rows[0];
+
+    if (seat && seat.used >= seat.student_count && !override) {
+      return res.status(409).json({
+        success: false, seatLimit: true,
+        error: `${seat.plan_name} covers ${seat.student_count} child${seat.student_count > 1 ? 'ren' : ''} `
+             + `and ${seat.used} are already enrolled. Upgrade the plan, or resend with override to add anyway.`,
+      });
+    }
+
+    const ids = (await db.query(
+      `SELECT (SELECT id FROM boards WHERE board_code=$1) b,
+              (SELECT id FROM grades WHERE grade_code=$2) g,
+              (SELECT id FROM mediums WHERE medium_code=$3) m`, [board, grade, medium])).rows[0];
+    if (!ids.b || !ids.g || !ids.m) return fail(res, 400, 'Unknown board, grade or medium.');
+
+    const { rows } = await db.query(
+      `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (parent_id, student_name) DO UPDATE
+         SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
+             medium_id=EXCLUDED.medium_id,
+             school_name=COALESCE(EXCLUDED.school_name, students.school_name),
+             is_active=true, modified_at=now()
+       RETURNING id`,
+      [parentId, ids.b, ids.g, ids.m, String(student_name).trim().slice(0, 60),
+       String(school_name || '').trim().slice(0, 120) || null]);
+    ok(res, { id: rows[0].id, seat });
+  } catch (e) {
+    console.error('[admin] add student:', e.message);
+    fail(res, 400, e.message);
+  }
+});
+
+/** Edit or deactivate a child. */
+router.patch('/students/:id', requireAdmin, express.json(), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Bad student id.');
+  const { student_name, school_name, board, grade, medium, is_active } = req.body || {};
+  try {
+    if (board && grade && medium) {
+      const { isDeliverable } = require('../content/availability');
+      if (!await isDeliverable(board, grade, medium)) {
+        return fail(res, 400, `No quiz content for ${board} · ${grade} · ${medium} yet.`);
+      }
+    }
+    const { rows } = await db.query(
+      `UPDATE students SET
+         student_name = COALESCE($2, student_name),
+         school_name  = COALESCE($3, school_name),
+         board_id     = COALESCE((SELECT id FROM boards  WHERE board_code=$4),  board_id),
+         grade_id     = COALESCE((SELECT id FROM grades  WHERE grade_code=$5),  grade_id),
+         medium_id    = COALESCE((SELECT id FROM mediums WHERE medium_code=$6), medium_id),
+         is_active    = COALESCE($7, is_active),
+         modified_at  = now()
+       WHERE id = $1 RETURNING *`,
+      [id, student_name || null, school_name || null, board || null, grade || null,
+       medium || null, typeof is_active === 'boolean' ? is_active : null]);
+    if (!rows.length) return fail(res, 404, 'Student not found.');
+    ok(res, { row: rows[0] });
+  } catch (e) { console.error('[admin] edit student:', e.message); fail(res, 400, e.message); }
+});
+
 router.get('/students/:id/quizzes', requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return fail(res, 400, 'Bad student id.');
@@ -201,6 +347,21 @@ router.get('/reports', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] reports:', e.message); fail(res, 500, 'Could not load reports.'); }
 });
 
+/** Inline view for the preview pane — same file, shown rather than downloaded. */
+router.get('/reports/:id/view', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const r = (await db.query('SELECT file_path, file_name FROM quiz_reports WHERE id=$1', [id])).rows[0];
+    if (!r) return fail(res, 404, 'Report not found.');
+    const { REPORTS_ROOT } = require('../pdf/dailyReport');
+    const abs = path.join(REPORTS_ROOT, r.file_path);
+    if (!fs.existsSync(abs)) return fail(res, 410, 'The PDF is no longer on disk.');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${r.file_name}"`);
+    fs.createReadStream(abs).pipe(res);
+  } catch (e) { console.error('[admin] report view:', e.message); fail(res, 500, 'Could not open the report.'); }
+});
+
 /** Stream a report PDF straight to the admin (no OTP — already authenticated). */
 router.get('/reports/:id/download', requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -239,17 +400,22 @@ router.get('/finance/gstr1', requireAdmin, async (req, res) => {
     : new Date().toISOString().slice(0, 7);
   try {
     const { rows } = await db.query(
-      `SELECT * FROM gstr1_filing WHERE filing_period=$1 ORDER BY id`, [period]);
+      `SELECT invoice_number, invoice_date::text, customer_name, customer_mobile,
+              customer_state_code, place_of_supply, supply_type, gstr1_table, invoice_type,
+              sac_code, description, taxable_value::numeric, gst_rate,
+              cgst_amount::numeric, sgst_amount::numeric, igst_amount::numeric,
+              invoice_value::numeric, filing_status
+         FROM gstr1_filing WHERE filing_period=$1 AND is_active ORDER BY invoice_number`, [period]);
     const { rows: [totals] } = await db.query(`
       SELECT COUNT(*)::int invoices,
              COALESCE(SUM(taxable_value),0)::numeric taxable,
-             COALESCE(SUM(cgst),0)::numeric cgst,
-             COALESCE(SUM(sgst),0)::numeric sgst,
-             COALESCE(SUM(igst),0)::numeric igst,
-             COALESCE(SUM(invoice_total),0)::numeric total
-        FROM gstr1_filing WHERE filing_period=$1`, [period]);
+             COALESCE(SUM(cgst_amount),0)::numeric cgst,
+             COALESCE(SUM(sgst_amount),0)::numeric sgst,
+             COALESCE(SUM(igst_amount),0)::numeric igst,
+             COALESCE(SUM(invoice_value),0)::numeric total
+        FROM gstr1_filing WHERE filing_period=$1 AND is_active`, [period]);
     const { rows: periods } = await db.query(
-      `SELECT DISTINCT filing_period FROM gstr1_filing ORDER BY filing_period DESC`);
+      `SELECT DISTINCT filing_period FROM gstr1_filing WHERE is_active ORDER BY filing_period DESC`);
     ok(res, { period, rows, totals, periods: periods.map(p => p.filing_period) });
   } catch (e) { console.error('[admin] gstr1:', e.message); fail(res, 500, 'Could not load GST data.'); }
 });
