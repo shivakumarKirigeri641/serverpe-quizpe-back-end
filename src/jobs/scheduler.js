@@ -28,6 +28,8 @@ const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 // How long after quiz_time before a skipped quiz is called missed. Long enough
 // that a parent still mid-quiz is never accused of skipping.
 const MISSED_AFTER_MIN = Number(process.env.MISSED_AFTER_MIN) || 90;
+// Advisory-lock key so only one process anywhere runs a scheduler tick.
+const SCHEDULER_LOCK = 918101;
 
 /** 'HH:MM' right now in the configured timezone. */
 function nowHHMM() {
@@ -105,6 +107,31 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
   return rows;
 }
 
+/**
+ * Reserve this student's slot for today BEFORE the message goes out.
+ * Returns false if someone else already holds it — another instance, or this
+ * instance before a restart. Claiming first is what makes the send safe to run
+ * from more than one process: the UNIQUE (student_id, kind, send_date) decides
+ * the winner, and only the winner calls Meta.
+ */
+async function claimSend(row, kind, templateName) {
+  const { rowCount } = await db.query(
+    `INSERT INTO notification_log (parent_id, student_id, mobile_number, kind, template_name, status)
+     VALUES ($1,$2,$3,$4,$5,'sending')
+     ON CONFLICT (student_id, kind, send_date) DO NOTHING`,
+    [row.parent_id, row.student_id, row.parent_mobile_number, kind, templateName]);
+  return rowCount > 0;
+}
+
+/** Fill in the outcome on the row we already claimed. */
+async function finishSend(row, kind, waId, error) {
+  await db.query(
+    `UPDATE notification_log
+        SET wa_message_id = $3, status = $4, error_message = $5
+      WHERE student_id = $1 AND kind = $2 AND send_date = CURRENT_DATE`,
+    [row.student_id, kind, waId || null, error ? 'failed' : 'sent', error || null]);
+}
+
 async function logSend(row, kind, templateName, waId, error) {
   await db.query(
     `INSERT INTO notification_log (parent_id, student_id, mobile_number, kind, template_name,
@@ -160,11 +187,16 @@ async function runJob(kind, templateName, offsetMin = 0) {
            String(row.pending_questions || 10), `${row.streak || 0} days`]
         : [row.parent_name || 'there', row.student_name, String(row.day_number),
            row.subject_name, fmtTime(row.quiz_time)];
+      // claim first, send second — never the other way round
+      if (!await claimSend(row, kind, templateName)) {
+        console.log(`[scheduler] ${kind} for student ${row.student_id} already claimed — skipping`);
+        continue;
+      }
       const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, templateName, params);
-      await logSend(row, kind, templateName, id, null);
+      await finishSend(row, kind, id, null);
     } catch (e) {
       console.error(`[scheduler] ${kind} failed for ${row.parent_mobile_number}: ${e.message}`);
-      await logSend(row, kind, templateName, null, e.message);
+      await finishSend(row, kind, null, e.message);
     }
     await new Promise(r => setTimeout(r, 250));      // ~4 msg/sec
   }
@@ -183,6 +215,22 @@ function startScheduler() {
     // second pass over people the first pass hasn't reached yet.
     if (ticking) { console.warn('[scheduler] previous tick still running — skipping'); return; }
     ticking = true;
+
+    // A local flag only guards THIS process. On a host running several Node
+    // processes every one of them would fire the same job, so take a Postgres
+    // advisory lock: whoever gets it runs the tick, the rest do nothing.
+    let lock = null;
+    try {
+      lock = await db.getClient();
+      const { rows: [got] } = await lock.query('SELECT pg_try_advisory_lock($1) AS ok', [SCHEDULER_LOCK]);
+      if (!got.ok) { lock.release(); lock = null; ticking = false; return; }
+    } catch (e) {
+      if (lock) { lock.release(); lock = null; }
+      ticking = false;
+      console.error('[scheduler] could not take the tick lock:', e.message);
+      return;
+    }
+
     try {
       await runJob('reminder', 'qp_quizstart_daily_v1');
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
@@ -194,6 +242,10 @@ function startScheduler() {
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {
+      try {
+        await lock.query('SELECT pg_advisory_unlock($1)', [SCHEDULER_LOCK]);
+      } catch { /* connection already gone; the lock dies with the session */ }
+      lock.release();
       ticking = false;
     }
   }, { timezone: TZ });

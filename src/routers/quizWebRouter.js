@@ -23,6 +23,14 @@ const router = express.Router();
 const TTL_HOURS = 14;                        // a day's quiz link
 const LETTERS = ['A', 'B', 'C', 'D'];
 const SPENT = 'This quiz has already been submitted. Your score and report are in WhatsApp.';
+const EXPIRED = 'This quiz link is no longer valid.';
+/** Every rejection carries a code so the page can show the right screen. */
+const waUrlOrNull = () => {
+  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+  return n ? `https://wa.me/${n}` : null;
+};
+const reject = (res, status, code, error) =>
+  res.status(status).json({ success: false, code, error, whatsapp_url: waUrlOrNull() });
 
 /** Mint (or reuse) the link for a tracker. */
 async function createQuizLink(sessionId, mobile, trackerId) {
@@ -50,8 +58,20 @@ async function load(token) {
        JOIN quizpe_tracker t ON t.id = ql.tracker_id
        JOIN students st ON st.id = t.student_id
        JOIN subjects sub ON sub.id = t.subject_id
-      WHERE ql.token=$1 AND ql.expires_at > now()`, [token]);
+      WHERE ql.token=$1`, [token]);
   return rows[0] || null;
+}
+
+/**
+ * Why a link can't be used — checked in the order that gives the parent the
+ * most useful message. "Already submitted" is more helpful than "expired",
+ * so a link that was finished AND has since expired says submitted.
+ */
+function linkProblem(l) {
+  if (!l) return ['INVALID', 'We could not find this quiz link.'];
+  if (l.finished_at) return ['SUBMITTED', SPENT];
+  if (new Date(l.expires_at) <= new Date()) return ['EXPIRED', EXPIRED];
+  return null;
 }
 
 /** Overall progress for the tracker. */
@@ -100,8 +120,8 @@ async function questionAt(trackerId, serial) {
 router.get('/api/context', async (req, res) => {
   try {
     const l = await load(req.query.token);
-    if (!l) return res.status(410).json({ success: false, error: 'This quiz link has expired.' });
-    if (l.finished_at) return res.status(410).json({ success: false, error: SPENT });
+    const bad = linkProblem(l);
+    if (bad) return reject(res, 410, bad[0], bad[1]);
 
     // resume where they stopped; if everything is answered, open the last one
     const p = await progressOf(l.tracker_id);
@@ -133,8 +153,8 @@ router.post('/api/answer', async (req, res) => {
   try {
     const { token, serial, answer, goto: target } = req.body || {};
     const l = await load(token);
-    if (!l) return res.status(410).json({ success: false, error: 'This quiz link has expired.' });
-    if (l.finished_at) return res.status(410).json({ success: false, error: SPENT });
+    const bad = linkProblem(l);
+    if (bad) return reject(res, 410, bad[0], bad[1]);
     if (answer != null && !LETTERS.includes(answer)) {
       return res.status(400).json({ success: false, error: 'Invalid answer.' });
     }
@@ -159,8 +179,8 @@ router.post('/api/answer', async (req, res) => {
 router.post('/api/finish', async (req, res) => {
   try {
     const l = await load(req.body?.token);
-    if (!l) return res.status(410).json({ success: false, error: 'This quiz link has expired.' });
-    if (l.finished_at) return res.status(410).json({ success: false, error: SPENT });
+    const bad = linkProblem(l);
+    if (bad) return reject(res, 410, bad[0], bad[1]);
 
     const p = await progressOf(l.tracker_id);
     if (p.done < p.total) {
@@ -174,7 +194,7 @@ router.post('/api/finish', async (req, res) => {
     // two taps on "Submit" must not send the report and feedback ask twice.
     const claimed = await db.query(
       `UPDATE quiz_links SET finished_at=now() WHERE id=$1 AND finished_at IS NULL`, [l.id]);
-    if (!claimed.rowCount) return res.status(410).json({ success: false, error: SPENT });
+    if (!claimed.rowCount) return reject(res, 410, 'SUBMITTED', SPENT);
 
     // this sends the score card, the PDF report and the feedback ask on WhatsApp
     const score = await Q.finishQuiz(l.whatsapp_session_id, l.mobile_number, l.tracker_id);

@@ -62,6 +62,10 @@ app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
 require('./pdf/reportNumber').ensureSequences()
   .catch((e) => console.error('[startup] report sequences failed:', e.message));
 
+// Invoice numbering sequence — atomic, so concurrent payments can never collide.
+require('./pdf/invoice').ensureInvoiceSequence()
+  .catch((e) => console.error('[startup] invoice sequence failed:', e.message));
+
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
 

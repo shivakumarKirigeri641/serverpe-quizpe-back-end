@@ -33,15 +33,52 @@ const SUBJECT_LABEL = {
 const money = (n) => `Rs. ${Number(n).toFixed(2)}`;
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
-/** Next invoice number: date + (global count + 1), zero-padded to 4. */
+/**
+ * Next invoice number: <YYYYMMDD><nnnn>, from a Postgres SEQUENCE.
+ *
+ * NOT COUNT(*)+1. Two payments finalising at the same moment both read the
+ * same count and build the same number; invoice_id is UNIQUE, so one of them
+ * throws and a customer who has PAID gets no invoice — and a GST invoice
+ * series must never have a hole or a repeat. nextval() is atomic, so every
+ * caller gets its own number even under load.
+ *
+ * The sequence is created and seeded past any existing invoices by
+ * ensureInvoiceSequence() at startup.
+ */
 async function nextInvoiceNumber(exec = db) {
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const { rows } = await exec.query(`SELECT COUNT(*)::int n FROM invoices`);
-  return `${ymd}${String(rows[0].n + 1).padStart(4, '0')}`;
+  const { rows } = await exec.query(`SELECT nextval('invoice_seq')::bigint AS n`);
+  return `${ymd}${String(rows[0].n).padStart(4, '0')}`;
+}
+
+/** Create the sequence once, seeded past invoices that already exist. */
+async function ensureInvoiceSequence(exec = db) {
+  await exec.query(`CREATE SEQUENCE IF NOT EXISTS invoice_seq START 1`);
+  const { rows: [r] } = await exec.query(`SELECT COUNT(*)::int n FROM invoices`);
+  await exec.query(
+    `SELECT setval('invoice_seq', GREATEST($1::bigint, last_value), true) FROM invoice_seq`, [r.n]);
 }
 
 async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, cart = null) {
+  // A subscription must have exactly ONE tax invoice. finalize() is idempotent
+  // and can re-run (retry, webhook replay, a parent reloading the success
+  // page), so hand back the invoice that already exists rather than issuing a
+  // second number for money that was only charged once.
+  const already = (await exec.query(
+    `SELECT invoice_id, invoice_path FROM invoices
+      WHERE subscription_id = $1 AND ($2::bigint IS NULL OR payment_id = $2::bigint)
+      ORDER BY id LIMIT 1`, [subscriptionId, paymentDbId])).rows[0];
+  if (already) {
+    console.log(`[invoice] reusing ${already.invoice_id} for subscription ${subscriptionId}`);
+    return {
+      reused: true,
+      invoiceNo: already.invoice_id,
+      fileName: path.basename(already.invoice_path),
+      filePath: path.join(DIR, path.basename(already.invoice_path)),
+    };
+  }
+
   const head = (await exec.query(
     `SELECT s.id AS subscription_id, s.plan_start_date, s.plan_end_date,
             pl.plan_code, pl.plan_name, pl.price, pl.student_count, pl.duration,
@@ -242,4 +279,4 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   };
 }
 
-module.exports = { generateInvoice, nextInvoiceNumber };
+module.exports = { generateInvoice, nextInvoiceNumber, ensureInvoiceSequence };

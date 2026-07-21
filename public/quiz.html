@@ -81,6 +81,12 @@
         animation:rise .5s .7s both, breathe 2.4s 1.2s ease-in-out infinite;}
     @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(0,168,132,.45);} 50%{box-shadow:0 0 0 12px rgba(0,168,132,0);}}
     .msg{text-align:center;padding:40px 18px;color:var(--muted);}
+    .state{text-align:center;padding:46px 22px;animation:rise .45s both;}
+    .state .ico{font-size:54px;line-height:1;animation:pop .6s cubic-bezier(.34,1.56,.64,1) both;}
+    .state h2{margin:14px 0 8px;color:var(--brand);font-size:20px;}
+    .state p{color:var(--muted);font-size:14px;line-height:1.55;margin:0 auto;max-width:330px;}
+    .state .note{margin:18px auto 0;max-width:330px;background:#fff;border:1px solid var(--border);
+                 border-radius:12px;padding:12px 14px;font-size:13px;color:var(--text);text-align:left;}
     .offline{position:fixed;left:0;right:0;bottom:0;display:none;gap:10px;align-items:center;
              background:#3a2f1b;color:#ffe9b0;padding:12px 14px;font-size:13px;line-height:1.35;
              box-shadow:0 -3px 14px rgba(0,0,0,.25);z-index:50;}
@@ -124,7 +130,15 @@
       <p id="redir" style="font-size:12px;"></p>
     </div>
 
-    <div class="msg" id="msg" style="display:none"></div>
+    <!-- Expired / already-submitted / invalid all land here with a real
+         explanation and a way back, instead of a bare line of grey text. -->
+    <div class="state" id="msg" style="display:none">
+      <div class="ico" id="stIco">⚠️</div>
+      <h2 id="stTitle">Something went wrong</h2>
+      <p id="stBody"></p>
+      <div class="note" id="stNote" style="display:none"></div>
+      <a class="wa" id="stBtn" href="#" style="display:none">💬 Back to WhatsApp</a>
+    </div>
   </div>
 
   <!-- Connection trouble never hides the quiz — it sits on top so the chosen
@@ -146,7 +160,30 @@
     $('done').style.display  = what === 'done' ? 'block' : 'none';
     $('msg').style.display   = what === 'msg' ? 'block' : 'none';
   };
-  const fail = (t) => { $('msg').textContent = t; show('msg'); $('sub').textContent = ''; };
+  const STATES = {
+    SUBMITTED: { ico: '✅', title: 'Already submitted',
+                 note: 'Your score and the full report — with every question, the correct answer and why — are waiting in WhatsApp.' },
+    EXPIRED:   { ico: '⏳', title: 'This quiz link has expired',
+                 note: "Quiz links close at the end of the day. Your next quiz arrives on WhatsApp at your usual quiz time." },
+    INVALID:   { ico: '🔗', title: 'Link not recognised',
+                 note: 'Please open the quiz from the button in your WhatsApp message.' },
+    NETWORK:   { ico: '📶', title: 'Connection problem', note: null },
+  };
+
+  /** Show a proper explained screen, not a bare line of text. */
+  function fail(text, code, waHref) {
+    const st = STATES[code] || { ico: '⚠️', title: 'Something went wrong', note: null };
+    $('stIco').textContent = st.ico;
+    $('stTitle').textContent = st.title;
+    $('stBody').textContent = text || '';
+    if (st.note) { $('stNote').textContent = st.note; $('stNote').style.display = 'block'; }
+    else $('stNote').style.display = 'none';
+    const href = waHref || waUrl;
+    if (href) { $('stBtn').href = href; $('stBtn').style.display = 'inline-block'; }
+    else $('stBtn').style.display = 'none';
+    show('msg');
+    $('sub').textContent = '';
+  }
 
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -304,7 +341,7 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
     });
-    if (!r) { $('msg').textContent = 'Waiting for a connection to submit…'; return; }
+    if (!r) { fail('Waiting for a connection to submit your answers…', 'NETWORK'); return; }
     pendingRetry = null;
 
     // If a previous attempt actually landed and only its reply was lost, the
@@ -317,35 +354,34 @@
         show('done');
         return;
       }
-      return fail(r.error || 'Could not submit the quiz.');
+      return fail(r.error, r.code, r.whatsapp_url);
     }
     if (r.score) $('score').textContent = `${r.score.correct}/${r.score.total}  (${r.score.pct}%)`;
-      waUrl = r.whatsapp_url;
-      $('bar').style.width = '100%';
-      $('sub').textContent = 'Done';
-      show('done');
-      if (waUrl) {
-        $('waBtn').href = waUrl;
-        let n = 3;
-        const t = setInterval(() => {
-          n--; $('redir').textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : 'Opening WhatsApp…';
-          if (n <= 0) { clearInterval(t); location.href = waUrl; }
-        }, 1000);
-      } else { $('waBtn').style.display = 'none'; }
-    } catch { fail('Could not finish the quiz.'); }
+    waUrl = r.whatsapp_url;
+    $('bar').style.width = '100%';
+    $('sub').textContent = 'Done';
+    show('done');
+    if (waUrl) {
+      $('waBtn').href = waUrl;
+      let n = 3;
+      const t = setInterval(() => {
+        n--; $('redir').textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+        if (n <= 0) { clearInterval(t); location.href = waUrl; }
+      }, 1000);
+    } else { $('waBtn').style.display = 'none'; }
   }
 
   (async () => {
-    if (!token) return fail('Invalid link.');
+    if (!token) return fail('No quiz token in this link.', 'INVALID');
     try {
       const d = await (await fetch(`/quiz/api/context?token=${encodeURIComponent(token)}`)).json();
       // a submitted or expired link is dead — say so, don't reopen the quiz
-      if (!d.success) return fail(d.error || 'This quiz link is no longer valid.');
+      if (!d.success) return fail(d.error, d.code, d.whatsapp_url);
       (d.answered || []).forEach(n => answered.add(n));   // resume: keep the dots accurate
       $('title').textContent = `${d.student}'s ${d.isTest ? 'Test' : 'Quiz'}`;
       $('sub').textContent = d.subject;
       render(d);
-    } catch { fail('Could not load the quiz.'); }
+    } catch { fail('Could not reach QuizPe. Please check your connection and try again.', 'NETWORK'); }
   })();
 </script>
 </body>

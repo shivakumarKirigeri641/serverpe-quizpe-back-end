@@ -18,6 +18,7 @@ const path = require('path');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../database/connectDB');
+const { useFontsFor } = require('./fonts');
 const { nextReportFileName } = require('./reportNumber');
 
 const REPORTS_ROOT = path.join(__dirname, '..', 'uploads', 'reports');
@@ -48,7 +49,7 @@ async function fetchReportData(trackerId) {
     `SELECT t.quiz_date, t.quiz_type, t.question_count,
             st.id AS student_id, st.student_name, st.school_name,
             p.parent_name, p.parent_mobile_number, su.state_name,
-            b.board_code, b.board_name, g.grade_name, m.medium_name, sub.subject_name,
+            b.board_code, b.board_name, g.grade_name, m.medium_name, m.medium_code, sub.subject_name,
             pl.plan_name, s.plan_start_date, s.plan_end_date,
             MIN(h.answered_at) AS started_at, MAX(h.answered_at) AS finished_at
        FROM quizpe_tracker t
@@ -67,7 +68,7 @@ async function fetchReportData(trackerId) {
       WHERE t.id = $1
       GROUP BY t.quiz_date, t.quiz_type, t.question_count, st.id, st.student_name, st.school_name,
                p.parent_name, p.parent_mobile_number, su.state_name,
-               b.board_code, b.board_name, g.grade_name, m.medium_name, sub.subject_name,
+               b.board_code, b.board_name, g.grade_name, m.medium_name, m.medium_code, sub.subject_name,
                pl.plan_name, s.plan_start_date, s.plan_end_date`, [trackerId])).rows[0];
 
   const items = (await db.query(
@@ -116,12 +117,12 @@ function card(doc, x, y, w, h, { fill = C.white, stroke = C.line, radius = 8 } =
   return { x, y, w, h };
 }
 function label(doc, text, x, y, color = C.muted, size = 8) {
-  doc.fillColor(color).font('Helvetica-Bold').fontSize(size)
+  doc.fillColor(color).font(doc._F.bold).fontSize(size)
      .text(String(text).toUpperCase(), x, y, { characterSpacing: 0.5 });
 }
 function kv(doc, k, v, x, y, w) {
-  doc.fillColor(C.muted).font('Helvetica').fontSize(9).text(k, x, y);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9)
+  doc.fillColor(C.muted).font(doc._F.regular).fontSize(9).text(k, x, y);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(9)
      .text(v ?? '—', x, y, { width: w, align: 'right' });
 }
 
@@ -172,6 +173,11 @@ async function generateDailyReport(trackerId) {
 
   const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
     info: { Title: `QuizPe Report — ${head.student_name}`, Author: biz.company_name || 'QuizPe' } });
+  // Bind fonts to this document, not a module variable — reports render two
+  // at a time, so a shared family would let an English and a Kannada report
+  // overwrite each other's font choice mid-render.
+  doc._F = useFontsFor(doc, head.medium_code);
+
   const stream = fs.createWriteStream(filePath);
   doc.pipe(stream);
 
@@ -187,16 +193,16 @@ async function generateDailyReport(trackerId) {
   if (fs.existsSync(logo)) {
     doc.image(logo, M, 26, { height: 44 });
   } else {
-    doc.fillColor(C.white).font('Helvetica-Bold').fontSize(24).text(biz.product_name || 'QuizPe', M, 26);
-    doc.font('Helvetica').fontSize(9).fillColor('#bfe3da').text(biz.product_tagline || '', M, 54);
+    doc.fillColor(C.white).font(doc._F.bold).fontSize(24).text(biz.product_name || 'QuizPe', M, 26);
+    doc.font(doc._F.regular).fontSize(9).fillColor('#bfe3da').text(biz.product_tagline || '', M, 54);
   }
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(C.white).text('Daily Quiz Report', M, 78);
+  doc.font(doc._F.bold).fontSize(11).fillColor(C.white).text('Daily Quiz Report', M, 78);
 
   // business block (right aligned)
   const bx = PW / 2, bw = W / 2;
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(C.white)
+  doc.font(doc._F.bold).fontSize(9).fillColor(C.white)
      .text(biz.company_name || '', bx, 24, { width: bw, align: 'right' });
-  doc.font('Helvetica').fontSize(7.5).fillColor('#cfe9e2');
+  doc.font(doc._F.regular).fontSize(7.5).fillColor('#cfe9e2');
   const bizLines = [
     biz.company_tagline,
     biz.address,
@@ -214,13 +220,13 @@ async function generateDailyReport(trackerId) {
   card(doc, M + colW + 12, y, colW, cardH);
 
   label(doc, 'Parent / Guardian', M + 12, y + 12, C.accent);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(13).text(head.parent_name || '—', M + 12, y + 26);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(13).text(head.parent_name || '—', M + 12, y + 26);
   kv(doc, 'Mobile', maskMobile(head.parent_mobile_number), M + 12, y + 50, colW - 24);
   kv(doc, 'State', head.state_name || '—', M + 12, y + 66, colW - 24);
 
   const sx = M + colW + 12;
   label(doc, 'Student', sx + 12, y + 12, C.accent);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(13).text(head.student_name || '—', sx + 12, y + 26);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(13).text(head.student_name || '—', sx + 12, y + 26);
   kv(doc, 'Board / Grade', `${head.board_code} · ${head.grade_name}`, sx + 12, y + 50, colW - 24);
   kv(doc, 'Subject / Medium', `${head.subject_name} · ${head.medium_name}`, sx + 12, y + 66, colW - 24);
   if (head.school_name) kv(doc, 'School', head.school_name, sx + 12, y + 82, colW - 24);
@@ -230,7 +236,7 @@ async function generateDailyReport(trackerId) {
   /* ---------- quiz meta strip ---------- */
   card(doc, M, y, W, 30, { fill: C.soft, stroke: C.soft });
   const isTest = head.quiz_type === 'test';
-  doc.fillColor(C.muted).font('Helvetica').fontSize(9);
+  doc.fillColor(C.muted).font(doc._F.regular).fontSize(9);
   const metaBits = [
     fmtDate(head.quiz_date),
     isTest ? 'TEST' : 'Daily quiz',
@@ -252,8 +258,8 @@ async function generateDailyReport(trackerId) {
     const cx = M + i * (q + 12);
     card(doc, cx, y, q, ph);
     label(doc, cc.t, cx + 12, y + 12);
-    doc.fillColor(cc.color).font('Helvetica-Bold').fontSize(24).text(cc.big, cx + 12, y + 26);
-    doc.fillColor(C.muted).font('Helvetica').fontSize(9).text(cc.sub, cx + 12, y + 56);
+    doc.fillColor(cc.color).font(doc._F.bold).fontSize(24).text(cc.big, cx + 12, y + 26);
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(9).text(cc.sub, cx + 12, y + 56);
   });
   // 4th card: correct/wrong/skipped breakdown
   const cx = M + 3 * (q + 12);
@@ -263,8 +269,8 @@ async function generateDailyReport(trackerId) {
   rows.forEach((r, i) => {
     const ry = y + 28 + i * 15;
     doc.circle(cx + 15, ry + 4, 3).fill(r[2]);
-    doc.fillColor(C.muted).font('Helvetica').fontSize(9).text(r[0], cx + 24, ry);
-    doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9).text(String(r[1]), cx + 12, ry, { width: q - 24, align: 'right' });
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(9).text(r[0], cx + 24, ry);
+    doc.fillColor(C.ink).font(doc._F.bold).fontSize(9).text(String(r[1]), cx + 12, ry, { width: q - 24, align: 'right' });
   });
   y += ph + 14;
 
@@ -282,7 +288,7 @@ async function generateDailyReport(trackerId) {
       const tx = M + i * (sw + 12);
       card(doc, tx, y, sw, sh, { fill: C.soft, stroke: C.soft });
       label(doc, tl.t, tx + 10, y + 8, C.muted, 7);
-      doc.fillColor(tl.c).font('Helvetica-Bold').fontSize(18).text(tl.v, tx + 10, y + 20, { width: sw - 20 });
+      doc.fillColor(tl.c).font(doc._F.bold).fontSize(18).text(tl.v, tx + 10, y + 20, { width: sw - 20 });
       if (tl.s) doc.fillColor(tl.s === 'NEW PERSONAL BEST' ? C.ok : C.faint).font(tl.s === 'NEW PERSONAL BEST' ? 'Helvetica-Bold' : 'Helvetica')
                    .fontSize(7).text(tl.s, tx + 10, y + 40, { width: sw - 20 });
     });
@@ -294,7 +300,7 @@ async function generateDailyReport(trackerId) {
     label(doc, 'Learning progress', M, y, C.brand, 10); y += 16;
     card(doc, M, y, W, 44, { fill: C.accentSoft, stroke: C.accentSoft });
     const done = progress.status === 'completed';
-    doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(10)
+    doc.fillColor(C.ink).font(doc._F.bold).fontSize(10)
        .text(done ? 'Syllabus completed — now revising all chapters'
                   : `Currently learning: ${progress.frontier_chapter}`, M + 12, y + 9, { width: W - 24 });
     // progress bar over chapters
@@ -302,7 +308,7 @@ async function generateDailyReport(trackerId) {
     const frac = done ? 1 : progress.mastered / progress.total;
     doc.roundedRect(M + 12, barY, barW, 8, 4).fill('#d4ede6');
     if (frac > 0) doc.roundedRect(M + 12, barY, barW * frac, 8, 4).fill(C.accent);
-    doc.fillColor(C.brand).font('Helvetica').fontSize(8)
+    doc.fillColor(C.brand).font(doc._F.regular).fontSize(8)
        .text(`${progress.mastered} of ${progress.total} chapters mastered  ·  ${done ? 100 : Math.round(frac * 100)}%`, M + 12, barY + 11);
     y += 58;
   }
@@ -312,8 +318,8 @@ async function generateDailyReport(trackerId) {
   label(doc, 'Chapter-wise analytics', M, y, C.brand, 10); y += 16;
   chapters.forEach(ch => {
     const chPct = Math.round((ch.correct * 100) / ch.asked);
-    doc.fillColor(C.ink).font('Helvetica').fontSize(9).text(ch.chapter, M, y, { width: W - 90 });
-    doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(9)
+    doc.fillColor(C.ink).font(doc._F.regular).fontSize(9).text(ch.chapter, M, y, { width: W - 90 });
+    doc.fillColor(C.muted).font(doc._F.bold).fontSize(9)
        .text(`${ch.correct}/${ch.asked}  ·  ${chPct}%`, M, y, { width: W, align: 'right' });
     const barY = y + 13;
     doc.roundedRect(M, barY, W, 6, 3).fill('#edf1f3');
@@ -325,10 +331,10 @@ async function generateDailyReport(trackerId) {
   if (strongest && weakest) {
     y += 4;
     card(doc, M, y, W, 30, { fill: C.accentSoft, stroke: C.accentSoft });
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.ok).text('Strongest: ', M + 12, y + 10, { continued: true })
-       .font('Helvetica').fillColor(C.brand).text(`${strongest.chapter} (${Math.round(strongest.correct * 100 / strongest.asked)}%)`);
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.bad).text('Focus on: ', M + W / 2, y + 10, { continued: true })
-       .font('Helvetica').fillColor(C.brand).text(`${weakest.chapter} (${Math.round(weakest.correct * 100 / weakest.asked)}%)`);
+    doc.font(doc._F.bold).fontSize(9).fillColor(C.ok).text('Strongest: ', M + 12, y + 10, { continued: true })
+       .font(doc._F.regular).fillColor(C.brand).text(`${strongest.chapter} (${Math.round(strongest.correct * 100 / strongest.asked)}%)`);
+    doc.font(doc._F.bold).fontSize(9).fillColor(C.bad).text('Focus on: ', M + W / 2, y + 10, { continued: true })
+       .font(doc._F.regular).fillColor(C.brand).text(`${weakest.chapter} (${Math.round(weakest.correct * 100 / weakest.asked)}%)`);
     y += 42;
   }
 
@@ -348,19 +354,19 @@ async function generateDailyReport(trackerId) {
     else if (it.answered_option) iconCross(doc, M, top, 18);
     else iconDash(doc, M, top, 18);
 
-    doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9.5)
+    doc.fillColor(C.ink).font(doc._F.bold).fontSize(9.5)
        .text(`Q${it.serial_number}. `, M + 26, top + 2, { continued: true })
-       .font('Helvetica').text(it.question_pdf, { width: W - 26 });
+       .font(doc._F.regular).text(it.question_pdf, { width: W - 26 });
 
-    doc.fillColor(C.muted).font('Helvetica').fontSize(8.5)
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(8.5)
        .text(`Your answer: ${it.answered_option ? `${it.answered_option}) ${optText(it, it.answered_option) ?? ''}` : 'not answered'}`, M + 26, doc.y + 2);
     if (!it.is_correct) {
-      doc.fillColor(C.ok).font('Helvetica-Bold').fontSize(8.5)
+      doc.fillColor(C.ok).font(doc._F.bold).fontSize(8.5)
          .text(`Correct: ${it.answer}) ${optText(it, it.answer) ?? ''}`, M + 26, doc.y + 1);
     }
     if (it.explanation) {
-      doc.fillColor(C.warn).font('Helvetica-Bold').fontSize(8.5).text('Why: ', M + 26, doc.y + 1, { continued: true })
-         .fillColor(C.faint).font('Helvetica-Oblique').text(it.explanation, { width: W - 40 });
+      doc.fillColor(C.warn).font(doc._F.bold).fontSize(8.5).text('Why: ', M + 26, doc.y + 1, { continued: true })
+         .fillColor(C.faint).font(doc._F.oblique).text(it.explanation, { width: W - 40 });
     }
     // drawn "working" for the question, when we can build one
     try {
@@ -379,7 +385,7 @@ async function generateDailyReport(trackerId) {
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
     doc.rect(0, doc.page.height - 26, PW, 26).fill(C.brand);
-    doc.fillColor('#cfe9e2').font('Helvetica').fontSize(7.5)
+    doc.fillColor('#cfe9e2').font(doc._F.regular).fontSize(7.5)
        .text(`${biz.company_name || 'QuizPe'}  ·  ${biz.support_email || ''}  ·  Report generated ${fmtDate(new Date())}`,
              M, doc.page.height - 18, { width: W, align: 'left' });
     doc.fillColor(C.white).text(`Page ${i + 1} of ${range.count}`, M, doc.page.height - 18, { width: W, align: 'right' });
