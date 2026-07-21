@@ -145,16 +145,33 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     const { rows } = await exec.query(
       `WITH pool AS (
          SELECT qb.id,
-                -- digits go first, then spelled-out numbers: "Thirty-nine" is
-                -- as interchangeable as "39", and leaving them in makes nine
-                -- copies of one template look like nine different shapes.
-                -- Then keep only the opening words. Three is coarse on purpose,
-                -- so "which number is …" collapses to a SINGLE shape.
-                (regexp_split_to_array(btrim(regexp_replace(
-                   regexp_replace(
-                     regexp_replace(lower(qb.question_whatsapp), '[^a-z ]', ' ', 'g'),
-                     '\y(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|million|crore)\y', ' ', 'g'),
-                   '\s+', ' ', 'g')), ' '))[1:3]::text AS stem
+                -- The SENTENCE FRAME, not the opening words.
+                --
+                -- Keeping only function words throws away everything that
+                -- varies for flavour — the child's name, the object being
+                -- counted, the numbers — and leaves the grammatical skeleton.
+                -- So "Dev had 310 stars and got 108 more" and "Tara had 451
+                -- laddus and got 235 more" both reduce to "had and got more how
+                -- many in all", and count as ONE shape. Opening-words matching
+                -- could not see that: the names differ at word one.
+                --
+                -- Non-word-problems still separate correctly, because their
+                -- frames genuinely differ ("which is the", "in what is the
+                -- of the digit in the place", and so on).
+                array_to_string(ARRAY(
+                  SELECT w FROM unnest(regexp_split_to_array(btrim(regexp_replace(
+                    regexp_replace(lower(qb.question_whatsapp), '[^a-z ]', ' ', 'g'),
+                    '\s+', ' ', 'g')), ' ')) AS w
+                   WHERE w = ANY(ARRAY[
+                     'a','all','altogether','and','another','are','as','at','before','between',
+                     'by','comes','complete','count','counted','descending','ascending','did',
+                     'digit','does','each','estimate','face','first','from','got','greater',
+                     'greatest','had','has','have','how','in','is','it','its','just','left',
+                     'less','many','middle','more','much','name','nearest','of','on','order',
+                     'place','put','remain','round','same','sits','smallest','sum','than',
+                     'the','then','there','these','they','to','total','value','what','which',
+                     'while','who','why','words','write','written'])
+                ), ' ') AS stem
            FROM question_bank qb JOIN students st ON st.id = $1
           WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
             AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active

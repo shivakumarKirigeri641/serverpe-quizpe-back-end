@@ -201,4 +201,107 @@ async function engagement() {
   return rows;
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, delta };
+/**
+ * Cohort health for a single day, as percentages.
+ *
+ * Counts and percentages answer different questions, and the percentages are
+ * the ones that stay meaningful as the cohort grows: "42 quizzes today" means
+ * nothing without knowing how many children were expected. Everything here is
+ * therefore a share of a stated denominator, and every denominator is returned
+ * alongside its percentage so a reassuring 100% built on 2 children is visible
+ * as such rather than flattering.
+ *
+ * `day` defaults to today. Comparisons are against each child's OWN previous
+ * quiz, not against yesterday's cohort — a different set of children sat
+ * yesterday, so a cohort-to-cohort average would mostly measure who showed up.
+ */
+async function cohort(day = null) {
+  const D = day || null;
+
+  const { rows: [p] } = await db.query(`
+    WITH day AS (SELECT COALESCE($1::date, CURRENT_DATE) AS d),
+    -- children who SHOULD have had a quiz: active, with a live subscription
+    expected AS (
+      SELECT st.id
+        FROM students st
+        JOIN parents pa ON pa.id = st.parent_id AND pa.is_active
+        JOIN parents_quizpe_subscriptions s ON s.parent_id = pa.id AND s.is_active
+        CROSS JOIN day
+       WHERE st.is_active AND NOT pa.service_paused
+         AND day.d BETWEEN s.plan_start_date AND s.plan_end_date
+       GROUP BY st.id
+    ),
+    today AS (
+      SELECT t.student_id, qs.status_code, r.score_pct
+        FROM quizpe_tracker t
+        JOIN quizpe_status qs ON qs.id = t.status_id
+        LEFT JOIN quiz_reports r ON r.tracker_id = t.id
+        CROSS JOIN day
+       WHERE t.quiz_date = day.d
+    )
+    SELECT
+      (SELECT COUNT(*) FROM expected)::int                                          AS expected,
+      -- 'scheduled' means the row exists but nothing has reached the parent
+      -- yet, so counting it as delivered overstates the evening. Only statuses
+      -- that imply the message actually went out count here.
+      (SELECT COUNT(*) FROM today WHERE status_code <> 'scheduled')::int            AS delivered,
+      (SELECT COUNT(*) FROM today WHERE status_code = 'scheduled')::int             AS pending,
+      (SELECT COUNT(*) FROM today WHERE status_code IN ('in_progress','completed'))::int AS started,
+      (SELECT COUNT(*) FROM today WHERE status_code = 'completed')::int             AS completed,
+      (SELECT COUNT(*) FROM today WHERE status_code IN ('skipped','closed','expired','idle_closed'))::int AS missed,
+      (SELECT COUNT(*) FROM today WHERE score_pct >= 80)::int                       AS excellent,
+      (SELECT COUNT(*) FROM today WHERE score_pct >= 60 AND score_pct < 80)::int    AS fair,
+      (SELECT COUNT(*) FROM today WHERE score_pct IS NOT NULL AND score_pct < 60)::int AS needs_help,
+      (SELECT ROUND(AVG(score_pct)) FROM today WHERE score_pct IS NOT NULL)::int    AS avg_pct,
+      (SELECT COUNT(*) FROM today WHERE score_pct IS NOT NULL)::int                 AS scored
+  `, [D]);
+
+  // Improvement is per child against their own previous completed quiz.
+  const { rows: [t] } = await db.query(`
+    WITH day AS (SELECT COALESCE($1::date, CURRENT_DATE) AS d),
+    scored AS (
+      SELECT t.student_id, t.quiz_date, r.score_pct,
+             LAG(r.score_pct) OVER (PARTITION BY t.student_id ORDER BY t.quiz_date) AS prev_pct
+        FROM quizpe_tracker t
+        JOIN quiz_reports r ON r.tracker_id = t.id
+       WHERE r.score_pct IS NOT NULL
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE prev_pct IS NOT NULL)::int                  AS comparable,
+      COUNT(*) FILTER (WHERE score_pct > prev_pct)::int                  AS improved,
+      COUNT(*) FILTER (WHERE score_pct = prev_pct)::int                  AS held,
+      COUNT(*) FILTER (WHERE score_pct < prev_pct)::int                  AS declined,
+      COALESCE(ROUND(AVG(score_pct - prev_pct) FILTER (WHERE prev_pct IS NOT NULL)), 0)::int AS avg_change
+      FROM scored, day WHERE quiz_date = day.d
+  `, [D]);
+
+  const pct = (n, of) => (of ? Math.round((n * 100) / of) : 0);
+
+  return {
+    date: D,
+    participation: {
+      expected: p.expected, delivered: p.delivered, pending: p.pending,
+      started: p.started, completed: p.completed, missed: p.missed,
+      delivered_pct: pct(p.delivered, p.expected),
+      started_pct: pct(p.started, p.expected),
+      completed_pct: pct(p.completed, p.expected),
+      // of those who opened it, how many saw it through
+      finish_rate_pct: pct(p.completed, p.started),
+    },
+    scoring: {
+      scored: p.scored, avg_pct: p.avg_pct || 0,
+      excellent: p.excellent, excellent_pct: pct(p.excellent, p.scored),
+      fair: p.fair, fair_pct: pct(p.fair, p.scored),
+      needs_help: p.needs_help, needs_help_pct: pct(p.needs_help, p.scored),
+    },
+    trend: {
+      comparable: t.comparable,
+      improved: t.improved, improved_pct: pct(t.improved, t.comparable),
+      held: t.held, held_pct: pct(t.held, t.comparable),
+      declined: t.declined, declined_pct: pct(t.declined, t.comparable),
+      avg_change: t.avg_change,
+    },
+  };
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, delta };

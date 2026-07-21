@@ -111,6 +111,14 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
   }
 });
 
+/** Cohort health as percentages — participation, scoring spread, movement. */
+router.get('/analytics/cohort', requireAdmin, async (req, res) => {
+  try {
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : null;
+    ok(res, await metrics.cohort(day));
+  } catch (e) { console.error('[admin] cohort:', e.message); fail(res, 500, 'Could not load cohort metrics.'); }
+});
+
 router.get('/analytics/daily', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.daily(clamp(req.query.days, 30, 365)) }); }
   catch (e) { console.error('[admin] daily:', e.message); fail(res, 500, 'Could not load trends.'); }
