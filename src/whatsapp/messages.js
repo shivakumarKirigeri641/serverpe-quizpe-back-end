@@ -9,6 +9,19 @@
 
 const db = require('../database/connectDB');
 
+/**
+ * Policy links are stored as PATHS (e.g. /legal.html?doc=terms), never as a
+ * full URL. The host is added here from PUBLIC_BASE_URL, so moving from the
+ * dev tunnel to a real domain is one .env change and no database edit — and a
+ * link can never point at a host that has been retired.
+ */
+const publicUrl = (pathOrUrl) => {
+  const v = String(pathOrUrl || '');
+  if (/^https?:\/\//i.test(v)) return v;                 // already absolute
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+  return `${base}${v.startsWith('/') ? '' : '/'}${v}`;
+};
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 const fmtTime = (t) => {
@@ -37,7 +50,7 @@ India's simplest daily learning habit for school kids, right here on WhatsApp. N
 📊 Weekly progress reports for parents
 
 By continuing you agree to our *Terms of Service* and *Privacy Policy*.
-${terms.url}
+${publicUrl(terms.url)}
 
 _${terms.summary}_`,
     footer: `${b.company_name}`,
@@ -72,7 +85,7 @@ async function trialTerms() {
 💯 *No payment details needed.* The trial ends automatically — nothing is ever charged.
 
 📄 *Terms & disclaimer:*
-${pol.url}
+${publicUrl(pol.url)}
 
 _By tapping *Agree & Proceed* you confirm you are the parent/guardian and accept the terms._`,
     footer: `${b.company_name} · GSTIN ${b.gstin}`,
@@ -222,5 +235,5 @@ _See you at ${fmtTime(quizTime)}!_ 🚀`;
 
 module.exports = {
   welcome, trialTerms, plansList, subscriptionDetails,
-  quizSchedule, quizReport, reportsPortalUrl, support, trialActivated, business, fmtDate, fmtTime,
+  quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, business, fmtDate, fmtTime,
 };

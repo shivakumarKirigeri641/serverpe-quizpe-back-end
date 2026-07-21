@@ -34,6 +34,7 @@ app.use('/admin', cors({
 }));
 
 // Body parsers — WhatsApp posts JSON.
+app.use(require('cookie-parser')());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

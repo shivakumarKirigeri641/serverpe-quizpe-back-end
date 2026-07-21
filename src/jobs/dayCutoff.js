@@ -25,7 +25,10 @@
 
 const db = require('../database/connectDB');
 
-const CUTOFF_HHMM = process.env.DAY_CUTOFF_HHMM || '23:58';
+// Runs a few minutes AFTER the quiz window shuts, so a child answering at
+// 23:44 is never settled mid-question. The window itself is the user-facing
+// deadline; this is only the tidy-up behind it.
+const CUTOFF_HHMM = process.env.DAY_CUTOFF_HHMM || '23:50';
 
 async function closeOutDay() {
   const c = await db.getClient();
@@ -86,7 +89,11 @@ async function closeOutDay() {
   }
 }
 
-/** True when the day's quiz window has closed (used to refuse late starts). */
+/**
+ * True when the day's quiz window has closed. Late starts are refused by
+ * quizWindow.state() using the window's own close time — this remains for the
+ * scheduler's own use and for anything that needs the settle boundary.
+ */
 function pastCutoff(nowHHMM) {
   return nowHHMM >= CUTOFF_HHMM;
 }

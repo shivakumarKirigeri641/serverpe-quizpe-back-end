@@ -906,25 +906,29 @@ async function quizNotYetOpen(studentId) {
 /** Schedule + start today's quiz for one specific child. */
 async function beginQuizFor(session, mobile, st, siblingCount) {
   try {
-      // Nothing is created before the quiz window opens — no tracker, no
-      // questions, no link. Otherwise an early tap would consume today's
-      // questions and the 8 PM message would announce a quiz already taken.
-      const opensAt = await quizNotYetOpen(st.id);
-      if (opensAt) {
+      // The quiz is available anywhere inside the evening window, not only at
+      // this parent's notification slot. Their slot decides when we MESSAGE
+      // them; the window decides when the child may ANSWER. Nothing is created
+      // before the window opens — an early tap would consume today's questions
+      // and the evening message would then announce a quiz already taken.
+      const W = require('./quizWindow');
+      const where = W.state();
+
+      if (where === 'before') {
+        const at = await quizTimeOf(st.id);
         await wa.sendText(session.id, mobile,
-          `⏰ ${st.student_name}'s quiz opens at *${M.fmtTime(opensAt)}* today.\n\n` +
-          `We'll message you the moment it's ready — see you then! 🌙`);
+          `⏰ Tonight's quiz opens at *${M.fmtTime(W.OPEN_HHMM)}*.\n\n` +
+          `${st.student_name} can take it any time after that, right up to *${M.fmtTime(W.CLOSE_HHMM)}*` +
+          `${at ? ` — we'll nudge you at *${M.fmtTime(at)}*` : ''}. See you this evening! 🌙`);
         return;
       }
 
-      // ...and the day closes at the cutoff. Starting a quiz at 23:59 would
-      // run past midnight and be settled mid-answer by the cutoff job.
-      const { pastCutoff, CUTOFF_HHMM } = require('../jobs/dayCutoff');
-      if (pastCutoff(nowHHMM())) {
+      if (where === 'closed') {
         const at = await quizTimeOf(st.id);
         await wa.sendText(session.id, mobile,
-          `🌙 Today's quiz has closed for the night (cut-off *${M.fmtTime(CUTOFF_HHMM)}*).\n\n` +
-          `${st.student_name}'s next quiz arrives tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
+          `🌙 Tonight's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
+          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.OPEN_HHMM)}*` +
+          `${at ? `, and we'll remind you around *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
         return;
       }
 

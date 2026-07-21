@@ -25,6 +25,10 @@ const router = express.Router();
 router.use(require('../admin/customerRoutes'));
 // question_bank grid, CRUD and the Excel import pipeline
 router.use(require('../admin/questionRoutes'));
+// read-only WhatsApp conversation history
+router.use(require('../admin/whatsappRoutes'));
+// website enquiries + testimonial moderation
+router.use(require('../admin/inboxRoutes'));
 
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 const ok = (res, data) => res.json({ success: true, ...data });

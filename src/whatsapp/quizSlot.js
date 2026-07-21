@@ -23,7 +23,10 @@
 const SLOT_START_MIN = Number(process.env.QUIZ_SLOT_START_MIN) || 19 * 60;   // 19:00
 const SLOT_END_MIN   = Number(process.env.QUIZ_SLOT_END_MIN)   || 21 * 60;   // 21:00
 const SLOT_STEP_MIN  = Number(process.env.QUIZ_SLOT_STEP_MIN)  || 15;
-const REMINDER_LEAD_MIN = Number(process.env.REMINDER_LEAD_MIN) || 60;
+// The quiz stays open for hours, so the reminder is a nudge rather than a
+// countdown — 30 minutes is close enough to be useful without arriving so
+// early that it is forgotten.
+const REMINDER_LEAD_MIN = Number(process.env.REMINDER_LEAD_MIN) || 30;
 
 const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 

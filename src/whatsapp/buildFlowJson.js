@@ -65,7 +65,7 @@ async function build() {
 
             { type: 'OptIn', name: 'accept_terms', required: true,
               label: 'I am the parent/guardian and accept the Terms',
-              'on-click-action': { name: 'open_url', url: pol?.url || 'https://quizpe.in/trial-terms' } },
+              'on-click-action': { name: 'open_url', url: require('./messages').publicUrl(pol?.url || '/legal.html?consent=1') } },
 
             { type: 'Footer', label: 'Start Free Trial',
               'on-click-action': {

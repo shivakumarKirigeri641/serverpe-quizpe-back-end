@@ -26,9 +26,15 @@ const BASE_SUBJECT = 'MATHS';
 // How late a missed send may still go out (minutes). Beyond this the batch is
 // abandoned for the day rather than surprising parents hours after the fact.
 const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
-// How long after quiz_time before a skipped quiz is called missed. Long enough
-// that a parent still mid-quiz is never accused of skipping.
-const MISSED_AFTER_MIN = Number(process.env.MISSED_AFTER_MIN) || 90;
+// The quiz window runs to 23:45, so a "you have not started" nudge is timed to
+// a FIXED point late in the evening rather than an offset from each parent's
+// slot. Offsetting from the slot would tell a 19:15 parent they had missed it
+// at 20:45, when in fact they still had three hours left.
+// 21:30 deliberately: late enough that the parent has had their slot and a
+// couple of hours to act, early enough that it is not a late-night buzz. It
+// still leaves 2h15m of window, which is plenty for a 5-minute quiz. No
+// unsolicited message from QuizPe goes out after this time.
+const MISSED_AT_HHMM = process.env.MISSED_AT_HHMM || '21:30';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -78,6 +84,15 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
   // notification_log, not by the exact time match.
   const [h, m] = hhmm.split(':').map(Number);
   const nowMin = h * 60 + m;
+
+  // The "not started yet" nudge is not tied to anyone's slot — it goes out at
+  // one fixed time for everyone still outstanding, late in the window.
+  if (kind === 'quiz_missed') {
+    const [mh, mm] = MISSED_AT_HHMM.split(':').map(Number);
+    const target = mh * 60 + mm;
+    if (nowMin < target || nowMin > target + CATCH_UP_MIN) return [];
+  }
+
   const { rows } = await db.query(
     `SELECT st.id  AS student_id, st.student_name,
             p.id   AS parent_id, p.parent_name, p.parent_mobile_number,
@@ -104,8 +119,11 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
                            ORDER BY x.id DESC LIMIT 1) w ON true
       WHERE s.is_active
         AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
-        AND (EXTRACT(HOUR FROM s.${timeCol}) * 60 + EXTRACT(MINUTE FROM s.${timeCol}) + $5::int)
-              BETWEEN $1::int - $4::int AND $1::int
+        -- reminder and quiz_trigger match the parent's own slot; quiz_missed
+        -- was already gated on the clock above, so it matches everyone left
+        AND ($2 = 'quiz_missed'
+             OR (EXTRACT(HOUR FROM s.${timeCol}) * 60 + EXTRACT(MINUTE FROM s.${timeCol}) + $5::int)
+                  BETWEEN $1::int - $4::int AND $1::int)
         -- a missed-quiz nudge is never sent on the parent's very first day,
         -- when a skipped quiz is usually setup confusion rather than a skip
         AND ($2 <> 'quiz_missed' OR (CURRENT_DATE - s.plan_start_date) + 1 > 1)
@@ -275,7 +293,7 @@ function startScheduler() {
       await runJob('reminder', REMINDER_TEMPLATES);
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
       // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
-      await runJob('quiz_missed', 'qp_quiz_missed_daily_v1', MISSED_AFTER_MIN);
+      await runJob('quiz_missed', 'qp_quiz_missed_daily_v1');
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();

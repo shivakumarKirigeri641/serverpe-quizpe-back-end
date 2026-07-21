@@ -18,6 +18,7 @@ const express = require('express');
 const crypto = require('crypto');
 const db = require('../database/connectDB');
 const Q = require('../whatsapp/quiz');
+const { claimOrVerify } = require('./deviceLock');
 
 const router = express.Router();
 const TTL_HOURS = 14;                        // a day's quiz link
@@ -123,6 +124,10 @@ router.get('/api/context', async (req, res) => {
     const bad = linkProblem(l);
     if (bad) return reject(res, 410, bad[0], bad[1]);
 
+    // a forwarded link must not let someone else answer this child's quiz
+    const lock = await claimOrVerify('quiz_links', l, req, res);
+    if (!lock.ok) return reject(res, 403, lock.code, lock.error);
+
     // resume where they stopped; if everything is answered, open the last one
     const p = await progressOf(l.tracker_id);
     const cur = await questionAt(l.tracker_id, p.first_unanswered || p.total);
@@ -155,6 +160,8 @@ router.post('/api/answer', async (req, res) => {
     const l = await load(token);
     const bad = linkProblem(l);
     if (bad) return reject(res, 410, bad[0], bad[1]);
+    const lock = await claimOrVerify('quiz_links', l, req, res);
+    if (!lock.ok) return reject(res, 403, lock.code, lock.error);
     if (answer != null && !LETTERS.includes(answer)) {
       return res.status(400).json({ success: false, error: 'Invalid answer.' });
     }
@@ -181,6 +188,8 @@ router.post('/api/finish', async (req, res) => {
     const l = await load(req.body?.token);
     const bad = linkProblem(l);
     if (bad) return reject(res, 410, bad[0], bad[1]);
+    const lock = await claimOrVerify('quiz_links', l, req, res);
+    if (!lock.ok) return reject(res, 403, lock.code, lock.error);
 
     const p = await progressOf(l.tracker_id);
     if (p.done < p.total) {
