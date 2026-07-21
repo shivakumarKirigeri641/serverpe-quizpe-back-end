@@ -39,7 +39,7 @@ const maskMobile = (m) => (m ? `${'X'.repeat(Math.max(0, m.length - 4))}${m.slic
 
 async function fetchWeekData(studentId, subjectCode, days) {
   const head = (await db.query(
-    `SELECT st.id AS student_id, st.student_name,
+    `SELECT st.id AS student_id, st.student_name, st.school_name,
             p.parent_name, p.parent_mobile_number, su.state_name,
             b.board_code, g.grade_name, m.medium_name,
             sub.id AS subject_id, sub.subject_name,

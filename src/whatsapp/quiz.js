@@ -399,16 +399,25 @@ _Full answers & explanations are in the report below._ 📄`);
         parentId: info.parent_id, studentId: info.student_id, trackerId,
         mobile, userName: null, type: due.type, planType: due.planType, periodKey: due.periodKey,
       });
-      await wa.sendButtons(sessionId, mobile,
-`🙏 *Thank you!*
+      // Feedback now happens on a web page: star rating, quick tags and a
+      // comment in one screen, instead of a two-step chat exchange.
+      const { createFeedbackLink } = require('../routers/feedbackWebRouter');
+      const { url } = await createFeedbackLink({
+        sessionId, mobile, trackerId,
+        parentId: info.parent_id, studentId: info.student_id,
+        type: due.type, planType: due.planType, periodKey: due.periodKey,
+      });
+      await wa.sendCtaUrl(sessionId, mobile, {
+        header: 'How was the quiz?',
+        body: `🙏 *Thank you!*
 
-That's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀
+That's today's quiz done. ${fb.askText(due.type, info?.student_name)}
 
-${fb.askText(due.type, info?.student_name)}`,
-        [{ id: `fb_${trackerId}_5`, title: '😀 Loved it' },
-         { id: `fb_${trackerId}_3`, title: '🙂 It was OK' },
-         { id: `fb_${trackerId}_1`, title: '😕 Too hard' }],
-        'Your feedback helps us improve');
+_Takes 10 seconds._`,
+        displayText: '⭐ Rate the quiz',
+        url,
+        footer: 'QuizPe by ServerPe App Solutions',
+      });
     } else {
       await wa.sendText(sessionId, mobile,
         `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀`);
@@ -427,6 +436,19 @@ ${fb.askText(due.type, info?.student_name)}`,
     } catch (e) {
       console.error(`[quiz] daily report failed (tracker ${trackerId}):`, e.message);
     }
+
+    // ⚠️ TEMPORARY test drive — the report has gone out, so wipe the scratch
+    // rows it needed. Remove this block with testDrive.js before launch.
+    try {
+      const TD = require('./testDrive');
+      if (await TD.isTestTracker(trackerId)) {
+        const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+        if (t) await TD.purgeStudent(t.student_id);
+        console.log(`[testDrive] scratch rows for tracker ${trackerId} removed`);
+        return;                       // no feedback ask for a test drive
+      }
+    } catch (e) { console.error('[testDrive] cleanup failed:', e.message); }
+
     await askFeedback();
   }, `report + feedback for tracker ${trackerId}`);
 

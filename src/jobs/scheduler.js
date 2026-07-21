@@ -18,6 +18,7 @@ const cron = require('node-cron');
 const db = require('../database/connectDB');
 const wa = require('../whatsapp/client');
 const Q = require('../whatsapp/quiz');
+const { closeOutDay, CUTOFF_HHMM } = require('./dayCutoff');
 
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 const BASE_SUBJECT = 'MATHS';
@@ -187,6 +188,9 @@ function startScheduler() {
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
       // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
       await runJob('quiz_missed', 'qp_quiz_missed_daily_v1', MISSED_AFTER_MIN);
+
+      // Hard stop for the day: settle every unfinished quiz and kill its link.
+      if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {

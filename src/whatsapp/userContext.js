@@ -116,7 +116,7 @@ async function getUserContext(rawMobile, exec = db) {
 async function getStudents(parentId, exec = db) {
   if (!parentId) return [];
   const { rows } = await exec.query(
-    `SELECT st.id, st.student_name, b.board_code, g.grade_name
+    `SELECT st.id, st.student_name, st.school_name, b.board_code, g.grade_name
        FROM students st
        JOIN boards b ON b.id = st.board_id
        JOIN grades g ON g.id = st.grade_id
@@ -152,6 +152,9 @@ function buildMainMenu(ctx) {
     rows.push({ id: 'start_quiz', title: '▶️ Start quiz now',
                 description: "Today's quiz — opens at your daily quiz time" });
   }
+  // ⚠️ TEMPORARY test-drive entry — remove before launch (see testDrive.js)
+  rows.push({ id: 'td_start', title: '🧪 Test drive (temp)',
+              description: 'Any board/grade — testing only, nothing saved' });
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
     { id: 'quiz_report',     title: '📊 Quiz reports',    description: 'Recent scores and progress' },

@@ -296,13 +296,17 @@ async function finalize(c, pay) {
 
     for (const s of students) {
       const studentId = (await client.query(
-        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name)
+        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
          VALUES ($1,(SELECT id FROM boards WHERE board_code=$2),(SELECT id FROM grades WHERE grade_code=$3),
-                    (SELECT id FROM mediums WHERE medium_code=$4),$5)
+                    (SELECT id FROM mediums WHERE medium_code=$4),$5,$6)
          ON CONFLICT (parent_id, student_name) DO UPDATE
-           SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id, medium_id=EXCLUDED.medium_id, modified_at=now()
+           SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id, medium_id=EXCLUDED.medium_id,
+               -- optional field: never wipe a stored school with a blank
+               school_name=COALESCE(EXCLUDED.school_name, students.school_name),
+               modified_at=now()
          RETURNING id`,
-        [parentId, s.board, s.grade, s.medium, String(s.name).trim().slice(0, 60)])).rows[0].id;
+        [parentId, s.board, s.grade, s.medium, String(s.name).trim().slice(0, 60),
+         String(s.school_name || '').trim().slice(0, 120) || null])).rows[0].id;
 
       // subject add-ons chosen for this child (refresh: deactivate old, add current)
       await client.query(`UPDATE student_addons_subscriptions SET is_active=false WHERE student_id=$1`, [studentId]);

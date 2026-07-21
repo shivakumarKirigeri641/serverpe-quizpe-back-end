@@ -54,7 +54,10 @@ router.get('/api/context', async (req, res) => {
     const link = await loadToken(req.query.token);
     if (!link) return res.status(410).json({ success: false, error: 'This link has expired or was already used.' });
 
-    const [boards, mediums, grades, states, plan, policy, biz] = await Promise.all([
+    const { getAvailability } = require('../content/availability');
+    const [avail, boards, mediums, grades, states, plan, policy, biz] = await Promise.all([
+      // only board/grade/medium combos that actually have questions
+      getAvailability(),
       db.query(`SELECT board_code, board_name FROM boards WHERE is_active ORDER BY display_order`),
       db.query(`SELECT m.medium_code, m.medium_name, m.native_name, b.board_code
                   FROM board_mediums bm
@@ -81,9 +84,11 @@ router.get('/api/context', async (req, res) => {
       success: true,
       parentName: link.parent_name,
       mobile: link.mobile_number,
-      boards: boards.rows,
+      // content-driven: a parent can only pick something we can deliver
+      availability: avail.availability,
+      boards: avail.boards,
       mediumsByBoard,
-      grades: grades.rows,
+      grades: avail.grades,
       states: states.rows,
       plan: plan.rows[0],
       policy: policy.rows[0],
@@ -98,7 +103,7 @@ router.get('/api/context', async (req, res) => {
 /* ------------------------------------------------------------------- submit */
 
 router.post('/api/submit', async (req, res) => {
-  const { token, student_name, board, medium, grade, state, accept_terms } = req.body || {};
+  const { token, student_name, school_name, board, medium, grade, state, accept_terms } = req.body || {};
   try {
     const link = await loadToken(token);
     if (!link) return res.status(410).json({ success: false, error: 'This link has expired or was already used.' });
@@ -140,12 +145,27 @@ router.post('/api/submit', async (req, res) => {
         [link.parent_name || 'Parent', link.mobile_number, state])).rows[0].id;
 
       await c.query(
-        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name)
-         VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+         VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (parent_id, student_name) DO UPDATE
            SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
-               medium_id=EXCLUDED.medium_id, modified_at=now()`,
-        [parentId, checks[0].rows[0].id, checks[2].rows[0].id, checks[1].rows[0].id, name]);
+               medium_id=EXCLUDED.medium_id,
+               -- optional field: never wipe a stored school with a blank
+               school_name=COALESCE(EXCLUDED.school_name, students.school_name),
+               modified_at=now()`,
+        [parentId, checks[0].rows[0].id, checks[2].rows[0].id, checks[1].rows[0].id, name,
+         String(school_name || '').trim().slice(0, 120) || null]);
+
+      // The form is filtered, but a crafted POST is not — refuse anything we
+      // cannot actually deliver rather than creating a doomed subscription.
+      const { isDeliverable } = require('../content/availability');
+      if (!await isDeliverable(board, grade, medium)) {
+        await c.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: 'We do not have quiz content for that board, grade and medium yet. Please pick another combination.',
+        });
+      }
 
       // Supersede any earlier subscription for this parent — only one may be
       // active at a time, so the daily sweep can never pick up two.

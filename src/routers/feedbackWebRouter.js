@@ -81,6 +81,8 @@ router.get('/api/context', async (req, res) => {
 
 /* ------------------------------------------------------------------- submit */
 router.post('/api/submit', async (req, res) => {
+  // declared out here so the catch can hand the link back on failure
+  let claimedId = null, saved = false;
   try {
     const { token, rating, tags, message } = req.body || {};
     const l = await load(token);
@@ -108,14 +110,26 @@ router.post('/api/submit', async (req, res) => {
       `UPDATE feedback_links SET submitted_at = now()
         WHERE id = $1 AND submitted_at IS NULL`, [l.id]);
     if (!claimed.rowCount) return res.status(410).json({ success: false, error: SPENT });
+    claimedId = l.id;   // from here a failure must hand the link back
 
+    // markAsked() already wrote a placeholder row for this period (that's how
+    // "don't nag again tomorrow" works), and fb_once_per_period enforces one
+    // row per parent per period — so fill that row in rather than inserting.
     await db.query(
       `INSERT INTO feedbacks (parent_id, student_id, tracker_id, mobile_number, user_name,
                               rating, message, tags, feedback_type, plan_type, period_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT ON CONSTRAINT fb_once_per_period DO UPDATE SET
+         rating      = EXCLUDED.rating,
+         message     = COALESCE(EXCLUDED.message, feedbacks.message),
+         tags        = COALESCE(EXCLUDED.tags, feedbacks.tags),
+         tracker_id  = COALESCE(EXCLUDED.tracker_id, feedbacks.tracker_id),
+         user_name   = COALESCE(EXCLUDED.user_name, feedbacks.user_name),
+         modified_at = now()`,
       [l.parent_id, l.student_id, l.tracker_id, l.mobile_number, l.parent_name,
        stars, note || null, picked.length ? picked : null,
        l.feedback_type, l.plan_type, l.period_key]);
+    saved = true;
 
     // Thank them in chat, naming their own next quiz time.
     let thanks = null;
@@ -138,6 +152,11 @@ router.post('/api/submit', async (req, res) => {
     res.json({ success: true, rating: stars, whatsapp_url: n ? `https://wa.me/${n}` : null });
   } catch (e) {
     console.error('[feedbackweb] submit failed:', e.message);
+    // never leave a link spent on a feedback we failed to store
+    if (claimedId && !saved) {
+      await db.query(`UPDATE feedback_links SET submitted_at = NULL WHERE id = $1`, [claimedId])
+        .catch(() => {});
+    }
     res.status(500).json({ success: false, error: 'Could not save your feedback.' });
   }
 });

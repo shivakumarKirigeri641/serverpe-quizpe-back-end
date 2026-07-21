@@ -121,7 +121,8 @@ Type *menu* to see your options.`;
 *Quiz time:* ${fmtTime(ctx.quizTime)} daily
 
 *Children enrolled* (${students.length}/${ctx.seatLimit}):
-${students.map(s => `👦 *${s.student_name}* — ${s.board_code} · ${s.grade_name}`).join('\n')}
+${students.map(s => `👦 *${s.student_name}* — ${s.board_code} · ${s.grade_name}` +
+                    (s.school_name ? `\n   🏫 ${s.school_name}` : '')).join('\n')}
 
 _${b.product_name} · ${b.product_tagline}_`;
 }

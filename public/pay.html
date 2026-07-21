@@ -101,6 +101,7 @@
       return `<div class="student" data-i="${i}">
         <span class="tag">Child ${i + 1}</span>
         <div class="field"><label>Name *</label><input class="s-name" maxlength="60" placeholder="Child's name" /></div>
+        <div class="field"><label>School name</label><input class="s-school" maxlength="120" placeholder="Short name is enough" /></div>
         <div class="row2">
           <div class="field"><label>Board *</label><select class="s-board"><option value="">Select</option>${boards.map(b => `<option value="${b}">${b}</option>`).join("")}</select></div>
           <div class="field"><label>Grade *</label><select class="s-grade" disabled><option value="">Board first</option></select></div>
@@ -212,6 +213,7 @@
       const parent = $("parentName").value.trim();
       return [...document.querySelectorAll(".student")].map(el => ({
         name: el.querySelector(".s-name").value.trim(),
+        school_name: el.querySelector(".s-school").value.trim(),
         board: el.querySelector(".s-board").value,
         medium: el.querySelector(".s-medium").value,
         grade: el.querySelector(".s-grade").value,

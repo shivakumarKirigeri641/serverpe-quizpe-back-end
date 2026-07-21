@@ -15,6 +15,8 @@ const trialRouter = require('./routers/trialRouter');
 const reportsRouter = require('./routers/reportsRouter');
 const paymentRouter = require('./routers/paymentRouter');
 const quizWebRouter = require('./routers/quizWebRouter');
+const feedbackWebRouter = require('./routers/feedbackWebRouter');
+const supportWebRouter = require('./routers/supportWebRouter');
 
 const app = express();
 
@@ -45,6 +47,12 @@ app.use('/pay', paymentRouter);
 
 // Web quiz — full option text, instant next question (backs public/quiz.html).
 app.use('/quiz', quizWebRouter);
+
+// Star rating + tags + comment (backs public/feedback.html).
+app.use('/feedback', feedbackWebRouter);
+
+// Support request form (backs public/support.html).
+app.use('/support', supportWebRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);

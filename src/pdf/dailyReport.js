@@ -46,7 +46,7 @@ const maskMobile = (m) => (m ? `${'X'.repeat(Math.max(0, m.length - 4))}${m.slic
 async function fetchReportData(trackerId) {
   const head = (await db.query(
     `SELECT t.quiz_date, t.quiz_type, t.question_count,
-            st.id AS student_id, st.student_name,
+            st.id AS student_id, st.student_name, st.school_name,
             p.parent_name, p.parent_mobile_number, su.state_name,
             b.board_code, b.board_name, g.grade_name, m.medium_name, sub.subject_name,
             pl.plan_name, s.plan_start_date, s.plan_end_date,
@@ -65,7 +65,7 @@ async function fetchReportData(trackerId) {
                            ORDER BY x.id DESC LIMIT 1) s ON true
        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
       WHERE t.id = $1
-      GROUP BY t.quiz_date, t.quiz_type, t.question_count, st.id, st.student_name,
+      GROUP BY t.quiz_date, t.quiz_type, t.question_count, st.id, st.student_name, st.school_name,
                p.parent_name, p.parent_mobile_number, su.state_name,
                b.board_code, b.board_name, g.grade_name, m.medium_name, sub.subject_name,
                pl.plan_name, s.plan_start_date, s.plan_end_date`, [trackerId])).rows[0];
@@ -223,6 +223,7 @@ async function generateDailyReport(trackerId) {
   doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(13).text(head.student_name || '—', sx + 12, y + 26);
   kv(doc, 'Board / Grade', `${head.board_code} · ${head.grade_name}`, sx + 12, y + 50, colW - 24);
   kv(doc, 'Subject / Medium', `${head.subject_name} · ${head.medium_name}`, sx + 12, y + 66, colW - 24);
+  if (head.school_name) kv(doc, 'School', head.school_name, sx + 12, y + 82, colW - 24);
 
   y += cardH + 14;
 

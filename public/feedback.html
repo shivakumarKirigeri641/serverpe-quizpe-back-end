@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>QuizPe — Your feedback</title>
+  <style>
+    :root{--brand:#075e54;--brand2:#13b48f;--accent:#00a884;--bg:#eef3f2;--card:#fff;
+          --text:#111b21;--muted:#667781;--border:#d7dedd;--warn:#c0392b;}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--text);min-height:100vh;}
+    .head{background:var(--brand);color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px;}
+    .head img{width:34px;height:34px;border-radius:8px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:15px;}.head p{margin:1px 0 0;font-size:11px;opacity:.85;}
+    .wrap{max-width:520px;margin:0 auto;padding:18px 14px 40px;}
+    .card{background:var(--card);border-radius:16px;padding:20px 18px;box-shadow:0 3px 14px rgba(0,0,0,.07);
+          animation:rise .45s both;}
+    @keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+    .score{display:flex;gap:10px;align-items:center;background:#e9f8f4;border-radius:12px;
+           padding:10px 12px;margin-bottom:16px;font-size:13px;color:var(--brand);}
+    .score b{font-size:17px;}
+    h2{margin:0 0 4px;font-size:18px;}
+    .sub{color:var(--muted);font-size:13px;margin:0 0 16px;}
+    .stars{display:flex;gap:8px;justify-content:center;margin:6px 0 4px;}
+    .star{font-size:38px;line-height:1;cursor:pointer;filter:grayscale(1);opacity:.45;
+          background:none;border:0;padding:2px;transition:transform .15s,filter .2s,opacity .2s;}
+    .star.on{filter:none;opacity:1;transform:scale(1.12);}
+    .star:active{transform:scale(.92);}
+    .ratingLabel{text-align:center;font-size:13px;color:var(--brand);font-weight:700;min-height:18px;margin-bottom:14px;}
+    .section{margin-top:16px;display:none;}
+    .section.on{display:block;animation:rise .4s both;}
+    .label{font-size:13px;font-weight:700;margin-bottom:8px;}
+    .chips{display:flex;gap:8px;flex-wrap:wrap;}
+    .chip{flex:1 1 30%;min-width:96px;background:#fff;border:2px solid var(--border);border-radius:12px;
+          padding:12px 8px;font-size:13px;cursor:pointer;text-align:center;line-height:1.3;
+          transition:border-color .15s,background .15s,transform .08s;}
+    .chip.on{border-color:var(--accent);background:#e9f8f4;font-weight:700;}
+    .chip:active{transform:scale(.97);}
+    textarea{width:100%;min-height:92px;border:2px solid var(--border);border-radius:12px;padding:12px;
+             font-family:inherit;font-size:15px;resize:vertical;margin-top:4px;}
+    textarea:focus{outline:none;border-color:var(--accent);}
+    .count{text-align:right;font-size:11px;color:var(--muted);margin-top:4px;}
+    .err{color:var(--warn);font-size:13px;margin-top:10px;display:none;}
+    .err.on{display:block;}
+    .submit{width:100%;margin-top:18px;padding:15px;border:0;border-radius:12px;background:var(--accent);
+            color:#fff;font-size:16px;font-weight:700;cursor:pointer;}
+    .submit[disabled]{background:#b8ccc6;cursor:not-allowed;}
+    .msg{text-align:center;padding:44px 18px;color:var(--muted);}
+    /* thank-you */
+    .done{display:none;text-align:center;padding:40px 20px;}
+    .done .big{font-size:52px;animation:cheer 1s cubic-bezier(.34,1.56,.64,1) both;}
+    @keyframes cheer{0%{transform:scale(0) rotate(-20deg);opacity:0;}
+                     60%{transform:scale(1.25) rotate(8deg);opacity:1;}100%{transform:scale(1);}}
+    .done h2{color:var(--brand);margin:12px 0 6px;animation:rise .5s .2s both;}
+    .done p{color:var(--muted);font-size:14px;animation:rise .5s .35s both;}
+    .wa{display:inline-block;margin-top:20px;padding:13px 26px;border-radius:24px;background:var(--accent);
+        color:#fff;font-weight:700;text-decoration:none;font-size:15px;animation:rise .5s .5s both;}
+    canvas#blast{position:fixed;inset:0;pointer-events:none;z-index:60;display:none;}
+    @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none !important;}}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1>How was today's quiz?</h1><p id="sub">Loading…</p></div>
+  </div>
+
+  <div class="wrap">
+    <div class="card" id="form" style="display:none">
+      <div class="score" id="scoreBox" style="display:none"></div>
+      <h2 id="title">Your feedback</h2>
+      <p class="sub">Takes 10 seconds — it genuinely shapes tomorrow's questions.</p>
+
+      <div class="label">Your rating <span style="color:var(--warn)">*</span></div>
+      <div class="stars" id="stars"></div>
+      <div class="ratingLabel" id="ratingLabel"></div>
+
+      <div class="section" id="tagSection">
+        <div class="label" id="tagLabel">What stood out?</div>
+        <div class="chips" id="chips"></div>
+      </div>
+
+      <div class="section" id="noteSection">
+        <div class="label">Anything else? <span id="noteReq" style="color:var(--warn);display:none">*</span></div>
+        <textarea id="note" maxlength="1000" placeholder="Optional — tell us what to improve"></textarea>
+        <div class="count"><span id="count">0</span>/1000</div>
+      </div>
+
+      <div class="err" id="err"></div>
+      <button class="submit" id="submit" disabled>Submit feedback</button>
+    </div>
+
+    <div class="done" id="done">
+      <div class="big">🎉</div>
+      <h2>Thank you!</h2>
+      <p id="doneMsg">Your feedback is saved.</p>
+      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <p id="redir" style="font-size:12px;"></p>
+    </div>
+
+    <div class="msg" id="msg" style="display:none"></div>
+  </div>
+  <canvas id="blast"></canvas>
+
+<script>
+  const token = new URLSearchParams(location.search).get('token');
+  const $ = (id) => document.getElementById(id);
+  let rating = 0, tags = [], TAGS = null, busy = false;
+
+  const LABELS = { 1:'Not good 😕', 2:'Could be better', 3:'It was OK 🙂', 4:'Good 😀', 5:'Loved it! 🤩' };
+
+  const show = (w) => {
+    $('form').style.display = w === 'form' ? 'block' : 'none';
+    $('done').style.display = w === 'done' ? 'block' : 'none';
+    $('msg').style.display  = w === 'msg'  ? 'block' : 'none';
+  };
+  const fail = (t) => { $('msg').textContent = t; show('msg'); $('sub').textContent = ''; };
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  /* ---------------------------------------------------------------- rating */
+  $('stars').innerHTML = [1,2,3,4,5]
+    .map(n => `<button class="star" data-n="${n}" aria-label="${n} star">⭐</button>`).join('');
+  [...document.querySelectorAll('.star')].forEach(b => b.onclick = () => setRating(+b.dataset.n));
+
+  function setRating(n) {
+    rating = n;
+    [...document.querySelectorAll('.star')].forEach(b => b.classList.toggle('on', +b.dataset.n <= n));
+    $('ratingLabel').textContent = LABELS[n];
+
+    // the three quick tags follow the mood of the rating
+    const mood = n >= 4 ? 'happy' : n <= 2 ? 'unhappy' : null;
+    tags = [];
+    if (mood && TAGS) {
+      $('tagLabel').textContent = mood === 'happy' ? 'What worked well?' : 'What went wrong?';
+      $('chips').innerHTML = TAGS[mood]
+        .map(t => `<button class="chip" data-t="${esc(t)}">${esc(t)}</button>`).join('');
+      [...document.querySelectorAll('.chip')].forEach(c => c.onclick = () => {
+        const t = c.dataset.t;
+        if (tags.includes(t)) tags = tags.filter(x => x !== t); else tags.push(t);
+        c.classList.toggle('on');
+        validate();
+      });
+      $('tagSection').classList.add('on');
+    } else {
+      $('tagSection').classList.remove('on');
+    }
+
+    $('noteSection').classList.add('on');
+    // a low score needs a reason, or the feedback isn't actionable
+    $('noteReq').style.display = n <= 2 ? 'inline' : 'none';
+    validate();
+  }
+
+  $('note').oninput = () => { $('count').textContent = $('note').value.length; validate(); };
+
+  function validate() {
+    const note = $('note').value.trim();
+    let ok = rating >= 1;
+    let why = '';
+    if (rating >= 1 && rating <= 2 && !note && !tags.length) {
+      ok = false;
+      why = 'Please pick a tag or leave a short note so we know what to fix.';
+    }
+    $('submit').disabled = !ok;
+    $('err').textContent = why;
+    $('err').classList.toggle('on', !!why && rating > 0);
+    return ok;
+  }
+
+  /* ---------------------------------------------------------------- submit */
+  $('submit').onclick = async () => {
+    if (busy || !validate()) return;
+    busy = true; $('submit').disabled = true; $('submit').textContent = 'Submitting…';
+    try {
+      const r = await (await fetch('/feedback/api/submit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, rating, tags, message: $('note').value.trim() }),
+      })).json();
+      if (!r.success) {
+        busy = false; $('submit').disabled = false; $('submit').textContent = 'Submit feedback';
+        $('err').textContent = r.error || 'Could not save your feedback.';
+        $('err').classList.add('on');
+        return;
+      }
+      $('doneMsg').textContent = rating >= 4
+        ? 'So glad you enjoyed it — see you at tomorrow’s quiz!'
+        : 'We’ve noted this and will make tomorrow better.';
+      show('done'); $('sub').textContent = 'Submitted';
+      blast();
+      if (r.whatsapp_url) {
+        $('waBtn').href = r.whatsapp_url;
+        let n = 4;
+        const t = setInterval(() => {
+          n--; $('redir').textContent = n > 0 ? `Back to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+          if (n <= 0) { clearInterval(t); location.href = r.whatsapp_url; }
+        }, 1000);
+      } else { $('waBtn').style.display = 'none'; }
+    } catch {
+      busy = false; $('submit').disabled = false; $('submit').textContent = 'Submit feedback';
+      $('err').textContent = 'Network problem — please try again.';
+      $('err').classList.add('on');
+    }
+  };
+
+  /* ------------------------------------------------------- confetti blast */
+  function blast() {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const cv = $('blast'), ctx = cv.getContext('2d');
+    cv.style.display = 'block';
+    cv.width = innerWidth; cv.height = innerHeight;
+    const COLORS = ['#00a884','#13b48f','#ffd166','#ef476f','#118ab2','#f78c6b'];
+    const bits = Array.from({ length: 140 }, () => ({
+      x: innerWidth / 2, y: innerHeight * 0.42,
+      vx: (Math.random() - 0.5) * 13, vy: Math.random() * -13 - 4,
+      s: 5 + Math.random() * 7, c: COLORS[(Math.random() * COLORS.length) | 0],
+      rot: Math.random() * 6.3, vr: (Math.random() - 0.5) * 0.3,
+    }));
+    let frames = 0;
+    (function tick() {
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      bits.forEach(b => {
+        b.vy += 0.32; b.x += b.vx; b.y += b.vy; b.rot += b.vr;
+        ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.rot);
+        ctx.fillStyle = b.c; ctx.fillRect(-b.s / 2, -b.s / 2, b.s, b.s * 0.6); ctx.restore();
+      });
+      if (++frames < 190) requestAnimationFrame(tick);
+      else { cv.style.display = 'none'; ctx.clearRect(0, 0, cv.width, cv.height); }
+    })();
+  }
+
+  /* ------------------------------------------------------------------ load */
+  (async () => {
+    if (!token) return fail('Invalid link.');
+    try {
+      const d = await (await fetch(`/feedback/api/context?token=${encodeURIComponent(token)}`)).json();
+      if (!d.success) return fail(d.error || 'This feedback link is no longer valid.');
+      TAGS = d.tags;
+      $('sub').textContent = d.student ? `${d.student} · ${d.subject || 'Quiz'}` : 'QuizPe';
+      $('title').textContent = d.student ? `How was ${d.student}'s quiz?` : 'Your feedback';
+      if (d.score) {
+        $('scoreBox').style.display = 'flex';
+        $('scoreBox').innerHTML =
+          `<span>📊</span><span>Today's score <b>${d.score.correct}/${d.score.total}</b> (${d.score.pct}%) · Grade <b>${d.score.grade}</b></span>`;
+      }
+      show('form');
+    } catch { fail('Could not load the feedback form.'); }
+  })();
+</script>
+</body>
+</html>

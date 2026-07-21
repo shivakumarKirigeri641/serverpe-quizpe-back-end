@@ -479,6 +479,33 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // ⚠️ TEMPORARY test drive — remove before launch (see testDrive.js)
+  if (id === 'td_start' || id.startsWith('td_')) {
+    const TD = require('./testDrive');
+    if (id === 'td_start') { await TD.askBoard(session, mobile, setState); return; }
+    if (id.startsWith('td_b_')) {
+      const board = id.slice(5);
+      await mergeContext(session, { td_board: board });
+      await TD.askGrade(session, mobile, board, setState);
+      return;
+    }
+    if (id.startsWith('td_g_')) {
+      const grade = id.slice(5);
+      await mergeContext(session, { td_grade: grade });
+      await TD.askCount(session, mobile,
+        { board: session.context.td_board, grade }, setState);
+      return;
+    }
+    if (id.startsWith('td_n_')) {
+      const count = Number(id.slice(5));
+      const started = await TD.start(session, mobile, {
+        board: session.context.td_board, grade: session.context.td_grade, count,
+      });
+      await setState(session, started ? 'in_quiz' : 'main_menu', 'testdrive_started');
+      return;
+    }
+  }
+
   // The 8 PM template's "Start Quiz now" quick-reply arrives as a `button`
   // message. Tapping it reopens the 24h window AND starts today's quiz, from
   // whatever state the session is in.
@@ -803,9 +830,26 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
       await wa.sendText(session.id, mobile, M.quizSchedule(ctx, students));
       break;
 
-    case 'support':
-      await wa.sendText(session.id, mobile, await M.support());
+    case 'support': {
+      // A form, so every query arrives categorised and with a ticket number —
+      // far better than "reply with your question" free text in chat.
+      const { createSupportLink } = require('../routers/supportWebRouter');
+      const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
+      const b = await M.business();
+      await wa.sendCtaUrl(session.id, mobile, {
+        header: 'Support',
+        body: `💬 *We're here to help!*
+
+Tap below to raise a request — pick what it's about, describe the issue, and you'll get a ticket number straight away.
+
+📧 ${b.support_email}
+🌐 ${b.product_website}`,
+        displayText: '🛠️ Raise a request',
+        url,
+        footer: `${b.company_name}`,
+      });
       break;
+    }
 
     default:
       await showMainMenu(session, mobile, ctx);
@@ -854,6 +898,17 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
         await wa.sendText(session.id, mobile,
           `⏰ ${st.student_name}'s quiz opens at *${M.fmtTime(opensAt)}* today.\n\n` +
           `We'll message you the moment it's ready — see you then! 🌙`);
+        return;
+      }
+
+      // ...and the day closes at the cutoff. Starting a quiz at 23:59 would
+      // run past midnight and be settled mid-answer by the cutoff job.
+      const { pastCutoff, CUTOFF_HHMM } = require('../jobs/dayCutoff');
+      if (pastCutoff(nowHHMM())) {
+        const at = await quizTimeOf(st.id);
+        await wa.sendText(session.id, mobile,
+          `🌙 Today's quiz has closed for the night (cut-off *${M.fmtTime(CUTOFF_HHMM)}*).\n\n` +
+          `${st.student_name}'s next quiz arrives tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
         return;
       }
 
