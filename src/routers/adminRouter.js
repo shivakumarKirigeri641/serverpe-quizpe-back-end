@@ -46,6 +46,12 @@ const fail = (res, code, error) => res.status(code).json({ success: false, error
 router.post('/otp', express.json(), async (req, res) => {
   const { mobile } = req.body || {};
   const ip = req.ip || req.socket.remoteAddress || 'local';
+  // Validate here, not only in the browser. Without this, a direct POST of any
+  // junk reaches the SMS provider and writes a row — the client-side check is a
+  // convenience for the admin, never a control.
+  if (!/^[6-9]\d{9}$/.test(String(mobile || '').replace(/\D/g, '').slice(-10))) {
+    return fail(res, 400, 'Enter a valid 10-digit mobile number.');
+  }
   try {
     const r = await requestCode(mobile, ip);
     if (r.error) return fail(res, 429, r.error);
