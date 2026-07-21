@@ -202,6 +202,57 @@ async function engagement() {
 }
 
 /**
+ * Enrolled vs attended, one row per day.
+ *
+ * The existing daily() answers "how many quizzes happened", which flatters a
+ * shrinking cohort: ten quizzes is excellent from twelve children and dismal
+ * from a hundred. This pairs each day's attendance with the number of children
+ * who were actually DUE a quiz that day, so the gap between the two bars is
+ * the thing you read.
+ *
+ * "Expected" is reconstructed per day from subscription date ranges rather than
+ * from today's roster — a child who joined last Tuesday must not appear in last
+ * Monday's denominator, or every historical day looks like a failure.
+ */
+async function participationDaily(days = 30) {
+  const { rows } = await db.query(`
+    WITH span AS (
+      SELECT generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day')::date AS d
+    ),
+    expected AS (
+      SELECT span.d, COUNT(DISTINCT st.id)::int AS n
+        FROM span
+        JOIN parents_quizpe_subscriptions s
+          ON span.d BETWEEN s.plan_start_date AND s.plan_end_date AND s.is_active
+        JOIN parents pa ON pa.id = s.parent_id AND pa.is_active
+        JOIN students st ON st.parent_id = pa.id AND st.is_active
+       GROUP BY span.d
+    ),
+    actual AS (
+      SELECT t.quiz_date AS d,
+             COUNT(*) FILTER (WHERE qs.status_code = 'completed')::int      AS completed,
+             COUNT(*) FILTER (WHERE qs.status_code = 'in_progress')::int    AS started_only,
+             COUNT(*) FILTER (WHERE qs.status_code IN
+                     ('skipped','closed','expired','idle_closed'))::int     AS missed
+        FROM quizpe_tracker t
+        JOIN quizpe_status qs ON qs.id = t.status_id
+       GROUP BY t.quiz_date
+    )
+    SELECT span.d::text                        AS date,
+           COALESCE(e.n, 0)                    AS enrolled,
+           COALESCE(a.completed, 0)            AS attended,
+           COALESCE(a.started_only, 0)         AS started_only,
+           COALESCE(a.missed, 0)               AS missed,
+           CASE WHEN COALESCE(e.n,0) = 0 THEN 0
+                ELSE ROUND(COALESCE(a.completed,0) * 100.0 / e.n) END::int AS attendance_pct
+      FROM span
+      LEFT JOIN expected e ON e.d = span.d
+      LEFT JOIN actual   a ON a.d = span.d
+     ORDER BY span.d`, [days]);
+  return rows;
+}
+
+/**
  * Cohort health for a single day, as percentages.
  *
  * Counts and percentages answer different questions, and the percentages are
@@ -304,4 +355,4 @@ async function cohort(day = null) {
   };
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, delta };
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta };

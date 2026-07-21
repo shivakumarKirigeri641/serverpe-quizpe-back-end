@@ -125,6 +125,12 @@ router.get('/analytics/cohort', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] cohort:', e.message); fail(res, 500, 'Could not load cohort metrics.'); }
 });
 
+/** Enrolled vs attended, per day — the attendance bar chart. */
+router.get('/analytics/participation', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.participationDaily(clamp(req.query.days, 30, 365)) }); }
+  catch (e) { console.error('[admin] participation:', e.message); fail(res, 500, 'Could not load attendance.'); }
+});
+
 router.get('/analytics/daily', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.daily(clamp(req.query.days, 30, 365)) }); }
   catch (e) { console.error('[admin] daily:', e.message); fail(res, 500, 'Could not load trends.'); }
