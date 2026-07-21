@@ -33,17 +33,6 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
     throw e;
   }
 
-  // ⚠️ TEMPORARY test drive — scratch rows go once the report is out.
-  try {
-    const TD = require('../whatsapp/testDrive');
-    if (await TD.isTestTracker(trackerId)) {
-      const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
-      if (t) await TD.purgeStudent(t.student_id);
-      console.log(`[testDrive] scratch rows for tracker ${trackerId} removed`);
-      return;                                  // no feedback ask for a test drive
-    }
-  } catch (e) { console.error('[testDrive] cleanup failed:', e.message); }
-
   await jobs.push('feedback_ask', { trackerId, sessionId, mobile },
     { dedupeKey: `feedback:${trackerId}` });
 }

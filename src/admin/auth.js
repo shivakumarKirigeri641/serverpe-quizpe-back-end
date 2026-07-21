@@ -3,18 +3,18 @@
  * ---------------------------------------------------------------------------
  * Admin authentication for the QuizPe panel.
  *
- * ⚠️ TEMPORARY: login is mobile number + a fixed PIN (ADMIN_PIN, default 1234).
- * The user asked for this deliberately, to develop quickly, and asked to be
- * reminded to replace it with a real SMS/OTP provider before hosting.
+ * Sign-in is mobile number + a one-time code sent by SMS (see ./otp.js).
  *
  * The panel exposes children's names, parents' mobile numbers, payments and
- * GST records, so the PIN is gated hard:
- *   • only numbers in ADMIN_MOBILES may log in at all
- *   • the process REFUSES TO START in production with a PIN still configured
+ * GST records, so it is gated hard:
+ *   • only numbers in ADMIN_MOBILES may request a code or sign in
+ *   • the code is single use, expires in minutes, and is stored hashed
  *   • attempts are rate-limited per number and per IP
+ *   • the process REFUSES TO START in production without a real JWT secret
  *
- * Swapping in OTP later means replacing verifyCredential() only — everything
- * downstream works off the issued JWT.
+ * The old fixed PIN is gone. ADMIN_PIN is still read, but only as a local
+ * development shortcut, and only when ADMIN_ALLOW_PIN=1 outside production —
+ * so it can never become the way in by accident.
  * ---------------------------------------------------------------------------
  */
 
@@ -22,11 +22,19 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const db = require('../database/connectDB');
 
-const PIN = process.env.ADMIN_PIN || '1234';
+const otp = require('./otp');
+
 const MOBILES = String(process.env.ADMIN_MOBILES || '9886122415')
   .split(',').map(s => s.replace(/\D/g, '').slice(-10)).filter(Boolean);
+
+// Local-only shortcut, off unless explicitly switched on and never in prod.
+const ALLOW_PIN = process.env.ADMIN_ALLOW_PIN === '1' && process.env.NODE_ENV !== 'production';
+const PIN = process.env.ADMIN_PIN || '';
+
 const SECRET = process.env.ADMIN_JWT_SECRET
-  || crypto.createHash('sha256').update(`quizpe:${PIN}:${MOBILES.join()}`).digest('hex');
+  // A derived fallback keeps development working, but it must never be the
+  // production secret: anyone who knows the inputs can mint an admin token.
+  || crypto.createHash('sha256').update(`quizpe:dev:${MOBILES.join()}`).digest('hex');
 // Short by design: a stolen admin token is a full read of every child's data.
 // 12 hours meant a token lifted from a closed laptop stayed valid all night.
 const TOKEN_HOURS = Number(process.env.ADMIN_TOKEN_HOURS) || 2;
@@ -37,12 +45,22 @@ const attempts = new Map();               // key -> { n, until }
 const MAX_ATTEMPTS = 5;
 const LOCK_MS = 10 * 60 * 1000;
 
-/** Loud guard so the dev PIN can never quietly reach production. */
+/**
+ * Loud start-up guard. These are the two ways a production panel ends up
+ * effectively unprotected, and both are silent failures at runtime — so the
+ * process refuses to boot instead.
+ */
 function assertNotProductionPin() {
-  if (IS_PROD && !process.env.ADMIN_OTP_ENABLED) {
+  if (!IS_PROD) return;
+  if (!process.env.ADMIN_JWT_SECRET || process.env.ADMIN_JWT_SECRET.length < 32) {
     throw new Error(
-      'ADMIN AUTH: a fixed PIN is not allowed in production. ' +
-      'Set ADMIN_OTP_ENABLED=1 and wire the SMS provider, or do not run with NODE_ENV=production.');
+      'ADMIN AUTH: ADMIN_JWT_SECRET must be set to a long random value in production. ' +
+      'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+  }
+  if (!(process.env.FAST2SMSAPIKEY || process.env.FAST2SMS_API_KEY)) {
+    throw new Error(
+      'ADMIN AUTH: FAST2SMSAPIKEY is not set, so no sign-in code can be delivered. ' +
+      'Set it, or do not run with NODE_ENV=production.');
   }
 }
 
@@ -63,17 +81,30 @@ function noteFailure(key) {
 
 const clearFailures = (key) => attempts.delete(key);
 
-/**
- * The ONLY place the credential is checked. Replace this body with an OTP
- * lookup when the SMS provider is wired; nothing else needs to change.
- */
+/** Ask the SMS provider to send a fresh code. */
+async function requestCode(rawMobile, ip) {
+  assertNotProductionPin();
+  const mobile = norm(rawMobile);
+  const key = `req|${mobile}|${ip}`;
+  const wait = throttled(key);
+  if (wait) return { error: `Too many requests. Try again in ${Math.ceil(wait / 60)} minute(s).` };
+  noteFailure(key);                     // counts requests, not just failures
+  return otp.request(mobile, MOBILES, ip);
+}
+
+/** The ONLY place a credential is checked. */
 async function verifyCredential(mobile, credential) {
   assertNotProductionPin();
   if (!MOBILES.includes(mobile)) return false;
-  // timing-safe compare so the PIN can't be probed byte by byte
-  const a = Buffer.from(String(credential || ''));
-  const b = Buffer.from(PIN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (await otp.verify(mobile, credential)) return true;
+
+  // Development shortcut only — never reachable in production.
+  if (ALLOW_PIN && PIN) {
+    const a = Buffer.from(String(credential || ''));
+    const b = Buffer.from(PIN);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  return false;
 }
 
 async function login(rawMobile, credential, ip) {
@@ -86,7 +117,7 @@ async function login(rawMobile, credential, ip) {
   if (!ok) {
     noteFailure(key);
     // deliberately vague — never reveal whether the number is an admin
-    return { error: 'Invalid mobile number or PIN.' };
+    return { error: 'That code is not valid or has expired.' };
   }
   clearFailures(key);
 
@@ -114,4 +145,4 @@ function requireAdmin(req, res, next) {
   }
 }
 
-module.exports = { login, requireAdmin, assertNotProductionPin, MOBILES, TOKEN_HOURS };
+module.exports = { login, requestCode, requireAdmin, assertNotProductionPin, MOBILES, TOKEN_HOURS };

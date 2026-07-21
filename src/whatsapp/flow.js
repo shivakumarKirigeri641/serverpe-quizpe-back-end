@@ -533,33 +533,6 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
-  // ⚠️ TEMPORARY test drive — remove before launch (see testDrive.js)
-  if (id === 'td_start' || id.startsWith('td_')) {
-    const TD = require('./testDrive');
-    if (id === 'td_start') { await TD.askBoard(session, mobile, setState); return; }
-    if (id.startsWith('td_b_')) {
-      const board = id.slice(5);
-      await mergeContext(session, { td_board: board });
-      await TD.askGrade(session, mobile, board, setState);
-      return;
-    }
-    if (id.startsWith('td_g_')) {
-      const grade = id.slice(5);
-      await mergeContext(session, { td_grade: grade });
-      await TD.askCount(session, mobile,
-        { board: session.context.td_board, grade }, setState);
-      return;
-    }
-    if (id.startsWith('td_n_')) {
-      const count = Number(id.slice(5));
-      const started = await TD.start(session, mobile, {
-        board: session.context.td_board, grade: session.context.td_grade, count,
-      });
-      await setState(session, started ? 'in_quiz' : 'main_menu', 'testdrive_started');
-      return;
-    }
-  }
-
   // The 8 PM template's "Start Quiz now" quick-reply arrives as a `button`
   // message. Tapping it reopens the 24h window AND starts today's quiz, from
   // whatever state the session is in.

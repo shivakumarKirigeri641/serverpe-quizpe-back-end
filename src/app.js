@@ -95,15 +95,51 @@ app.use('/public', limiter(60 * 1000, 120, 'Too many requests. Please slow down.
 // everything under the admin API, once signed in
 app.use('/admin/api', limiter(60 * 1000, 300, 'Too many requests. Please slow down.'));
 
-// The admin panel runs on its own dev server, so it needs CORS. Locked to an
-// allow-list rather than '*' — this API serves children's and payment data.
+/* ---------------------------------------------------------------------------
+ * CORS.
+ *
+ * In production the three pieces live on separate hosts —
+ *   quizpe.in        public site   -> reads /public and /legal
+ *   admin.quizpe.in  admin panel   -> reads /admin/api with a bearer token
+ *   api.quizpe.in    this server
+ * — so both browsers are cross-origin and need explicit permission.
+ *
+ * Allow-lists, never '*': this API serves children's names, parents' phone
+ * numbers and payment records. A wildcard on /admin would also be rejected by
+ * the browser anyway, since that route sends credentials.
+ * ------------------------------------------------------------------------- */
 const cors = require('cors');
-const ADMIN_ORIGINS = String(process.env.ADMIN_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
-  .split(',').map(s => s.trim()).filter(Boolean);
-app.use('/admin', cors({
-  origin: (origin, cb) => cb(null, !origin || ADMIN_ORIGINS.includes(origin)),
-  credentials: true,
-}));
+const originList = (v, fallback) => String(v || fallback).split(',').map(s => s.trim()).filter(Boolean);
+
+const ADMIN_ORIGINS = originList(process.env.ADMIN_ORIGINS,
+  'http://localhost:5173,http://127.0.0.1:5173');
+const SITE_ORIGINS = originList(process.env.SITE_ORIGINS,
+  'http://localhost:5174,http://127.0.0.1:5174');
+
+// Reject unknown origins with an error rather than a quiet no-CORS response, so
+// a misconfigured domain fails loudly at deploy time instead of looking like an
+// intermittent network fault in the browser months later.
+const guard = (allowed, credentials) => cors({
+  origin: (origin, cb) => (!origin || allowed.includes(origin))
+    ? cb(null, true)
+    : cb(new Error(`Origin ${origin} is not allowed`)),
+  credentials,
+});
+
+app.use('/admin', guard(ADMIN_ORIGINS, true));
+app.use(['/public', '/legal'], guard([...SITE_ORIGINS, ...ADMIN_ORIGINS], false));
+
+// A blocked origin is a refusal, not a server fault. Without this it surfaces
+// as a 500, which reads like the API is broken and sends you debugging the
+// wrong thing — the real cause is almost always a missing entry in
+// ADMIN_ORIGINS or SITE_ORIGINS.
+app.use((err, req, res, next) => {
+  if (err && /is not allowed/.test(err.message || '')) {
+    console.warn(`[cors] refused ${req.headers.origin} -> ${req.method} ${req.originalUrl}`);
+    return res.status(403).json({ success: false, error: 'Origin not allowed.' });
+  }
+  return next(err);
+});
 
 // Body parsers — WhatsApp posts JSON.
 app.use(require('cookie-parser')());
@@ -181,7 +217,11 @@ require('./jobs/scheduler').startScheduler();
  *
  * Set SERVE_FRONTENDS=0 to disable (e.g. when running the Vite dev servers).
  * ------------------------------------------------------------------------- */
-if (process.env.SERVE_FRONTENDS !== '0') {
+// Off by default: with quizpe.in and admin.quizpe.in on their own hosts, Nginx
+// serves the built front-ends and this process serves only the API and the
+// pages WhatsApp links to (quiz, support, legal, reports). Set SERVE_FRONTENDS=1
+// to fall back to single-origin serving on one box.
+if (process.env.SERVE_FRONTENDS === '1') {
   const fs = require('fs');
   const adminDist = process.env.ADMIN_DIST
     || path.join(__dirname, '..', '..', 'serverpe-quizpe-admin-front-end', 'dist');

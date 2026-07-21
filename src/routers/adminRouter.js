@@ -15,7 +15,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const db = require('../database/connectDB');
-const { login, requireAdmin } = require('../admin/auth');
+const { login, requestCode, requireAdmin } = require('../admin/auth');
 const metrics = require('../admin/metrics');
 
 const router = express.Router();
@@ -35,11 +35,35 @@ const ok = (res, data) => res.json({ success: true, ...data });
 const fail = (res, code, error) => res.status(code).json({ success: false, error });
 
 /* -------------------------------------------------------------------- auth */
-router.post('/login', express.json(), async (req, res) => {
-  const { mobile, pin } = req.body || {};
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'local';
+
+/**
+ * Step 1 — send a one-time code by SMS.
+ *
+ * Always answers "sent" for a well-formed number, even one that is not an
+ * admin. Distinguishing the two would let anyone test numbers until they found
+ * the admin's.
+ */
+router.post('/otp', express.json(), async (req, res) => {
+  const { mobile } = req.body || {};
+  const ip = req.ip || req.socket.remoteAddress || 'local';
   try {
-    const r = await login(mobile, pin, ip);
+    const r = await requestCode(mobile, ip);
+    if (r.error) return fail(res, 429, r.error);
+    ok(res, { ttlMin: r.ttlMin, message: `If that number can sign in, a code is on its way. It is valid for ${r.ttlMin} minutes.` });
+  } catch (e) {
+    console.error('[admin] otp request failed:', e.message);
+    fail(res, 500, e.message.startsWith('ADMIN AUTH') ? e.message : 'Could not send the code.');
+  }
+});
+
+/** Step 2 — exchange the code for a session token. */
+router.post('/login', express.json(), async (req, res) => {
+  const { mobile } = req.body || {};
+  // `code` is the OTP; `pin` is still accepted so the local dev shortcut works.
+  const credential = req.body?.code ?? req.body?.pin;
+  const ip = req.ip || req.socket.remoteAddress || 'local';
+  try {
+    const r = await login(mobile, credential, ip);
     if (r.error) return fail(res, 401, r.error);
     ok(res, r);
   } catch (e) {
@@ -149,8 +173,6 @@ router.get('/parents', requireAdmin, async (req, res) => {
                             WHERE x.parent_id=p.id ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
         LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
        WHERE ($1 = '%%' OR p.parent_name ILIKE $1 OR p.parent_mobile_number ILIKE $1)
-         -- ⚠️ TEMPORARY: hide the test-drive scratch account. Remove with testDrive.js
-         AND p.parent_mobile_number <> '0000000000'
        ORDER BY p.id DESC LIMIT $2 OFFSET $3`, [q, limit, offset]);
     ok(res, { rows, total: rows[0]?.total || 0 });
   } catch (e) { console.error('[admin] parents:', e.message); fail(res, 500, 'Could not load parents.'); }

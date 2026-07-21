@@ -152,9 +152,6 @@ function buildMainMenu(ctx) {
     rows.push({ id: 'start_quiz', title: '▶️ Start quiz now',
                 description: "Today's quiz — opens at your daily quiz time" });
   }
-  // ⚠️ TEMPORARY test-drive entry — remove before launch (see testDrive.js)
-  rows.push({ id: 'td_start', title: '🧪 Test drive (temp)',
-              description: 'Any board/grade — testing only, nothing saved' });
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
     { id: 'quiz_report',     title: '📊 Quiz reports',    description: 'Recent scores and progress' },
