@@ -23,6 +23,78 @@ const publicRouter = require('./routers/publicRouter');
 
 const app = express();
 
+/* ---------------------------------------------------------------------------
+ * Security headers.
+ *
+ * TLS already encrypts every request and response on the wire; these headers
+ * defend the things TLS cannot — injected scripts, clickjacking, and browsers
+ * being talked out of HTTPS once they have seen it.
+ *
+ * HSTS is only meaningful (and only safe) behind real HTTPS, so it is enabled
+ * by the same flag that says we are running behind a TLS proxy. Turning it on
+ * during local http:// development would pin the browser to a scheme that is
+ * not being served and lock you out of localhost.
+ * ------------------------------------------------------------------------- */
+const helmet = require('helmet');
+const BEHIND_TLS = process.env.BEHIND_TLS === '1';
+if (BEHIND_TLS) app.set('trust proxy', 1); // so req.ip is the client, not Nginx
+
+app.use(helmet({
+  // The public pages and quiz page use inline styles/handlers; a strict CSP
+  // would need those extracted first, so it is scoped rather than silently
+  // disabled — script-src stays tight, which is the part that stops XSS.
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],       // no embedding: clickjacking
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: BEHIND_TLS ? [] : null,
+    },
+  },
+  hsts: BEHIND_TLS ? { maxAge: 15552000, includeSubDomains: true } : false,
+  // Reports open from WhatsApp; a strict COEP breaks that preview flow.
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'same-site' },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
+
+/* ---------------------------------------------------------------------------
+ * Rate limits.
+ *
+ * Sized per endpoint by what an honest user actually does. The login limiter is
+ * the important one: the admin credential is a 4-digit PIN, so without a cap it
+ * is exhaustively guessable in minutes. Limiting by IP + mobile means one
+ * attacker cannot lock out a real admin by hammering their number.
+ *
+ * The WhatsApp webhook is deliberately NOT limited — Meta bursts retries, and
+ * dropping those loses parent messages.
+ * ------------------------------------------------------------------------- */
+const rateLimit = require('express-rate-limit');
+const limiter = (windowMs, max, message, keyGenerator) => rateLimit({
+  windowMs, max, message: { success: false, error: message },
+  standardHeaders: true, legacyHeaders: false, keyGenerator,
+});
+
+// 8 attempts per 15 min per IP+mobile — generous for a typo, useless for brute force
+app.use('/admin/api/login', limiter(15 * 60 * 1000, 8,
+  'Too many sign-in attempts. Please wait 15 minutes and try again.',
+  (req) => `${req.ip}:${String(req.body?.mobile_number || '').slice(0, 15)}`));
+
+// public write endpoints — stops enquiry/feedback spam floods
+app.use(['/public/enquiry', '/public/feedback'], limiter(60 * 60 * 1000, 10,
+  'You have sent several messages already. Please try again a little later.'));
+
+// public read endpoints — stops cheap scraping of stats/pricing/testimonials
+app.use('/public', limiter(60 * 1000, 120, 'Too many requests. Please slow down.'));
+
+// everything under the admin API, once signed in
+app.use('/admin/api', limiter(60 * 1000, 300, 'Too many requests. Please slow down.'));
+
 // The admin panel runs on its own dev server, so it needs CORS. Locked to an
 // allow-list rather than '*' — this API serves children's and payment data.
 const cors = require('cors');
@@ -98,6 +170,38 @@ require('./jobs/jobQueue').start();
 
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
+
+/* ---------------------------------------------------------------------------
+ * Built front-ends, served from this same process in production.
+ *
+ * Serving them here rather than from a separate static host means one origin,
+ * which removes CORS entirely, lets the browser send the quiz device cookie,
+ * and makes deployment a single upload. Both are mounted AFTER every API route
+ * so a path like /admin/api can never be swallowed by the SPA fallback.
+ *
+ * Set SERVE_FRONTENDS=0 to disable (e.g. when running the Vite dev servers).
+ * ------------------------------------------------------------------------- */
+if (process.env.SERVE_FRONTENDS !== '0') {
+  const fs = require('fs');
+  const adminDist = process.env.ADMIN_DIST
+    || path.join(__dirname, '..', '..', 'serverpe-quizpe-admin-front-end', 'dist');
+  const siteDist = process.env.SITE_DIST
+    || path.join(__dirname, '..', '..', 'serverpe-quizpe-front-end', 'dist');
+
+  if (fs.existsSync(adminDist)) {
+    app.use('/admin', express.static(adminDist));
+    // client-side routes (/admin/parents, /admin/tonight) must return index.html,
+    // but never for /admin/api — that is handled above and must 404 as JSON
+    app.get(/^\/admin(?!\/api)(\/.*)?$/, (req, res) =>
+      res.sendFile(path.join(adminDist, 'index.html')));
+    console.log(`🖥️  admin panel served from ${adminDist}`);
+  }
+
+  if (fs.existsSync(siteDist)) {
+    app.use(express.static(siteDist));
+    console.log(`🌐 public site served from ${siteDist}`);
+  }
+}
 
 const PORT = process.env.PORT || 5008;
 app.listen(PORT, () => {

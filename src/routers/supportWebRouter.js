@@ -125,7 +125,8 @@ router.post('/api/submit', async (req, res) => {
 Ticket: *${ticketNo}*
 About: ${label}
 
-Our team will reply here within 24 hours. Please keep this ticket number handy.
+We reply here within 24–48 hours, during our support hours of 9 AM – 6 PM.
+Please keep this ticket number handy.
 
 _Type *menu* for other options._`);
     } catch (e) {

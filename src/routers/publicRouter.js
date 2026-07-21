@@ -228,7 +228,7 @@ router.post('/enquiry', express.json(), async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [ref, name, mobile, String(email || '').trim() || null, query_type, text]);
 
-    res.json({ success: true, ref_no: ref, message: 'Thank you — we will get back to you within 24 hours.' });
+    res.json({ success: true, ref_no: ref, message: 'Thank you — we reply within 24–48 hours, during our support hours of 9 AM – 6 PM.' });
   } catch (e) {
     console.error('[public] enquiry:', e.message);
     res.status(500).json({ success: false, error: 'Could not send your enquiry. Please try again.' });

@@ -27,7 +27,9 @@ const MOBILES = String(process.env.ADMIN_MOBILES || '9886122415')
   .split(',').map(s => s.replace(/\D/g, '').slice(-10)).filter(Boolean);
 const SECRET = process.env.ADMIN_JWT_SECRET
   || crypto.createHash('sha256').update(`quizpe:${PIN}:${MOBILES.join()}`).digest('hex');
-const TOKEN_HOURS = Number(process.env.ADMIN_TOKEN_HOURS) || 12;
+// Short by design: a stolen admin token is a full read of every child's data.
+// 12 hours meant a token lifted from a closed laptop stayed valid all night.
+const TOKEN_HOURS = Number(process.env.ADMIN_TOKEN_HOURS) || 2;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 // naive in-memory throttle; enough for a single-admin panel

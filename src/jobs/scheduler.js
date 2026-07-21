@@ -9,7 +9,7 @@
  * Anti-annoyance rules:
  *   • max ONE of each kind per student per day (UNIQUE in notification_log)
  *   • never remind a student who already finished today's quiz
- *   • parents who replied STOP (reminders_enabled=false) get no reminders
+ *   • parents who replied STOP (service_paused) get nothing at all until START
  *   • a template that is not APPROVED in Meta is skipped, never sent
  * ---------------------------------------------------------------------------
  */
@@ -127,7 +127,10 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
         -- a missed-quiz nudge is never sent on the parent's very first day,
         -- when a skipped quiz is usually setup confusion rather than a skip
         AND ($2 <> 'quiz_missed' OR (CURRENT_DATE - s.plan_start_date) + 1 > 1)
-        -- reminders respect the STOP opt-out; the quiz trigger always goes
+        -- STOP pauses EVERY outbound kind: reminder, quiz trigger and the
+        -- missed-quiz nudge. A parent who asked for silence gets silence, and
+        -- the only thing that lifts it is their own START.
+        AND NOT p.service_paused
         AND ($2 <> 'reminder' OR p.reminders_enabled)
         -- one per student per kind per day
         AND NOT EXISTS (SELECT 1 FROM notification_log n

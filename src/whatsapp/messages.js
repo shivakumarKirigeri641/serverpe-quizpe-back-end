@@ -209,7 +209,9 @@ We're here to help!
 ${b.address}
 GSTIN: ${b.gstin}
 
-_Reply with your question and we'll get back to you within 24 hours._`;
+🕘 *Support hours:* 9 AM – 6 PM, every day
+
+_Reply with your question and we'll get back to you within 24–48 hours._`;
 }
 
 function trialActivated({ parentName, studentName, boardCode, gradeName, endDate, quizTime, duration }) {

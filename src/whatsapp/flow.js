@@ -408,17 +408,55 @@ async function processInbound(msg, contactName) {
       [ctx.parentId, contactName.slice(0, 120)]).catch(() => {});
   }
 
-  // STOP / START — reminder opt-out, honoured from any state.
-  if (/^(stop|unsubscribe|stop reminders)$/i.test(text.trim())) {
-    await db.query(`UPDATE parents SET reminders_enabled=false, modified_at=now() WHERE parent_mobile_number=$1`, [mobile]);
+  // STOP / START — a full pause, honoured from any state.
+  //
+  // STOP silences everything: the reminder, the quiz link and the missed-quiz
+  // nudge. Because that means a paying parent stops receiving the service, the
+  // reply has to say so plainly and name the date their plan still runs to —
+  // otherwise silence looks like a fault rather than their own choice.
+  if (/^(stop|unsubscribe|stop reminders|pause)$/i.test(text.trim())) {
+    const { rows } = await db.query(
+      `UPDATE parents SET service_paused = true, reminders_enabled = false,
+              paused_at = now(), modified_at = now()
+        WHERE parent_mobile_number = $1
+        RETURNING id`, [mobile]);
+    if (!rows.length) return;
+
+    const till = (await db.query(
+      `SELECT to_char(max(plan_end_date), 'DD Mon YYYY') AS d
+         FROM parents_quizpe_subscriptions
+        WHERE parent_id = $1 AND is_active AND plan_end_date >= CURRENT_DATE`,
+      [rows[0].id])).rows[0]?.d;
+
     await wa.sendText(session.id, mobile,
-      `🔕 Reminders paused. You'll still get the daily quiz at its scheduled time.\n\n_Reply *START* to turn reminders back on._`);
+      `🔕 *All messages paused.*\n\n` +
+      `You will not get reminders, quiz links or any other message from us until you ask for them.\n\n` +
+      (till ? `⚠️ Your plan still runs to *${till}* and is not cancelled — while it is paused, no quiz is sent, ` +
+              `so those days are not used for practice.\n\n` : '') +
+      `_Reply *START* whenever you want the daily quiz back._`);
     return;
   }
-  if (/^(start reminders|resume)$/i.test(text.trim())) {
-    await db.query(`UPDATE parents SET reminders_enabled=true, modified_at=now() WHERE parent_mobile_number=$1`, [mobile]);
-    await wa.sendText(session.id, mobile, `🔔 Reminders turned back on.`);
-    return;
+
+  // START must be forgiving. A parent who paused everything has no other way
+  // back in, so anything that plainly means "resume" is accepted — including a
+  // bare START, which is what WhatsApp users are used to typing.
+  if (/^(start|start reminders|resume|unpause|begin)$/i.test(text.trim())) {
+    const { rows } = await db.query(
+      `UPDATE parents SET service_paused = false, reminders_enabled = true,
+              paused_at = NULL, modified_at = now()
+        WHERE parent_mobile_number = $1
+        RETURNING id`, [mobile]);
+    if (rows.length) {
+      await wa.sendText(session.id, mobile,
+        `🔔 *Welcome back!* Everything is switched on again.\n\n` +
+        `Your child's next quiz arrives at its usual time this evening.`);
+      // Show the menu rather than asking them to type "menu". START also reads
+      // as a greeting, so whichever way the parent meant it, they get both the
+      // resume and the options — and the session lands in a known state.
+      await showMainMenu(session, mobile, ctx);
+      return;
+    }
+    // not an enrolled parent — fall through so "start" still opens the menu
   }
 
   // HELP — a way out from any state, for parents who don't know what to type.
@@ -428,8 +466,8 @@ async function processInbound(msg, contactName) {
 
 • *menu* — all your options
 • *report* — recent scores
-• *stop* — pause daily reminders
-• *start reminders* — turn them back on
+• *stop* — pause all messages
+• *start* — turn everything back on
 
 Your child's quiz link arrives automatically each evening — just tap the button in that message.
 
