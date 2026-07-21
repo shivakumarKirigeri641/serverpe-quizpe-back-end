@@ -18,6 +18,8 @@ const quizWebRouter = require('./routers/quizWebRouter');
 const feedbackWebRouter = require('./routers/feedbackWebRouter');
 const supportWebRouter = require('./routers/supportWebRouter');
 const adminRouter = require('./routers/adminRouter');
+const legalRouter = require('./routers/legalRouter');
+const publicRouter = require('./routers/publicRouter');
 
 const app = express();
 
@@ -68,6 +70,13 @@ app.use('/support', supportWebRouter);
 // Admin panel API (serverpe-quizpe-admin-front-end). Everything except
 // /admin/api/login requires a bearer token.
 app.use('/admin/api', adminRouter);
+
+// Policies — public so a parent can read them before signing up, and so the
+// WhatsApp consent links resolve for someone with no account.
+app.use('/legal', legalRouter);
+
+// Aggregate-only figures for the parent-facing website. Never per-person data.
+app.use('/public', publicRouter);
 
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);

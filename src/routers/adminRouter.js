@@ -474,6 +474,76 @@ router.patch('/tables/:name/:id', requireAdmin, express.json(), async (req, res)
   } catch (e) { console.error('[admin] table update:', e.message); fail(res, 400, e.message); }
 });
 
+/* ------------------------------------------------------------------ legal */
+router.get('/legal', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT d.*, COUNT(s.id)::int sections
+         FROM legal_documents d LEFT JOIN legal_sections s ON s.document_id = d.id
+        GROUP BY d.id ORDER BY d.display_order, d.id`);
+    ok(res, { rows });
+  } catch (e) { console.error('[admin] legal list:', e.message); fail(res, 500, 'Could not load policies.'); }
+});
+
+router.get('/legal/:code', requireAdmin, async (req, res) => {
+  try {
+    const doc = (await db.query(
+      'SELECT * FROM legal_documents WHERE doc_code = $1', [req.params.code])).rows[0];
+    if (!doc) return fail(res, 404, 'No such policy.');
+    const { rows: sections } = await db.query(
+      `SELECT * FROM legal_sections WHERE document_id = $1 ORDER BY display_order, id`, [doc.id]);
+    ok(res, { document: doc, sections });
+  } catch (e) { console.error('[admin] legal read:', e.message); fail(res, 500, 'Could not load the policy.'); }
+});
+
+router.patch('/legal/document/:id', requireAdmin, express.json(), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { title, summary, version, requires_consent, is_active, effective_from } = req.body || {};
+  try {
+    const { rows } = await db.query(
+      `UPDATE legal_documents SET
+         title=COALESCE($2,title), summary=COALESCE($3,summary), version=COALESCE($4,version),
+         requires_consent=COALESCE($5,requires_consent), is_active=COALESCE($6,is_active),
+         effective_from=COALESCE($7::date,effective_from), modified_at=now()
+       WHERE id=$1 RETURNING *`,
+      [id, title || null, summary || null, version || null,
+       typeof requires_consent === 'boolean' ? requires_consent : null,
+       typeof is_active === 'boolean' ? is_active : null, effective_from || null]);
+    if (!rows.length) return fail(res, 404, 'Policy not found.');
+    ok(res, { row: rows[0] });
+  } catch (e) { console.error('[admin] legal doc update:', e.message); fail(res, 400, e.message); }
+});
+
+router.patch('/legal/section/:id', requireAdmin, express.json(), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { title, description, section_no, display_order, is_active } = req.body || {};
+  try {
+    const { rows } = await db.query(
+      `UPDATE legal_sections SET
+         title=COALESCE($2,title), description=COALESCE($3,description),
+         section_no=COALESCE($4,section_no), display_order=COALESCE($5,display_order),
+         is_active=COALESCE($6,is_active), modified_at=now()
+       WHERE id=$1 RETURNING *`,
+      [id, title || null, description || null, section_no || null,
+       display_order ?? null, typeof is_active === 'boolean' ? is_active : null]);
+    if (!rows.length) return fail(res, 404, 'Section not found.');
+    ok(res, { row: rows[0] });
+  } catch (e) { console.error('[admin] legal section update:', e.message); fail(res, 400, e.message); }
+});
+
+router.post('/legal/:docId/section', requireAdmin, express.json(), async (req, res) => {
+  const docId = parseInt(req.params.docId, 10);
+  const { section_no, title, description } = req.body || {};
+  if (!title || !description) return fail(res, 400, 'A section needs a title and description.');
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO legal_sections (document_id, section_no, title, description, display_order)
+       VALUES ($1,$2,$3,$4, COALESCE((SELECT MAX(display_order)+10 FROM legal_sections WHERE document_id=$1),10))
+       RETURNING *`, [docId, section_no || null, title, description]);
+    ok(res, { row: rows[0] });
+  } catch (e) { console.error('[admin] legal section add:', e.message); fail(res, 400, e.message); }
+});
+
 /* ---------------------------------------------------------------- support */
 router.get('/support', requireAdmin, async (req, res) => {
   try {
