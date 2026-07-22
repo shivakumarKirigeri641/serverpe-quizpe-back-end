@@ -24,8 +24,31 @@ const db = require('../database/connectDB');
 
 const otp = require('./otp');
 
-const MOBILES = String(process.env.ADMIN_MOBILES || '9886122415')
+// Bootstrap admins from the environment; the live list is the `admins` table
+// (env numbers are seeded there at startup). Env acts only as a fallback so a
+// misconfigured DB can never lock the founder out.
+const ENV_MOBILES = String(process.env.ADMIN_MOBILES || '9886122415')
   .split(',').map(s => s.replace(/\D/g, '').slice(-10)).filter(Boolean);
+const MOBILES = ENV_MOBILES;   // kept for the startup guard / seed
+
+/** Active admin numbers = DB table ∪ env fallback. */
+async function adminMobiles() {
+  try {
+    const { rows } = await db.query(`SELECT mobile_number FROM admins WHERE is_active`);
+    const set = new Set(rows.map(r => norm(r.mobile_number)));
+    ENV_MOBILES.forEach(m => set.add(m));
+    return set;
+  } catch { return new Set(ENV_MOBILES); }
+}
+
+/** Is this number a super admin (may manage other admins / mode switches)? */
+async function isSuperAdmin(mobile) {
+  const m = norm(mobile);
+  if (ENV_MOBILES[0] === m) return true;   // founder is always super
+  const { rows } = await db.query(
+    `SELECT 1 FROM admins WHERE mobile_number LIKE '%'||$1 AND is_super AND is_active LIMIT 1`, [m]).catch(() => ({ rows: [] }));
+  return rows.length > 0;
+}
 
 // Local-only shortcut, off unless explicitly switched on and never in prod.
 const ALLOW_PIN = process.env.ADMIN_ALLOW_PIN === '1' && process.env.NODE_ENV !== 'production';
@@ -89,13 +112,13 @@ async function requestCode(rawMobile, ip) {
   const wait = throttled(key);
   if (wait) return { error: `Too many requests. Try again in ${Math.ceil(wait / 60)} minute(s).` };
   noteFailure(key);                     // counts requests, not just failures
-  return otp.request(mobile, MOBILES, ip);
+  return otp.request(mobile, [...await adminMobiles()], ip);
 }
 
 /** The ONLY place a credential is checked. */
 async function verifyCredential(mobile, credential) {
   assertNotProductionPin();
-  if (!MOBILES.includes(mobile)) return false;
+  if (!(await adminMobiles()).has(mobile)) return false;
   if (await otp.verify(mobile, credential)) return true;
 
   // Development shortcut only — never reachable in production.
@@ -121,7 +144,8 @@ async function login(rawMobile, credential, ip) {
   }
   clearFailures(key);
 
-  const token = jwt.sign({ sub: mobile, role: 'admin' }, SECRET, { expiresIn: `${TOKEN_HOURS}h` });
+  const superAdmin = await isSuperAdmin(mobile);
+  const token = jwt.sign({ sub: mobile, role: 'admin', super: superAdmin }, SECRET, { expiresIn: `${TOKEN_HOURS}h` });
   await db.query(
     `INSERT INTO whatsapp_session_events (session_id, from_state, to_state, event, payload)
      SELECT id, 'admin', 'admin', 'admin_login', $2::jsonb FROM whatsapp_sessions WHERE mobile_number = $1
@@ -145,4 +169,17 @@ function requireAdmin(req, res, next) {
   }
 }
 
-module.exports = { login, requestCode, requireAdmin, assertNotProductionPin, MOBILES, TOKEN_HOURS };
+/** Gate for super-admin-only actions (managing admins, switching payment mode). */
+function requireSuperAdmin(req, res, next) {
+  requireAdmin(req, res, () => {
+    if (!req.admin?.super) {
+      return res.status(403).json({ success: false, error: 'Only the super admin can do this.' });
+    }
+    next();
+  });
+}
+
+module.exports = {
+  login, requestCode, requireAdmin, requireSuperAdmin, assertNotProductionPin,
+  adminMobiles, isSuperAdmin, MOBILES, TOKEN_HOURS,
+};

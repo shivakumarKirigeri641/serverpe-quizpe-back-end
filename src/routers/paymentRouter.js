@@ -20,10 +20,30 @@ const db = require('../database/connectDB');
 const router = express.Router();
 const TTL_MIN = 30;
 
-const KEY_ID = process.env.RAZORPAY_KEY_ID;
-const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const RZP = 'https://api.razorpay.com/v1';
-const authHeader = 'Basic ' + Buffer.from(`${KEY_ID}:${KEY_SECRET}`).toString('base64');
+
+/**
+ * Razorpay keys, chosen by the admin-controlled mode in app_settings
+ * ('test' | 'live'), falling back to the RAZORPAY_MODE env var, then 'test'.
+ * The keys themselves always live in .env and are never stored in the DB.
+ *
+ * Resolved per request (the mode is a single indexed row, so this is cheap)
+ * rather than once at load, so flipping the toggle in Settings takes effect
+ * immediately without a restart. A specific mode can be forced — the /verify
+ * step passes the mode the order was created in, so a switch mid-transaction
+ * never verifies a payment against the wrong secret.
+ */
+async function razorpayCreds(forceMode = null) {
+  let mode = forceMode;
+  if (!mode) {
+    const r = await db.query(`SELECT value FROM app_settings WHERE key='razorpay_mode'`).catch(() => null);
+    mode = r?.rows[0]?.value || process.env.RAZORPAY_MODE || 'test';
+  }
+  mode = mode === 'live' ? 'live' : 'test';
+  const id = mode === 'live' ? process.env.RAZORPAY_KEY_LIVE_ID : process.env.RAZORPAY_KEY_ID;
+  const secret = mode === 'live' ? process.env.RAZORPAY_KEY_LIVE_SECRET : process.env.RAZORPAY_KEY_SECRET;
+  return { mode, keyId: id, keySecret: secret, authHeader: 'Basic ' + Buffer.from(`${id}:${secret}`).toString('base64') };
+}
 
 const normMobile = (m) => String(m || '').replace(/\D/g, '').slice(-10);
 
@@ -139,7 +159,7 @@ router.get('/api/context', async (req, res) => {
       gst: { pct: gstPct, ...gstBreakup(c.price, gstPct, true) },   // preview intra; recomputed on state
       boards: boards.rows, mediumsByBoard, grades: grades.rows, states: states.rows,
       availability, gst_pct: gstPct,
-      business: biz.rows[0], policy: pol.rows[0], razorpay_key: KEY_ID,
+      business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
     });
   } catch (e) {
     console.error('[pay] context failed:', e.message);
@@ -206,35 +226,38 @@ router.post('/api/create-order', async (req, res) => {
     const built = await buildCart(c, students, state);
     if (built.error) return res.status(400).json({ success: false, error: built.error });
     const amountPaise = Math.round(built.total * 100);
+    const rzp = await razorpayCreds();   // current admin-selected mode
 
     // Reuse an existing order only if the amount still matches; if it was paid, reconcile.
     if (c.razorpay_order_id) {
-      const oRes = await fetch(`${RZP}/orders/${c.razorpay_order_id}`, { headers: { Authorization: authHeader } });
+      const oRes = await fetch(`${RZP}/orders/${c.razorpay_order_id}`, { headers: { Authorization: rzp.authHeader } });
       const existing = oRes.ok ? await oRes.json() : null;
       if (existing?.status === 'paid') {
-        const pay = await capturedPaymentForOrder(c.razorpay_order_id);
+        const pay = await capturedPaymentForOrder(c.razorpay_order_id, rzp.authHeader);
         if (pay) { await finalize(c, pay).catch(e => console.error('[pay] reconcile failed:', e.message)); }
         return res.json({ success: true, already_paid: true });
       }
       if (existing && ['created', 'attempted'].includes(existing.status) && existing.amount === amountPaise) {
         await db.query(`UPDATE checkout_sessions SET cart=$2 WHERE id=$1`, [c.id, JSON.stringify(built.cart)]);
-        return res.json({ success: true, order_id: existing.id, amount: existing.amount, currency: 'INR', key: KEY_ID });
+        return res.json({ success: true, order_id: existing.id, amount: existing.amount, currency: 'INR', key: rzp.keyId });
       }
     }
 
     const rzpRes = await fetch(`${RZP}/orders`, {
-      method: 'POST', headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+      method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({ amount: amountPaise, currency: 'INR', receipt: `qp_${c.id}`,
         notes: { plan: c.plan_code, mobile: c.mobile_number } }),
     });
     const order = await rzpRes.json();
     if (!rzpRes.ok) { console.error('[pay] order failed:', order); return res.status(502).json({ success: false, error: order?.error?.description || 'Could not start payment.' }); }
 
-    // store the SERVER-VALIDATED cart so verify never trusts the client again
-    await db.query(`UPDATE checkout_sessions SET razorpay_order_id=$2, amount=$3, status='order_created', cart=$4 WHERE id=$1`,
-      [c.id, order.id, built.total, JSON.stringify(built.cart)]);
+    // store the SERVER-VALIDATED cart AND the mode the order was created in, so
+    // /verify checks the signature with the matching secret even if the admin
+    // flips the toggle between order creation and payment.
+    await db.query(`UPDATE checkout_sessions SET razorpay_order_id=$2, amount=$3, status='order_created', cart=$4, razorpay_mode=$5 WHERE id=$1`,
+      [c.id, order.id, built.total, JSON.stringify(built.cart), rzp.mode]);
 
-    res.json({ success: true, order_id: order.id, amount: amountPaise, currency: 'INR', key: KEY_ID });
+    res.json({ success: true, order_id: order.id, amount: amountPaise, currency: 'INR', key: rzp.keyId });
   } catch (e) {
     console.error('[pay] create-order failed:', e.message);
     res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
@@ -377,8 +400,9 @@ Your daily quizzes start tonight at ${M.fmtTime(subId.quiz_time)}. 🚀`);
 }
 
 /** Fetch a captured payment for an order (used to reconcile an already-paid order). */
-async function capturedPaymentForOrder(orderId) {
-  const r = await fetch(`${RZP}/orders/${orderId}/payments`, { headers: { Authorization: authHeader } });
+async function capturedPaymentForOrder(orderId, auth) {
+  const header = auth || (await razorpayCreds()).authHeader;
+  const r = await fetch(`${RZP}/orders/${orderId}/payments`, { headers: { Authorization: header } });
   if (!r.ok) return null;
   const j = await r.json();
   return (j.items || []).find(p => ['captured', 'authorized'].includes(p.status)) || null;
@@ -391,13 +415,16 @@ router.post('/api/verify', async (req, res) => {
     const c = await loadCheckoutAny(token);   // also loads a used/paid checkout, for idempotent replays
     if (!c) return res.status(410).json({ success: false, error: 'Link expired.' });
 
-    const expected = crypto.createHmac('sha256', KEY_SECRET)
+    // verify with the SAME mode the order was created in (stored on the checkout)
+    const rzp = await razorpayCreds(c.razorpay_mode);
+
+    const expected = crypto.createHmac('sha256', rzp.keySecret)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`).digest('hex');
     if (expected !== razorpay_signature) {
       return res.status(400).json({ success: false, error: 'Payment could not be verified.' });
     }
 
-    const payRes = await fetch(`${RZP}/payments/${razorpay_payment_id}`, { headers: { Authorization: authHeader } });
+    const payRes = await fetch(`${RZP}/payments/${razorpay_payment_id}`, { headers: { Authorization: rzp.authHeader } });
     const pay = await payRes.json();
     if (!payRes.ok || !['captured', 'authorized'].includes(pay.status)) {
       return res.status(400).json({ success: false, error: 'Payment not completed.' });

@@ -154,10 +154,21 @@
       "Bash(sed -i 's/`\\\\${biz.support_email || .\\\\{0,3\\\\}}   ·   \\\\${biz.product_website/`\\\\${invoiceEmail}   ·   \\\\${biz.product_website/' src/pdf/invoice.js)",
       "Bash(node --check src/pdf/invoice.js)",
       "Bash(curl -s -m 5 -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:5008/health)",
-      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\invmail.js\")"
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\invmail.js\")",
+      "Bash(node --check src/routers/paymentRouter.js)",
+      "Bash(node --check src/routers/adminRouter.js)",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(d\\)\\)\")",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\('->',d\\)\\)\")",
+      "Bash(node --check scripts/migrate.js)",
+      "Bash(node -e \"const db=require\\('./src/database/connectDB'\\);\\(async\\(\\)=>{console.log\\('razorpay_mode =',\\(await db.query\\(\\\\\"SELECT value FROM app_settings WHERE key='razorpay_mode'\\\\\"\\)\\).rows[0].value\\);process.exit\\(0\\);}\\)\\(\\);\")",
+      "Bash(node --check src/admin/auth.js)",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(' ->',d\\)\\)\")",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(' back to ->',d\\)\\)\")"
     ],
     "additionalDirectories": [
-      "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"
+      "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory",
+      "c:\\Users\\shiva\\source\\repos\\serverpe-quizpe-admin-front-end\\src\\components",
+      "c:\\Users\\shiva\\source\\repos\\serverpe-quizpe-admin-front-end\\src\\pages"
     ]
   }
 }

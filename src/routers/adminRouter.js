@@ -15,7 +15,8 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const db = require('../database/connectDB');
-const { login, requestCode, requireAdmin } = require('../admin/auth');
+const { login, requestCode, requireAdmin, requireSuperAdmin, adminMobiles, isSuperAdmin } = require('../admin/auth');
+const otp = require('../admin/otp');
 const metrics = require('../admin/metrics');
 
 const router = express.Router();
@@ -102,7 +103,7 @@ router.get('/branding', async (req, res) => {
   }
 });
 
-router.get('/me', requireAdmin, (req, res) => ok(res, { mobile: req.admin.sub }));
+router.get('/me', requireAdmin, (req, res) => ok(res, { mobile: req.admin.sub, super: !!req.admin.super }));
 
 /* --------------------------------------------------------------- dashboard */
 router.get('/dashboard', requireAdmin, async (req, res) => {
@@ -628,6 +629,110 @@ router.get('/system', requireAdmin, async (req, res) => {
          FROM notification_log WHERE send_date = CURRENT_DATE`);
     ok(res, { jobs, database: db1.size, templates, today: notif });
   } catch (e) { console.error('[admin] system:', e.message); fail(res, 500, 'Could not load system status.'); }
+});
+
+/* ---------------------------------------------------------- payment mode */
+/**
+ * Razorpay test/live toggle. Returns the current mode plus whether each key
+ * pair is actually configured in the environment, so the UI can stop the admin
+ * flipping to a mode whose keys are missing.
+ */
+router.get('/payment-mode', requireAdmin, async (req, res) => {
+  try {
+    const { rows: [r] } = await db.query(`SELECT value, updated_at FROM app_settings WHERE key='razorpay_mode'`);
+    ok(res, {
+      mode: r?.value || process.env.RAZORPAY_MODE || 'test',
+      updated_at: r?.updated_at || null,
+      test_keys_present: !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET),
+      live_keys_present: !!(process.env.RAZORPAY_KEY_LIVE_ID && process.env.RAZORPAY_KEY_LIVE_SECRET),
+    });
+  } catch (e) { console.error('[admin] payment-mode get:', e.message); fail(res, 500, 'Could not load payment mode.'); }
+});
+
+/** Step 1 of a mode switch — send an OTP to the acting super admin's number. */
+router.post('/payment-mode/request-otp', requireSuperAdmin, async (req, res) => {
+  try {
+    const r = await otp.request(req.admin.sub, [...await adminMobiles()], req.ip);
+    if (r.error) return fail(res, 429, r.error);
+    ok(res, { ttlMin: r.ttlMin, message: `A code was sent to your number. It is valid for ${r.ttlMin} minutes.` });
+  } catch (e) { console.error('[admin] mode otp:', e.message); fail(res, 500, 'Could not send the code.'); }
+});
+
+/**
+ * Step 2 — switch the mode, but only with a valid OTP. Switching between real
+ * and test money is exactly the kind of action that deserves a second factor,
+ * so the code is required even though the admin is already signed in.
+ */
+router.put('/payment-mode', requireSuperAdmin, express.json(), async (req, res) => {
+  const mode = String(req.body?.mode || '').toLowerCase();
+  const code = String(req.body?.otp || '');
+  if (!['test', 'live'].includes(mode)) return fail(res, 400, 'Mode must be "test" or "live".');
+  const haveTest = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+  const haveLive = !!(process.env.RAZORPAY_KEY_LIVE_ID && process.env.RAZORPAY_KEY_LIVE_SECRET);
+  if (mode === 'live' && !haveLive) return fail(res, 400, 'Live keys are not configured on the server.');
+  if (mode === 'test' && !haveTest) return fail(res, 400, 'Test keys are not configured on the server.');
+
+  if (!(await otp.verify(req.admin.sub, code))) {
+    return fail(res, 401, 'That code is not valid or has expired. Please request a new one.');
+  }
+  try {
+    await db.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES ('razorpay_mode', $1, now())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [mode]);
+    console.warn(`[admin] razorpay mode -> ${mode.toUpperCase()} by ${req.admin.sub} (OTP verified)`);
+    ok(res, { mode });
+  } catch (e) { console.error('[admin] payment-mode set:', e.message); fail(res, 500, 'Could not update payment mode.'); }
+});
+
+/* ----------------------------------------------------------- admin users */
+/** List admins (super admin only). */
+router.get('/admins', requireSuperAdmin, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT mobile_number, is_super, is_active, added_by, created_at FROM admins ORDER BY is_super DESC, id`);
+    ok(res, { rows, me: req.admin.sub });
+  } catch (e) { console.error('[admin] admins list:', e.message); fail(res, 500, 'Could not load admins.'); }
+});
+
+/** Step 1 of adding an admin — send an OTP to the NEW number to prove it is real. */
+router.post('/admins/request-otp', requireSuperAdmin, express.json(), async (req, res) => {
+  const mobile = String(req.body?.mobile || '').replace(/\D/g, '').slice(-10);
+  if (!/^[6-9]\d{9}$/.test(mobile)) return fail(res, 400, 'Enter a valid 10-digit mobile number.');
+  if ((await adminMobiles()).has(mobile)) return fail(res, 400, 'That number is already an admin.');
+  try {
+    // allow just this one number, so the code truly goes to the prospective admin
+    const r = await otp.request(mobile, [mobile], req.ip);
+    if (r.error) return fail(res, 429, r.error);
+    ok(res, { ttlMin: r.ttlMin, message: `A code was sent to ${mobile}. It is valid for ${r.ttlMin} minutes.` });
+  } catch (e) { console.error('[admin] admin add otp:', e.message); fail(res, 500, 'Could not send the code.'); }
+});
+
+/** Step 2 — verify the new number's OTP and grant admin access. */
+router.post('/admins', requireSuperAdmin, express.json(), async (req, res) => {
+  const mobile = String(req.body?.mobile || '').replace(/\D/g, '').slice(-10);
+  const code = String(req.body?.otp || '');
+  if (!/^[6-9]\d{9}$/.test(mobile)) return fail(res, 400, 'Enter a valid 10-digit mobile number.');
+  if (!(await otp.verify(mobile, code))) return fail(res, 401, 'That code is not valid or has expired.');
+  try {
+    await db.query(
+      `INSERT INTO admins (mobile_number, is_super, added_by) VALUES ($1, false, $2)
+       ON CONFLICT (mobile_number) DO UPDATE SET is_active=true`, [mobile, req.admin.sub]);
+    console.warn(`[admin] new admin ${mobile} added by ${req.admin.sub}`);
+    ok(res, { mobile });
+  } catch (e) { console.error('[admin] admin add:', e.message); fail(res, 500, 'Could not add the admin.'); }
+});
+
+/** Remove an admin (super admin only; cannot remove a super admin or yourself). */
+router.delete('/admins/:mobile', requireSuperAdmin, async (req, res) => {
+  const mobile = String(req.params.mobile || '').replace(/\D/g, '').slice(-10);
+  if (mobile === req.admin.sub) return fail(res, 400, 'You cannot remove yourself.');
+  if (await isSuperAdmin(mobile)) return fail(res, 400, 'A super admin cannot be removed here.');
+  try {
+    const r = await db.query(`UPDATE admins SET is_active=false WHERE mobile_number LIKE '%'||$1 AND NOT is_super`, [mobile]);
+    if (!r.rowCount) return fail(res, 404, 'No such admin.');
+    console.warn(`[admin] admin ${mobile} removed by ${req.admin.sub}`);
+    ok(res, { removed: mobile });
+  } catch (e) { console.error('[admin] admin remove:', e.message); fail(res, 500, 'Could not remove the admin.'); }
 });
 
 module.exports = router;
