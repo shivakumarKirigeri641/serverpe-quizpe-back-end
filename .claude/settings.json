@@ -163,7 +163,8 @@
       "Bash(node -e \"const db=require\\('./src/database/connectDB'\\);\\(async\\(\\)=>{console.log\\('razorpay_mode =',\\(await db.query\\(\\\\\"SELECT value FROM app_settings WHERE key='razorpay_mode'\\\\\"\\)\\).rows[0].value\\);process.exit\\(0\\);}\\)\\(\\);\")",
       "Bash(node --check src/admin/auth.js)",
       "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(' ->',d\\)\\)\")",
-      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(' back to ->',d\\)\\)\")"
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>console.log\\(' back to ->',d\\)\\)\")",
+      "Bash(node -e \"console.log\\('version:', require\\('express-rate-limit/package.json'\\).version\\); const m=require\\('express-rate-limit'\\); console.log\\('exports ipKeyGenerator:', typeof m.ipKeyGenerator\\);\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory",

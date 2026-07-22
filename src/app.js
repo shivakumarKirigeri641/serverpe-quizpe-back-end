@@ -79,6 +79,10 @@ app.use(helmet({
  * dropping those loses parent messages.
  * ------------------------------------------------------------------------- */
 const rateLimit = require('express-rate-limit');
+// ipKeyGenerator normalises the client IP (an IPv6 address is grouped by its
+// /64 subnet, not treated as unique) — required for any custom key that uses
+// the IP, or an IPv6 attacker can rotate addresses to slip past the limit.
+const { ipKeyGenerator } = rateLimit;
 const limiter = (windowMs, max, message, keyGenerator) => rateLimit({
   windowMs, max, message: { success: false, error: message },
   standardHeaders: true, legacyHeaders: false, keyGenerator,
@@ -87,7 +91,7 @@ const limiter = (windowMs, max, message, keyGenerator) => rateLimit({
 // 8 attempts per 15 min per IP+mobile — generous for a typo, useless for brute force
 app.use('/admin/api/login', limiter(15 * 60 * 1000, 8,
   'Too many sign-in attempts. Please wait 15 minutes and try again.',
-  (req) => `${req.ip}:${String(req.body?.mobile_number || '').slice(0, 15)}`));
+  (req) => `${ipKeyGenerator(req.ip)}:${String(req.body?.mobile_number || '').slice(0, 15)}`));
 
 // public write endpoints — stops enquiry/feedback spam floods
 app.use(['/public/enquiry', '/public/feedback'], limiter(60 * 60 * 1000, 10,
