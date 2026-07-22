@@ -168,8 +168,15 @@ async function showTrialTerms(session, mobile) {
 }
 
 async function askBoard(session, mobile) {
+  // Only boards we can actually deliver. is_active alone is not enough: ICSE is
+  // active but has no questions, and offering it dead-ends the parent after a
+  // full signup. The EXISTS check keeps the list honest against real content —
+  // the same promise the public site makes.
   const boards = (await db.query(
-    `SELECT board_code, board_name FROM boards WHERE is_active ORDER BY display_order LIMIT 10`)).rows;
+    `SELECT b.board_code, b.board_name FROM boards b
+      WHERE b.is_active
+        AND EXISTS (SELECT 1 FROM question_bank qb WHERE qb.board_id = b.id AND qb.is_active)
+      ORDER BY b.display_order LIMIT 10`)).rows;
   const name = session.context.student_name;
   await wa.sendList(session.id, mobile, {
     text: `Nice to meet ${name}! 😊\n\n*2 of 4 — Which board is ${name} studying in?*`,
@@ -187,6 +194,10 @@ async function availableMediums(boardCode) {
        JOIN boards  b ON b.id = bm.board_id
        JOIN mediums m ON m.id = bm.medium_id
       WHERE b.board_code = $1 AND bm.is_active AND m.is_active
+        -- content gate: CBSE Hindi and KSEAB Kannada are configured but empty,
+        -- so exclude any medium with no questions for this board
+        AND EXISTS (SELECT 1 FROM question_bank qb
+                     WHERE qb.board_id = b.id AND qb.medium_id = m.id AND qb.is_active)
       ORDER BY m.display_order LIMIT 10`, [boardCode]);
   return rows;
 }
@@ -219,8 +230,19 @@ async function askMediumOrSkip(session, mobile) {
 }
 
 async function askGrade(session, mobile) {
+  // Grades we can serve for the board and medium already chosen. Every enabled
+  // grade currently has content for both boards, so this changes nothing today —
+  // but it means a partially-loaded board can never offer an empty grade.
+  const { board_code, medium_code } = session.context;
   const grades = (await db.query(
-    `SELECT grade_code, grade_name FROM grades WHERE is_active ORDER BY display_order LIMIT 10`)).rows;
+    `SELECT g.grade_code, g.grade_name FROM grades g
+      WHERE g.is_active
+        AND EXISTS (
+          SELECT 1 FROM question_bank qb
+            JOIN boards  b ON b.id = qb.board_id  AND b.board_code  = $1
+            JOIN mediums m ON m.id = qb.medium_id AND m.medium_code = $2
+           WHERE qb.grade_id = g.id AND qb.is_active)
+      ORDER BY g.display_order LIMIT 10`, [board_code, medium_code])).rows;
   await wa.sendList(session.id, mobile, {
     text: `*3 of 4 — Which grade is ${session.context.student_name} in?*`,
     buttonText: 'Select grade',

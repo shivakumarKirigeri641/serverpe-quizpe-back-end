@@ -104,7 +104,27 @@
       "Bash(node ./_paylive.js)",
       "Bash(WA_DRY_RUN=1 node -e ' *)",
       "Bash(grep -v \"injected env\\\\|WhatsApp OUT\\\\|messaging_product\\\\|\\\\\"to\\\\\"\\\\|\\\\\"type\\\\\"\\\\|\\\\\"interactive\\\\\"\\\\|\\\\\"body\\\\\"\\\\|\\\\\"text\\\\\"\\\\|\\\\\"footer\\\\\"\\\\|\\\\\"action\\\\\"\\\\|\\\\\"button\\\\\"\\\\|\\\\\"sections\\\\\"\\\\|\\\\\"rows\\\\\"\\\\|\\\\\"id\\\\\"\\\\|\\\\\"title\\\\\"\\\\|\\\\\"description\\\\\"\\\\|preview_url\\\\|^\\\\s*[{}\\\\[\\\\]]*\\\\s*$\")",
-      "Bash(node ./_audit.js)"
+      "Bash(node ./_audit.js)",
+      "Bash(node --check src/whatsapp/flow.js)",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\adaptcheck.js\")",
+      "Bash(sed -i \"s/correct ? q.answer : 'Z'/correct ? q.answer : \\(q.answer==='A'?'B':'A'\\)/g\" \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\adaptcheck.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\audit.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\pdftext.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\pdftext2.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\chapters.js\" \"src/temp/textbooks/pdf_books_cbse_maths/extracted\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\katoc.js\" grade9)",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\kagrep.js\" grade9 \"Heron\" \"Quadrilateral\" \"Euclid\" \"Surface Area\" \"Statistics\" \"Triangles\" \"Circles\" \"Number System\" \"Polynomial\" \"Coordinate Geometry\" \"Probability\" \"Sequences\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\chapters.js\" \"src/temp/textbooks/pdf_books_cbse_maths/extracted/grade7_part2\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\chapters.js\" \"src/temp/textbooks/pdf_books_cbse_maths/extracted/grade8_part2\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\kaverify.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\kadisambig.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\dump.js\" \"src/temp/textbooks/pdf_books_cbse_maths/extracted/grade8_part2/hegp206.pdf\" 200 2400)",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\gen_algebra_play.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\gen_algebra_play.js\" --insert)",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\g8draw.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\repaudit.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\gen_cluster1.js\")",
+      "Bash(node \"C:\\\\Users\\\\shiva\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\\\a2e9d5ed-2b16-422c-85c9-c08f384c2da1\\\\scratchpad\\\\gen_cluster1.js\" --insert)"
     ],
     "additionalDirectories": [
       "c:\\Users\\shiva\\.claude\\projects\\c--Users-shiva-source-repos-serverpe-quizpe-back-end\\memory"
