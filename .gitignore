@@ -1,5 +1,5 @@
 node_modules
 .env
 src/temp
-src/whatsapp
 src/uploads
+scripts

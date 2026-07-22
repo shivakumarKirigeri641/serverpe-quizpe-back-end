@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <link rel="icon" type="image/png" href="/assets/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/assets/logo-mark.png" />
   <title>QuizPe — Start free trial</title>
   <style>
     :root {
@@ -92,6 +94,12 @@
         <label for="student_name">Child's name *</label>
         <input id="student_name" type="text" maxlength="60" placeholder="e.g. Aarav" autocomplete="off" />
       </div>
+
+      <div class="field">
+        <label for="school_name">School name</label>
+        <input id="school_name" type="text" maxlength="120" placeholder="e.g. DPS Jalahalli" autocomplete="off" />
+        <small class="hint">Optional — a short name is enough.</small>
+      </div>
       <div class="row2">
         <div class="field">
           <label for="board">Board *</label>
@@ -165,8 +173,10 @@
       $("termsLink").href = url; $("termsLink2").href = url;
       $("foot").textContent = `${data.business.company_name} · ${data.business.support_email}`;
 
+      // boards/grades come pre-filtered to what we actually have content for
       fill($("board"), data.boards, "board_code", "board_code", "Select board");
-      fill($("grade"), data.grades, "grade_code", "grade_name", "Select grade");
+      fill($("grade"), [], "grade_code", "grade_name", "Select board first");
+      $("grade").disabled = true;
       fill($("state"), data.states, "state_code", "state_name", "Select state");
       $("wrap").style.display = "block";
     } catch {
@@ -174,12 +184,25 @@
     }
   }
 
-  // medium options depend on the board chosen
+  // Cascade board -> grade -> medium, driven entirely by what we can deliver.
+  // A parent can never choose a combination that has no questions.
   $("board").addEventListener("change", () => {
-    const list = (ctx?.mediumsByBoard || {})[$("board").value] || [];
+    const grades = (ctx?.availability || {})[$("board").value] || {};
+    const list = Object.entries(grades)
+      .map(([code, g]) => ({ grade_code: code, grade_name: g.grade_name }));
+    const sel = $("grade");
+    sel.disabled = list.length === 0;
+    fill(sel, list, "grade_code", "grade_name", list.length ? "Select grade" : "None available yet");
+    if (list.length === 1) sel.value = list[0].grade_code;
+    sel.dispatchEvent(new Event("change"));
+  });
+
+  $("grade").addEventListener("change", () => {
+    const g = ((ctx?.availability || {})[$("board").value] || {})[$("grade").value];
+    const list = g ? Object.entries(g.mediums).map(([code, m]) => ({ medium_code: code, label: m.label })) : [];
     const sel = $("medium");
     sel.disabled = list.length === 0;
-    fill(sel, list, "medium_code", "label", list.length ? "Select medium" : "None available");
+    fill(sel, list, "medium_code", "label", list.length ? "Select medium" : "None available yet");
     if (list.length === 1) sel.value = list[0].medium_code;   // auto-pick the only option
     validate();
   });
@@ -201,6 +224,7 @@
         body: JSON.stringify({
           token,
           student_name: $("student_name").value.trim(),
+          school_name: $("school_name").value.trim(),
           board: $("board").value,
           medium: $("medium").value,
           grade: $("grade").value,

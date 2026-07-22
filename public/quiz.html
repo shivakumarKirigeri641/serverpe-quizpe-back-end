@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <link rel="icon" type="image/png" href="/assets/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/assets/logo-mark.png" />
+  <title>QuizPe — Today's Quiz</title>
+  <style>
+    :root{--brand:#075e54;--brand2:#13b48f;--accent:#00a884;--bg:#eef3f2;--card:#fff;
+          --text:#111b21;--muted:#667781;--border:#d7dedd;}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--text);min-height:100vh;}
+    .head{background:var(--brand);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;}
+    .head img{width:34px;height:34px;border-radius:8px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:15px;}.head p{margin:1px 0 0;font-size:11px;opacity:.85;}
+    .bar{height:6px;background:#0a4b44;overflow:hidden;}
+    .bar > i{display:block;height:100%;width:0;
+             background:linear-gradient(90deg,var(--brand2),#5fe3c0,var(--brand2));
+             background-size:200% 100%;
+             transition:width .7s cubic-bezier(.22,.9,.28,1);
+             animation:shimmer 2.6s linear infinite;}
+    @keyframes shimmer{to{background-position:-200% 0;}}
+
+    /* one question slides out, the next slides in — direction follows Next/Prev */
+    @keyframes inFwd {from{opacity:0;transform:translateX(34px) scale(.985);} to{opacity:1;transform:none;}}
+    @keyframes inBack{from{opacity:0;transform:translateX(-34px) scale(.985);} to{opacity:1;transform:none;}}
+    @keyframes rise  {from{opacity:0;transform:translateY(14px);} to{opacity:1;transform:none;}}
+    @keyframes pulse {0%{transform:scale(1);} 45%{transform:scale(1.035);} 100%{transform:scale(1);}}
+    @keyframes pop   {0%{transform:scale(.4);opacity:0;} 60%{transform:scale(1.15);} 100%{transform:scale(1);opacity:1;}}
+    .qcard.fwd {animation:inFwd .55s cubic-bezier(.22,.9,.28,1) both;}
+    .qcard.back{animation:inBack .55s cubic-bezier(.22,.9,.28,1) both;}
+    /* each option drifts up a beat after the one above it */
+    .qcard.fwd .opt,.qcard.back .opt{animation:rise .5s cubic-bezier(.22,.9,.28,1) both;}
+    .opt:nth-child(1){animation-delay:.10s;} .opt:nth-child(2){animation-delay:.19s;}
+    .opt:nth-child(3){animation-delay:.28s;} .opt:nth-child(4){animation-delay:.37s;}
+    .opt.justPicked{animation:pulse .34s ease-out;}
+    .opt.sel .k{animation:pop .34s cubic-bezier(.34,1.56,.64,1);}
+    @media (prefers-reduced-motion: reduce){
+      *,*::before,*::after{animation:none !important;transition-duration:.01ms !important;}
+    }
+    .wrap{max-width:560px;margin:0 auto;padding:16px 14px 34px;}
+    .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:8px;}
+    .meta b{color:var(--brand);}
+    .qcard{background:var(--card);border-radius:16px;padding:20px 18px;box-shadow:0 3px 14px rgba(0,0,0,.07);}
+    .chapter{font-size:11px;color:var(--muted);margin-bottom:8px;}
+    .qtext{font-size:19px;font-weight:700;line-height:1.4;margin:0 0 16px;}
+    .opts{display:grid;gap:10px;}
+    .opt{display:flex;align-items:center;gap:12px;width:100%;text-align:left;
+         background:#fff;border:2px solid var(--border);border-radius:12px;padding:14px 14px;
+         font-size:16px;line-height:1.35;cursor:pointer;transition:transform .06s,border-color .15s,background .15s;}
+    .opt:active{transform:scale(.99);}
+    .opt .k{flex:none;width:28px;height:28px;border-radius:50%;background:#eef3f2;color:var(--brand);
+            font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;}
+    .opt.sel{border-color:var(--accent);background:#e9f8f4;}
+    .opt.sel .k{background:var(--accent);color:#fff;}
+    .opt[disabled]{opacity:.75;cursor:default;}
+    .nav{display:flex;gap:10px;margin-top:18px;}
+    .btn{flex:1;padding:14px;border:0;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;}
+    .btn.prev{flex:0 0 40%;background:#fff;border:2px solid var(--border);color:var(--muted);}
+    .btn.next{background:var(--accent);color:#fff;}
+    .btn.next[disabled]{background:#b8ccc6;cursor:not-allowed;}
+    .btn.prev[disabled]{opacity:.4;cursor:not-allowed;}
+    .btn.submit{background:var(--brand);}
+    .foot{text-align:center;font-size:11px;color:var(--muted);margin-top:16px;}
+    .dots{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;margin-top:14px;}
+    .dots i{width:8px;height:8px;border-radius:50%;background:#cfdad7;
+            transition:background .35s ease,transform .35s cubic-bezier(.34,1.56,.64,1);}
+    .dots i.on{background:var(--accent);}
+    .dots i.here{background:var(--brand);transform:scale(1.35);}
+    .done{display:none;text-align:center;padding:44px 20px;}
+    .done .big{font-size:44px;animation:cheer 1.1s cubic-bezier(.34,1.56,.64,1) both;}
+    .done h2{margin:10px 0 4px;color:var(--brand);animation:rise .5s .18s both;}
+    .done .score{font-size:34px;font-weight:800;color:var(--accent);margin:8px 0;
+                 animation:pop .6s .38s cubic-bezier(.34,1.56,.64,1) both;}
+    .done p{color:var(--muted);font-size:14px;margin:6px 0;animation:rise .5s .55s both;}
+    @keyframes cheer{0%{transform:scale(0) rotate(-25deg);opacity:0;}
+                     55%{transform:scale(1.25) rotate(8deg);opacity:1;}
+                     100%{transform:scale(1) rotate(0);}}
+    .wa{display:inline-block;margin-top:18px;padding:13px 26px;border-radius:24px;background:var(--accent);
+        color:#fff;font-weight:700;text-decoration:none;font-size:15px;
+        animation:rise .5s .7s both, breathe 2.4s 1.2s ease-in-out infinite;}
+    @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(0,168,132,.45);} 50%{box-shadow:0 0 0 12px rgba(0,168,132,0);}}
+    .msg{text-align:center;padding:40px 18px;color:var(--muted);}
+    .state{text-align:center;padding:46px 22px;animation:rise .45s both;}
+    .state .ico{font-size:54px;line-height:1;animation:pop .6s cubic-bezier(.34,1.56,.64,1) both;}
+    .state h2{margin:14px 0 8px;color:var(--brand);font-size:20px;}
+    .state p{color:var(--muted);font-size:14px;line-height:1.55;margin:0 auto;max-width:330px;}
+    .state .note{margin:18px auto 0;max-width:330px;background:#fff;border:1px solid var(--border);
+                 border-radius:12px;padding:12px 14px;font-size:13px;color:var(--text);text-align:left;}
+    .offline{position:fixed;left:0;right:0;bottom:0;display:none;gap:10px;align-items:center;
+             background:#3a2f1b;color:#ffe9b0;padding:12px 14px;font-size:13px;line-height:1.35;
+             box-shadow:0 -3px 14px rgba(0,0,0,.25);z-index:50;}
+    .offline.on{display:flex;animation:rise .3s both;}
+    .offline button{margin-left:auto;flex:none;background:#ffe9b0;color:#3a2f1b;border:0;
+                    border-radius:8px;padding:8px 12px;font-weight:700;font-size:12px;cursor:pointer;}
+    .spin{flex:none;width:14px;height:14px;border:2px solid rgba(255,233,176,.35);
+          border-top-color:#ffe9b0;border-radius:50%;animation:spin .8s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1 id="title">Today's Quiz</h1><p id="sub">Loading…</p></div>
+  </div>
+  <div class="bar"><i id="bar"></i></div>
+
+  <div class="wrap">
+    <div id="stage" style="display:none">
+      <div class="meta"><span id="qnum"></span><span id="left"></span></div>
+      <div class="qcard" id="card">
+        <div class="chapter" id="chapter"></div>
+        <p class="qtext" id="qtext"></p>
+        <div class="opts" id="opts"></div>
+        <div class="nav">
+          <button class="btn prev" id="prev">&laquo; Previous</button>
+          <button class="btn next" id="next" disabled>Next &raquo;</button>
+        </div>
+      </div>
+      <div class="dots" id="dots"></div>
+      <div class="foot" id="hint">Pick an answer, then tap Next. You can go back and change it.</div>
+    </div>
+
+    <div class="done" id="done">
+      <div class="big">🎉</div>
+      <h2>Quiz complete!</h2>
+      <div class="score" id="score"></div>
+      <p id="doneMsg">Your report is on its way to WhatsApp.</p>
+      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <p id="redir" style="font-size:12px;"></p>
+    </div>
+
+    <!-- Expired / already-submitted / invalid all land here with a real
+         explanation and a way back, instead of a bare line of grey text. -->
+    <div class="state" id="msg" style="display:none">
+      <div class="ico" id="stIco">⚠️</div>
+      <h2 id="stTitle">Something went wrong</h2>
+      <p id="stBody"></p>
+      <div class="note" id="stNote" style="display:none"></div>
+      <a class="wa" id="stBtn" href="#" style="display:none">💬 Back to WhatsApp</a>
+    </div>
+  </div>
+
+  <!-- Connection trouble never hides the quiz — it sits on top so the chosen
+       answer stays on screen and is re-sent the moment the line comes back. -->
+  <div class="offline" id="offline">
+    <span class="spin"></span>
+    <span id="offlineText">No internet — your answer is saved and will send automatically.</span>
+    <button id="retryBtn">Retry now</button>
+  </div>
+
+<script>
+  const token = new URLSearchParams(location.search).get('token');
+  const $ = (id) => document.getElementById(id);
+  let busy = false, waUrl = null;
+  let serial = 1, total = 0, picked = null, answered = new Set();
+
+  const show = (what) => {
+    $('stage').style.display = what === 'q' ? 'block' : 'none';
+    $('done').style.display  = what === 'done' ? 'block' : 'none';
+    $('msg').style.display   = what === 'msg' ? 'block' : 'none';
+  };
+  const STATES = {
+    SUBMITTED: { ico: '✅', title: 'Already submitted',
+                 note: 'Your score and the full report — with every question, the correct answer and why — are waiting in WhatsApp.' },
+    EXPIRED:   { ico: '⏳', title: 'This quiz link has expired',
+                 note: "Quiz links close at the end of the day. Your next quiz arrives on WhatsApp at your usual quiz time." },
+    INVALID:   { ico: '🔗', title: 'Link not recognised',
+                 note: 'Please open the quiz from the button in your WhatsApp message.' },
+    NETWORK:   { ico: '📶', title: 'Connection problem', note: null },
+  };
+
+  /** Show a proper explained screen, not a bare line of text. */
+  function fail(text, code, waHref) {
+    const st = STATES[code] || { ico: '⚠️', title: 'Something went wrong', note: null };
+    $('stIco').textContent = st.ico;
+    $('stTitle').textContent = st.title;
+    $('stBody').textContent = text || '';
+    if (st.note) { $('stNote').textContent = st.note; $('stNote').style.display = 'block'; }
+    else $('stNote').style.display = 'none';
+    const href = waHref || waUrl;
+    if (href) { $('stBtn').href = href; $('stBtn').style.display = 'inline-block'; }
+    else $('stBtn').style.display = 'none';
+    show('msg');
+    $('sub').textContent = '';
+  }
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  /* ----------------------------------------------------------- connection */
+  let pendingRetry = null;                 // the call to repeat when we're back
+  const banner = (on, text) => {
+    $('offline').classList.toggle('on', on);
+    if (text) $('offlineText').textContent = text;
+  };
+
+  /**
+   * A request that survives a flaky line. Transport failures (no internet,
+   * dropped connection, 5xx) are retried with backoff and keep the question on
+   * screen; a real rejection from the server (expired/submitted link, bad
+   * answer) is returned so the caller can stop. The child never loses a tap.
+   */
+  async function api(path, opts, { retries = 4 } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (!navigator.onLine) throw new Error('offline');
+        const res = await fetch(path, opts);
+        // 5xx is worth repeating; 4xx is the server saying no — don't hammer it
+        if (res.status >= 500) throw new Error('server ' + res.status);
+        banner(false);
+        return await res.json();
+      } catch (e) {
+        if (attempt >= retries) {
+          banner(true, 'Still no connection. Your answers so far are safe — tap retry.');
+          return null;                     // caller keeps the screen as-is
+        }
+        banner(true, navigator.onLine
+          ? 'Connection problem — retrying…'
+          : 'No internet — your answer is saved and will send automatically.');
+        await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
+      }
+    }
+  }
+
+  // Coming back online resumes immediately rather than waiting for a backoff.
+  window.addEventListener('online', () => { if (pendingRetry) pendingRetry(); });
+  window.addEventListener('offline', () => banner(true,
+    'No internet — your answer is saved and will send automatically.'));
+  $('retryBtn').onclick = () => { if (pendingRetry) pendingRetry(); };
+
+  function render(d, dir = 'fwd') {
+    const p = d.progress || { done: 0, total: 0 };
+    total = p.total;
+    const q = d.question;
+    if (!q) return fail('This quiz is no longer available.');
+
+    serial = q.serial;
+    picked = q.selected || null;                 // pre-select on "<< Previous"
+    if (q.selected) answered.add(serial);
+
+    $('bar').style.width = total ? `${Math.round(p.done * 100 / total)}%` : '0%';
+    $('qnum').innerHTML = `Question <b>${serial}</b> of <b>${total}</b>`;
+    $('left').textContent = `${total - p.done} left`;
+    $('chapter').textContent = q.chapter || '';
+    $('qtext').textContent = q.text;
+    $('opts').innerHTML = q.options.map(o =>
+      `<button class="opt${o.letter === picked ? ' sel' : ''}" data-k="${o.letter}">
+         <span class="k">${o.letter}</span><span>${escapeHtml(o.text)}</span></button>`).join('');
+    [...document.querySelectorAll('.opt')].forEach(b => b.onclick = () => pick(b));
+
+    $('dots').innerHTML = Array.from({ length: total }, (_, i) => {
+      const n = i + 1;
+      return `<i class="${n === serial ? 'here' : (answered.has(n) ? 'on' : '')}"></i>`;
+    }).join('');
+
+    const last = serial === total;
+    $('next').className = 'btn next' + (last ? ' submit' : '');
+    $('next').innerHTML = last ? 'Submit quiz &check;' : 'Next &raquo;';
+    $('next').disabled = !picked;
+    $('prev').disabled = serial <= 1;
+    $('hint').textContent = last
+      ? 'This is the last question — check your answers before submitting.'
+      : 'Pick an answer, then tap Next. You can go back and change it.';
+    show('q');
+
+    // restart the entrance animation for the incoming question
+    const card = $('card');
+    card.classList.remove('fwd', 'back');
+    void card.offsetWidth;                 // reflow, or the class swap won't replay it
+    card.classList.add(dir);
+  }
+
+  function pick(btn) {
+    picked = btn.dataset.k;
+    [...document.querySelectorAll('.opt')].forEach(b => {
+      b.classList.toggle('sel', b === btn);
+      b.classList.remove('justPicked');
+    });
+    void btn.offsetWidth;
+    btn.classList.add('justPicked');
+    $('next').disabled = false;
+  }
+
+  /** Save whatever is picked here, then move to `goto`. */
+  async function go(target) {
+    if (busy) return false;
+    busy = true;
+    $('next').disabled = true; $('prev').disabled = true;
+
+    const from = serial, chosen = picked;
+    pendingRetry = () => { busy = false; serial = from; picked = chosen; go(target); };
+
+    const r = await api('/quiz/api/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, serial: from, answer: chosen, goto: target }),
+    });
+    busy = false;
+
+    // null = we ran out of retries; keep the question and the chosen answer on
+    // screen so the child can carry on the moment the line is back
+    if (!r) { $('next').disabled = !picked; $('prev').disabled = serial <= 1; return false; }
+    pendingRetry = null;
+    if (!r.success) { fail(r.error || 'Something went wrong.'); return false; }
+
+    if (chosen) answered.add(from);
+    render(r, target < from ? 'back' : 'fwd');
+    return true;
+  }
+
+  $('prev').onclick = () => go(serial - 1);
+  $('next').onclick = async () => {
+    if (!picked || busy) return;
+    if (serial < total) return go(serial + 1);
+
+    // SAVE THE LAST ANSWER FIRST, then ask.
+    //
+    // Asking first meant the confirmation appeared while this answer was still
+    // only on screen — so the progress bar and the "N left" counter behind the
+    // dialog said 9 of 10, and a child who had just answered the last question
+    // was told the quiz was incomplete. Saving first makes every number the
+    // dialog is sitting on top of true.
+    const saved = await go(serial);
+    if (!saved) return;                    // offline or rejected — go() has shown why
+
+    const missing = [...Array(total).keys()].map(i => i + 1).find(n => !answered.has(n));
+    if (missing) {
+      if (confirm(`Question ${missing} is still unanswered. Go there now?`)) return go(missing);
+      return;
+    }
+
+    if (!confirm(`All ${total} questions answered. Submit your quiz?\n\nYou cannot change your answers after this.`)) return;
+    finish();
+  };
+
+  let finishTried = false;
+
+  async function finish() {
+    $('sub').textContent = 'Submitting…';
+    show('msg'); $('msg').textContent = 'Submitting your answers…';
+    pendingRetry = () => finish();
+
+    // mark BEFORE sending: if the request lands but its reply is lost, the
+    // retry must recognise "already submitted" as our own success
+    const firstTry = !finishTried;
+    finishTried = true;
+
+    const r = await api('/quiz/api/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    if (!r) { fail('Waiting for a connection to submit your answers…', 'NETWORK'); return; }
+    pendingRetry = null;
+
+    // If a previous attempt actually landed and only its reply was lost, the
+    // server now calls the link spent. That's a success, not an error.
+    if (!r.success) {
+      if (!firstTry) {
+        $('score').textContent = '';
+        $('doneMsg').textContent = 'Already submitted — your score and report are in WhatsApp.';
+        $('waBtn').style.display = 'none'; $('redir').textContent = '';
+        show('done');
+        return;
+      }
+      return fail(r.error, r.code, r.whatsapp_url);
+    }
+    if (r.score) $('score').textContent = `${r.score.correct}/${r.score.total}  (${r.score.pct}%)`;
+    waUrl = r.whatsapp_url;
+    $('bar').style.width = '100%';
+    $('sub').textContent = 'Done';
+    show('done');
+    if (waUrl) {
+      $('waBtn').href = waUrl;
+      let n = 3;
+      const t = setInterval(() => {
+        n--; $('redir').textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+        if (n <= 0) { clearInterval(t); location.href = waUrl; }
+      }, 1000);
+    } else { $('waBtn').style.display = 'none'; }
+  }
+
+  (async () => {
+    if (!token) return fail('No quiz token in this link.', 'INVALID');
+    try {
+      const d = await (await fetch(`/quiz/api/context?token=${encodeURIComponent(token)}`)).json();
+      // a submitted or expired link is dead — say so, don't reopen the quiz
+      if (!d.success) return fail(d.error, d.code, d.whatsapp_url);
+      (d.answered || []).forEach(n => answered.add(n));   // resume: keep the dots accurate
+      $('title').textContent = `${d.student}'s ${d.isTest ? 'Test' : 'Quiz'}`;
+      $('sub').textContent = d.subject;
+      render(d);
+    } catch { fail('Could not reach QuizPe. Please check your connection and try again.', 'NETWORK'); }
+  })();
+</script>
+</body>
+</html>

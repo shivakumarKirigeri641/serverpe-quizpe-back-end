@@ -54,7 +54,10 @@ router.get('/api/context', async (req, res) => {
     const link = await loadToken(req.query.token);
     if (!link) return res.status(410).json({ success: false, error: 'This link has expired or was already used.' });
 
-    const [boards, mediums, grades, states, plan, policy, biz] = await Promise.all([
+    const { getAvailability } = require('../content/availability');
+    const [avail, boards, mediums, grades, states, plan, policy, biz] = await Promise.all([
+      // only board/grade/medium combos that actually have questions
+      getAvailability(),
       db.query(`SELECT board_code, board_name FROM boards WHERE is_active ORDER BY display_order`),
       db.query(`SELECT m.medium_code, m.medium_name, m.native_name, b.board_code
                   FROM board_mediums bm
@@ -64,7 +67,8 @@ router.get('/api/context', async (req, res) => {
                  ORDER BY b.display_order, m.display_order`),
       db.query(`SELECT grade_code, grade_name FROM grades WHERE is_active ORDER BY display_order`),
       db.query(`SELECT state_code, state_name FROM states_unions WHERE is_active ORDER BY state_name`),
-      db.query(`SELECT plan_name, plan_description, duration FROM quizpe_plans WHERE plan_code='TRY0'`),
+      db.query(`SELECT plan_name, plan_description, duration FROM quizpe_plans
+                  WHERE is_trial AND is_active ORDER BY id LIMIT 1`),
       db.query(`SELECT title, url FROM policies WHERE policy_code='trial_conditions' AND is_active ORDER BY id DESC LIMIT 1`),
       db.query(`SELECT product_name, product_tagline, company_name, support_email FROM business_details WHERE is_active LIMIT 1`),
     ]);
@@ -80,9 +84,11 @@ router.get('/api/context', async (req, res) => {
       success: true,
       parentName: link.parent_name,
       mobile: link.mobile_number,
-      boards: boards.rows,
+      // content-driven: a parent can only pick something we can deliver
+      availability: avail.availability,
+      boards: avail.boards,
       mediumsByBoard,
-      grades: grades.rows,
+      grades: avail.grades,
       states: states.rows,
       plan: plan.rows[0],
       policy: policy.rows[0],
@@ -97,7 +103,7 @@ router.get('/api/context', async (req, res) => {
 /* ------------------------------------------------------------------- submit */
 
 router.post('/api/submit', async (req, res) => {
-  const { token, student_name, board, medium, grade, state, accept_terms } = req.body || {};
+  const { token, student_name, school_name, board, medium, grade, state, accept_terms } = req.body || {};
   try {
     const link = await loadToken(token);
     if (!link) return res.status(410).json({ success: false, error: 'This link has expired or was already used.' });
@@ -139,12 +145,27 @@ router.post('/api/submit', async (req, res) => {
         [link.parent_name || 'Parent', link.mobile_number, state])).rows[0].id;
 
       await c.query(
-        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name)
-         VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+         VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (parent_id, student_name) DO UPDATE
            SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
-               medium_id=EXCLUDED.medium_id, modified_at=now()`,
-        [parentId, checks[0].rows[0].id, checks[2].rows[0].id, checks[1].rows[0].id, name]);
+               medium_id=EXCLUDED.medium_id,
+               -- optional field: never wipe a stored school with a blank
+               school_name=COALESCE(EXCLUDED.school_name, students.school_name),
+               modified_at=now()`,
+        [parentId, checks[0].rows[0].id, checks[2].rows[0].id, checks[1].rows[0].id, name,
+         String(school_name || '').trim().slice(0, 120) || null]);
+
+      // The form is filtered, but a crafted POST is not — refuse anything we
+      // cannot actually deliver rather than creating a doomed subscription.
+      const { isDeliverable } = require('../content/availability');
+      if (!await isDeliverable(board, grade, medium)) {
+        await c.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: 'We do not have quiz content for that board, grade and medium yet. Please pick another combination.',
+        });
+      }
 
       // Supersede any earlier subscription for this parent — only one may be
       // active at a time, so the daily sweep can never pick up two.
@@ -153,11 +174,23 @@ router.post('/api/submit', async (req, res) => {
             SET is_active=false, modified_at=now()
           WHERE parent_id=$1 AND is_active`, [parentId]);
 
+      // The trial is whichever plan is flagged is_trial — its length comes from
+      // the plan row, so changing `duration` in the DB changes the trial with
+      // no code edit. Refuse rather than guess if no trial is on offer.
+      const trial = (await c.query(
+        `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
+      if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
+
+      // spread the evening load instead of putting everyone at 8 PM
+      const { slotFor } = require('../whatsapp/quizSlot');
+      const slot = slotFor(parentId);
+
       const sub = (await c.query(
-        `INSERT INTO parents_quizpe_subscriptions (parent_id, plan_id, plan_end_date)
-         VALUES ($1,(SELECT id FROM quizpe_plans WHERE plan_code='TRY0'),
-                 CURRENT_DATE + (SELECT duration FROM quizpe_plans WHERE plan_code='TRY0'))
-         RETURNING id, plan_end_date, quiz_time`, [parentId])).rows[0];
+        `INSERT INTO parents_quizpe_subscriptions
+           (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
+         VALUES ($1, $2, CURRENT_DATE + $3::int, $4::time, $5::time)
+         RETURNING id, plan_end_date, quiz_time`,
+        [parentId, trial.id, trial.duration, slot.quiz_time, slot.reminder_time])).rows[0];
 
       await c.query(`UPDATE signup_links SET used_at=now(), is_active=false WHERE id=$1`, [link.id]);
       if (link.session_id) {
@@ -177,7 +210,7 @@ router.post('/api/submit', async (req, res) => {
         const gradeName = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0].grade_name;
         await wa.sendText(link.session_id, link.mobile_number, M.trialActivated({
           studentName: name, boardCode: board, gradeName,
-          endDate: sub.plan_end_date, quizTime: sub.quiz_time,
+          endDate: sub.plan_end_date, quizTime: sub.quiz_time, duration: trial.duration,
         }));
       } catch (e) {
         console.error('[trial] confirmation message failed:', e.message);

@@ -31,9 +31,14 @@ const globalKey = Symbol.for('serverpe.quizpe.pgPool');
 const pool =
   globalThis[globalKey] ||
   (globalThis[globalKey] = new Pool({
-    max: Number(process.env.PG_POOL_MAX) || 10,
+    // Every child finishing at 8 PM hits the DB at once; 10 connections made
+    // requests queue behind each other. Keep this comfortably under Postgres's
+    // max_connections (default 100) so other clients can still connect.
+    max: Number(process.env.PG_POOL_MAX) || 25,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
+    // Never let one wedged query hold a connection for the whole evening.
+    statement_timeout: Number(process.env.PG_STATEMENT_TIMEOUT_MS) || 15_000,
   }));
 
 // Surface pool-level errors on idle clients instead of crashing silently.

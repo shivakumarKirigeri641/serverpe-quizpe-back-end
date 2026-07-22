@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/png" href="/assets/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/assets/logo-mark.png" />
+  <title>QuizPe — Policies</title>
+  <style>
+    :root{--brand:#075e54;--accent:#00a884;--bg:#f4f7f6;--card:#fff;
+          --text:#111b21;--muted:#667781;--border:#e3eae8;}
+    *{box-sizing:border-box;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--text);line-height:1.6;}
+    .head{background:var(--brand);color:#fff;padding:16px;display:flex;align-items:center;gap:12px;
+          position:sticky;top:0;z-index:5;}
+    .head img{width:38px;height:38px;border-radius:9px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:16px;}
+    .head p{margin:2px 0 0;font-size:11px;opacity:.85;}
+    .wrap{max-width:760px;margin:0 auto;padding:18px 16px 60px;}
+    nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;}
+    nav a{font-size:12px;font-weight:600;text-decoration:none;color:var(--brand);
+          background:#fff;border:1px solid var(--border);border-radius:20px;padding:6px 12px;}
+    nav a.on{background:var(--brand);color:#fff;border-color:var(--brand);}
+    .doc{background:var(--card);border:1px solid var(--border);border-radius:16px;
+         padding:22px 20px;margin-bottom:16px;}
+    .doc h2{margin:0 0 4px;color:var(--brand);font-size:20px;}
+    .meta{font-size:11px;color:var(--muted);margin-bottom:14px;}
+    .summary{font-size:14px;color:var(--muted);border-left:3px solid var(--accent);
+             padding-left:12px;margin-bottom:18px;}
+    section{margin-bottom:16px;}
+    section h3{margin:0 0 4px;font-size:15px;color:var(--text);}
+    section h3 .no{color:var(--accent);font-weight:800;margin-right:6px;}
+    section p{margin:0;font-size:14px;color:#31434c;}
+    .biz{background:#fff;border:1px solid var(--border);border-radius:14px;padding:16px;
+         font-size:13px;color:var(--muted);}
+    .biz b{color:var(--text);}
+    .msg{text-align:center;padding:50px 20px;color:var(--muted);}
+    .print{position:fixed;right:16px;bottom:16px;background:var(--accent);color:#fff;border:0;
+           border-radius:22px;padding:11px 18px;font-weight:700;font-size:13px;cursor:pointer;
+           box-shadow:0 4px 14px rgba(0,0,0,.2);}
+    @media print{.head,nav,.print{display:none;} body{background:#fff;} .doc{border:none;padding:0;}}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="" />
+    <div><h1 id="brandName">QuizPe</h1><p id="brandSub">Policies</p></div>
+  </div>
+
+  <div class="wrap">
+    <nav id="nav"></nav>
+    <div id="body"><div class="msg">Loading…</div></div>
+    <div class="biz" id="biz"></div>
+  </div>
+  <button class="print" onclick="window.print()">🖨 Print / Save PDF</button>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // ?doc=privacy shows one; ?consent=1 shows everything a parent must agree to;
+  // no parameter shows the full set.
+  const wanted = q.get('doc');
+  const consentOnly = q.get('consent') === '1';
+
+  async function load() {
+    let index;
+    try {
+      index = await (await fetch('/legal')).json();
+      if (!index.success) throw new Error(index.error);
+    } catch {
+      $('body').innerHTML = '<div class="msg">Could not load the policies. Please try again.</div>';
+      return;
+    }
+
+    const b = index.business || {};
+    $('brandName').textContent = b.product_name || 'QuizPe';
+    $('brandSub').textContent = b.company_name || '';
+
+    let list = index.documents;
+    if (wanted) list = list.filter(d => d.doc_code === wanted);
+    else if (consentOnly) list = list.filter(d => d.requires_consent);
+
+    // the nav always offers everything, whatever is being shown
+    $('nav').innerHTML = index.documents.map(d =>
+      `<a href="?doc=${encodeURIComponent(d.doc_code)}"
+          class="${d.doc_code === wanted ? 'on' : ''}">${esc(d.title)}</a>`).join('')
+      + `<a href="?consent=1" class="${consentOnly ? 'on' : ''}">What I agreed to</a>`
+      + `<a href="/legal.html" class="${!wanted && !consentOnly ? 'on' : ''}">All</a>`;
+
+    const g = index.grievance_officer || {};
+    $('biz').innerHTML =
+      `<b>${esc(b.company_name || '')}</b><br />${esc(b.address || '')}<br />` +
+      (b.gstin ? `GSTIN ${esc(b.gstin)}<br />` : '') +
+      (b.support_email ? `${esc(b.support_email)}<br />` : '') +
+      (g.name ? `<br /><b>Grievance Officer:</b> ${esc(g.name)}${g.designation ? ', ' + esc(g.designation) : ''}<br />` +
+                `${esc(g.email || '')}${g.phone ? ' · ' + esc(g.phone) : ''}<br />` +
+                `Acknowledged within ${g.acknowledge_hours}h · resolved within ${g.resolve_days} days` : '');
+
+    if (!list.length) {
+      $('body').innerHTML = '<div class="msg">No such policy.</div>';
+      return;
+    }
+
+    const docs = await Promise.all(list.map(d =>
+      fetch(`/legal/${encodeURIComponent(d.doc_code)}`).then(r => r.json()).catch(() => null)));
+
+    $('body').innerHTML = docs.filter(Boolean).map(({ document: d }) => `
+      <article class="doc">
+        <h2>${esc(d.title)}</h2>
+        <div class="meta">Version ${esc(d.version)} · effective ${esc(String(d.effective_from).slice(0, 10))}
+          ${d.requires_consent ? ' · you agreed to this at signup' : ''}</div>
+        ${d.summary ? `<div class="summary">${esc(d.summary)}</div>` : ''}
+        ${d.sections.map(s => `
+          <section>
+            <h3>${s.section_no ? `<span class="no">${esc(s.section_no)}</span>` : ''}${esc(s.title)}</h3>
+            <p>${esc(s.description)}</p>
+          </section>`).join('')}
+      </article>`).join('');
+
+    document.title = (list.length === 1 ? list[0].title + ' — ' : 'Policies — ') + (b.product_name || 'QuizPe');
+  }
+
+  load();
+</script>
+</body>
+</html>

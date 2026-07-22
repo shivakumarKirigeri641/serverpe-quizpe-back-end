@@ -21,6 +21,8 @@ const path = require('path');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../database/connectDB');
+const { useFontsFor } = require('./fonts');
+const { nextReportFileName } = require('./reportNumber');
 const { REPORTS_ROOT, TYPES, gradeFor } = require('./dailyReport');
 
 const ROOT = path.join(REPORTS_ROOT, TYPES.weekly);
@@ -38,9 +40,9 @@ const maskMobile = (m) => (m ? `${'X'.repeat(Math.max(0, m.length - 4))}${m.slic
 
 async function fetchWeekData(studentId, subjectCode, days) {
   const head = (await db.query(
-    `SELECT st.id AS student_id, st.student_name,
+    `SELECT st.id AS student_id, st.student_name, st.school_name,
             p.parent_name, p.parent_mobile_number, su.state_name,
-            b.board_code, g.grade_name, m.medium_name,
+            b.board_code, g.grade_name, m.medium_name, m.medium_code,
             sub.id AS subject_id, sub.subject_name,
             pl.plan_name
        FROM students st
@@ -101,11 +103,11 @@ function card(doc, x, y, w, h, { fill = C.white, stroke = C.line, r = 8 } = {}) 
   doc.roundedRect(x, y, w, h, r).fillAndStroke(fill, stroke);
 }
 function label(doc, t, x, y, color = C.muted, size = 8) {
-  doc.fillColor(color).font('Helvetica-Bold').fontSize(size).text(String(t).toUpperCase(), x, y, { characterSpacing: 0.5 });
+  doc.fillColor(color).font(doc._F.bold).fontSize(size).text(String(t).toUpperCase(), x, y, { characterSpacing: 0.5 });
 }
 function kv(doc, k, v, x, y, w) {
-  doc.fillColor(C.muted).font('Helvetica').fontSize(9).text(k, x, y);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9).text(v ?? '—', x, y, { width: w, align: 'right' });
+  doc.fillColor(C.muted).font(doc._F.regular).fontSize(9).text(k, x, y);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(9).text(v ?? '—', x, y, { width: w, align: 'right' });
 }
 
 /** Bar chart of daily score % with a trend line overlay. */
@@ -118,7 +120,7 @@ function scoreChart(doc, x, y, w, h, daily) {
   [0, 50, 100].forEach(v => {
     const gy = y0 + plotH - (v / 100) * plotH;
     doc.moveTo(x0, gy).lineTo(x + w, gy).strokeColor(C.grid).lineWidth(0.5).stroke();
-    doc.fillColor(C.faint).font('Helvetica').fontSize(7).text(String(v), x, gy - 3, { width: pad.l - 4, align: 'right' });
+    doc.fillColor(C.faint).font(doc._F.regular).fontSize(7).text(String(v), x, gy - 3, { width: pad.l - 4, align: 'right' });
   });
 
   const n = daily.length;
@@ -132,8 +134,8 @@ function scoreChart(doc, x, y, w, h, daily) {
     const by = y0 + plotH - bh;
     const col = pct >= 60 ? C.accent : pct >= 40 ? C.warn : C.bad;
     doc.roundedRect(cx - bw / 2, by, bw, Math.max(bh, 1), 2).fill(col);
-    doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(7).text(`${pct}%`, cx - 12, by - 10, { width: 24, align: 'center' });
-    doc.fillColor(C.muted).font('Helvetica').fontSize(7)
+    doc.fillColor(C.ink).font(doc._F.bold).fontSize(7).text(`${pct}%`, cx - 12, by - 10, { width: 24, align: 'center' });
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(7)
        .text(`${dayName(d.quiz_date)}\n${fmtDate(d.quiz_date)}`, cx - slot / 2, y0 + plotH + 3, { width: slot, align: 'center' });
     pts.push({ x: cx, y: by });
   });
@@ -155,7 +157,7 @@ function accuracyLine(doc, x, y, w, h, daily) {
   [0, 100].forEach(v => {
     const gy = y0 + plotH - (v / 100) * plotH;
     doc.moveTo(x0, gy).lineTo(x + w, gy).strokeColor(C.grid).lineWidth(0.5).stroke();
-    doc.fillColor(C.faint).font('Helvetica').fontSize(7).text(String(v), x, gy - 3, { width: pad.l - 4, align: 'right' });
+    doc.fillColor(C.faint).font(doc._F.regular).fontSize(7).text(String(v), x, gy - 3, { width: pad.l - 4, align: 'right' });
   });
   const n = daily.length, slot = plotW / Math.max(n - 1, 1);
   const pts = daily.map((d, i) => {
@@ -169,7 +171,7 @@ function accuracyLine(doc, x, y, w, h, daily) {
   }
   pts.forEach(p => {
     doc.circle(p.x, p.y, 2.5).fill(C.accent);
-    doc.fillColor(C.muted).font('Helvetica').fontSize(6.5).text(`${p.acc}%`, p.x - 10, p.y - 11, { width: 20, align: 'center' });
+    doc.fillColor(C.muted).font(doc._F.regular).fontSize(6.5).text(`${p.acc}%`, p.x - 10, p.y - 11, { width: 20, align: 'center' });
     doc.fillColor(C.faint).fontSize(6.5).text(fmtDate(p.d.quiz_date), p.x - slot / 2, y0 + plotH + 3, { width: slot, align: 'center' });
   });
 }
@@ -204,12 +206,20 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   })();
   const dir = path.join(ROOT, folder);
   fs.mkdirSync(dir, { recursive: true });
-  const fileName = `week-${compact}-${head.student_id}-${head.subject_name.toLowerCase().replace(/\W+/g, '')}.pdf`;
+  // same sequential scheme as the daily report, on its own 'weekly' series
+  const fileName = await nextReportFileName({
+    reportType: 'weekly', trackerId: null, date: weekEnd, studentId: head.student_id,
+  });
   const filePath = path.join(dir, fileName);
   const relPath = `${TYPES.weekly}/${folder}/${fileName}`;
 
   const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
     info: { Title: `QuizPe Weekly Report — ${head.student_name}`, Author: biz.company_name || 'QuizPe' } });
+  // Bind fonts to this document, not a module variable — reports render two
+  // at a time, so a shared family would let an English and a Kannada report
+  // overwrite each other's font choice mid-render.
+  doc._F = useFontsFor(doc, head.medium_code);
+
   const stream = fs.createWriteStream(filePath);
   doc.pipe(stream);
 
@@ -222,16 +232,16 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   if (fs.existsSync(logo)) {
     doc.image(logo, Mg, 22, { height: 42 });
   } else {
-    doc.fillColor(C.white).font('Helvetica-Bold').fontSize(24).text(biz.product_name || 'QuizPe', Mg, 24);
-    doc.font('Helvetica').fontSize(9).fillColor('#bfe3da').text(biz.product_tagline || '', Mg, 52);
+    doc.fillColor(C.white).font(doc._F.bold).fontSize(24).text(biz.product_name || 'QuizPe', Mg, 24);
+    doc.font(doc._F.regular).fontSize(9).fillColor('#bfe3da').text(biz.product_tagline || '', Mg, 52);
   }
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(C.white).text('Weekly Performance Report', Mg, 70);
-  doc.font('Helvetica').fontSize(8).fillColor('#bfe3da')
+  doc.font(doc._F.bold).fontSize(11).fillColor(C.white).text('Weekly Performance Report', Mg, 70);
+  doc.font(doc._F.regular).fontSize(8).fillColor('#bfe3da')
      .text(`${fmtDateY(weekStart)} – ${fmtDateY(weekEnd)}`, Mg, 88);
 
   const bx = PW / 2, bw = W / 2;
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(C.white).text(biz.company_name || '', bx, 24, { width: bw, align: 'right' });
-  doc.font('Helvetica').fontSize(7.5).fillColor('#cfe9e2');
+  doc.font(doc._F.bold).fontSize(9).fillColor(C.white).text(biz.company_name || '', bx, 24, { width: bw, align: 'right' });
+  doc.font(doc._F.regular).fontSize(7.5).fillColor('#cfe9e2');
   let by = 38;
   [biz.address, biz.gstin ? `GSTIN: ${biz.gstin}` : null, [biz.support_email, biz.product_website].filter(Boolean).join('  ·  ')]
     .filter(Boolean).forEach(l => { doc.text(l, bx, by, { width: bw, align: 'right' }); by += 11; });
@@ -242,12 +252,12 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   const colW = (W - 12) / 2, ch = 82;
   card(doc, Mg, y, colW, ch); card(doc, Mg + colW + 12, y, colW, ch);
   label(doc, 'Parent / Guardian', Mg + 12, y + 11, C.accent);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(12).text(head.parent_name || '—', Mg + 12, y + 24);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(12).text(head.parent_name || '—', Mg + 12, y + 24);
   kv(doc, 'Mobile', maskMobile(head.parent_mobile_number), Mg + 12, y + 44, colW - 24);
   kv(doc, 'State', head.state_name || '—', Mg + 12, y + 60, colW - 24);
   const sx = Mg + colW + 12;
   label(doc, 'Student', sx + 12, y + 11, C.accent);
-  doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(12).text(head.student_name || '—', sx + 12, y + 24);
+  doc.fillColor(C.ink).font(doc._F.bold).fontSize(12).text(head.student_name || '—', sx + 12, y + 24);
   kv(doc, 'Board / Grade', `${head.board_code} · ${head.grade_name}`, sx + 12, y + 44, colW - 24);
   kv(doc, 'Subject', head.subject_name, sx + 12, y + 60, colW - 24);
   y += ch + 14;
@@ -266,8 +276,8 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
     const tx = Mg + i * (tw + 8);
     card(doc, tx, y, tw, th, { fill: C.soft, stroke: C.soft });
     label(doc, tl.t, tx + 8, y + 8, C.muted, 6.5);
-    doc.fillColor(tl.c).font('Helvetica-Bold').fontSize(16).text(tl.v, tx + 8, y + 20, { width: tw - 16 });
-    doc.fillColor(C.faint).font('Helvetica').fontSize(6.5).text(tl.s, tx + 8, y + 44, { width: tw - 16 });
+    doc.fillColor(tl.c).font(doc._F.bold).fontSize(16).text(tl.v, tx + 8, y + 20, { width: tw - 16 });
+    doc.fillColor(C.faint).font(doc._F.regular).fontSize(6.5).text(tl.s, tx + 8, y + 44, { width: tw - 16 });
   });
   y += th + 16;
 
@@ -296,7 +306,7 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
     weakest && weakest !== strongest ? `🎯 Needs work: ${weakest.chapter} (${Math.round(weakest.correct * 100 / weakest.asked)}%)` : null,
     consistency === days ? `🔥 Perfect attendance — all ${days} days!` : `📅 Attended ${consistency} of ${days} days.`,
   ].filter(Boolean);
-  doc.font('Helvetica').fontSize(9).fillColor(C.brand);
+  doc.font(doc._F.regular).fontSize(9).fillColor(C.brand);
   insights.forEach(t => { doc.text(t, ix, iy, { width: halfW - 24 }); iy = doc.y + 6; });
   y += 108 + 16;
 
@@ -305,8 +315,8 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   label(doc, 'Chapter mastery (whole week)', Mg, y, C.brand, 10); y += 16;
   chapters.forEach(cch => {
     const p = Math.round(cch.correct * 100 / cch.asked);
-    doc.fillColor(C.ink).font('Helvetica').fontSize(9).text(cch.chapter, Mg, y, { width: W - 100 });
-    doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(9).text(`${cch.correct}/${cch.asked} · ${p}%`, Mg, y, { width: W, align: 'right' });
+    doc.fillColor(C.ink).font(doc._F.regular).fontSize(9).text(cch.chapter, Mg, y, { width: W - 100 });
+    doc.fillColor(C.muted).font(doc._F.bold).fontSize(9).text(`${cch.correct}/${cch.asked} · ${p}%`, Mg, y, { width: W, align: 'right' });
     const barY = y + 13;
     doc.roundedRect(Mg, barY, W, 6, 3).fill('#edf1f3');
     if (p > 0) doc.roundedRect(Mg, barY, W * p / 100, 6, 3).fill(p >= 60 ? C.accent : p >= 40 ? C.warn : C.bad);
@@ -321,12 +331,12 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   const rec = overallPct >= 75 ? `${head.student_name} is doing very well — keep the daily habit going and consider adding a subject.`
     : overallPct >= 50 ? `${head.student_name} is making steady progress. A little daily revision of ${weakest ? weakest.chapter : 'weak areas'} will lift scores.`
     : `${head.student_name} needs some support this week — sit together for a few quizzes and revisit ${weakest ? weakest.chapter : 'the basics'}.`;
-  doc.fillColor(C.ink).font('Helvetica').fontSize(9).text(rec, Mg + 12, y + 24, { width: W - 24 });
+  doc.fillColor(C.ink).font(doc._F.regular).fontSize(9).text(rec, Mg + 12, y + 24, { width: W - 24 });
 
   /* ---------- day-by-day answer appendix (all 7 days' questions) ---------- */
   doc.addPage(); y = Mg;
   label(doc, 'Full answer review — all 7 days', Mg, y, C.brand, 11); y += 8;
-  doc.fillColor(C.muted).font('Helvetica').fontSize(8)
+  doc.fillColor(C.muted).font(doc._F.regular).fontSize(8)
      .text('Every question asked this week, your answer, the correct answer and why.', Mg, y + 6); y += 24;
 
   const optText = (it, l) => ({ A: it.option_a, B: it.option_b, C: it.option_c, D: it.option_d }[l]);
@@ -341,9 +351,9 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
 
     // day header band
     doc.roundedRect(Mg, doc.y, W, 22, 4).fill(C.brand);
-    doc.fillColor(C.white).font('Helvetica-Bold').fontSize(9.5)
+    doc.fillColor(C.white).font(doc._F.bold).fontSize(9.5)
        .text(`Day ${di + 1} — ${fmtDateY(k)}`, Mg + 10, doc.y + 6, { continued: false });
-    doc.fillColor('#cfe9e2').font('Helvetica').fontSize(9)
+    doc.fillColor('#cfe9e2').font(doc._F.regular).fontSize(9)
        .text(`${dc}/${list.length} correct`, Mg, doc.y - 13, { width: W - 10, align: 'right' });
     doc.y += 30;
 
@@ -353,19 +363,19 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
       const mark = it.is_correct ? '✓' : (it.answered_option ? '✗' : '—');
       const top = doc.y;
       doc.roundedRect(Mg, top, 15, 15, 3).fill(badge);
-      doc.fillColor(C.white).font('Helvetica-Bold').fontSize(8.5).text(mark, Mg, top + 3, { width: 15, align: 'center' });
+      doc.fillColor(C.white).font(doc._F.bold).fontSize(8.5).text(mark, Mg, top + 3, { width: 15, align: 'center' });
 
-      doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(8.5)
+      doc.fillColor(C.ink).font(doc._F.bold).fontSize(8.5)
          .text(`Q${it.serial_number}. `, Mg + 22, top + 1, { continued: true })
-         .font('Helvetica').text(it.question_pdf, { width: W - 22 });
-      doc.fillColor(C.muted).font('Helvetica').fontSize(8)
+         .font(doc._F.regular).text(it.question_pdf, { width: W - 22 });
+      doc.fillColor(C.muted).font(doc._F.regular).fontSize(8)
          .text(`Your answer: ${it.answered_option ? `${it.answered_option}) ${optText(it, it.answered_option) ?? ''}` : 'not answered'}`, Mg + 22, doc.y + 1);
       if (!it.is_correct) {
-        doc.fillColor(C.ok).font('Helvetica-Bold').fontSize(8)
+        doc.fillColor(C.ok).font(doc._F.bold).fontSize(8)
            .text(`Correct: ${it.answer}) ${optText(it, it.answer) ?? ''}`, Mg + 22, doc.y + 1);
       }
       if (it.explanation) {
-        doc.fillColor(C.faint).font('Helvetica-Oblique').fontSize(8)
+        doc.fillColor(C.faint).font(doc._F.oblique).fontSize(8)
            .text(`💡 ${it.explanation}`, Mg + 22, doc.y + 1, { width: W - 34 });
       }
       doc.moveTo(Mg, doc.y + 5).lineTo(Mg + W, doc.y + 5).strokeColor(C.line).lineWidth(0.4).stroke();
@@ -379,7 +389,7 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   for (let i = 0; i < range.count; i++) {
     doc.switchToPage(range.start + i);
     doc.rect(0, doc.page.height - 26, PW, 26).fill(C.brand);
-    doc.fillColor('#cfe9e2').font('Helvetica').fontSize(7.5)
+    doc.fillColor('#cfe9e2').font(doc._F.regular).fontSize(7.5)
        .text(`${biz.company_name || 'QuizPe'}  ·  ${biz.support_email || ''}  ·  Generated ${fmtDateY(new Date())}`, Mg, doc.page.height - 18, { width: W, align: 'left' });
     doc.fillColor(C.white).text(`Page ${i + 1} of ${range.count}`, Mg, doc.page.height - 18, { width: W, align: 'right' });
   }
@@ -396,7 +406,11 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   await db.query(
     `INSERT INTO quiz_reports (tracker_id, student_id, quiz_date, report_type, file_name, file_path,
                                public_url, access_token, score_correct, score_total, score_pct, grade)
-     VALUES (NULL,$1,$2,'weekly',$3,$4,$5,$6,$7,$8,$9,$10)`,
+     VALUES (NULL,$1,$2,'weekly',$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (student_id, quiz_date, report_type) WHERE tracker_id IS NULL DO UPDATE SET
+       file_name=EXCLUDED.file_name, file_path=EXCLUDED.file_path, public_url=EXCLUDED.public_url,
+       access_token=EXCLUDED.access_token, score_correct=EXCLUDED.score_correct,
+       score_total=EXCLUDED.score_total, score_pct=EXCLUDED.score_pct, grade=EXCLUDED.grade, modified_at=now()`,
     [head.student_id, weekEnd, fileName, relPath, publicUrl, accessToken, totalC, totalQ, overallPct, g.grade]);
 
   return {

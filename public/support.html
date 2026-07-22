@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <link rel="icon" type="image/png" href="/assets/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/assets/logo-mark.png" />
+  <title>QuizPe — Support</title>
+  <style>
+    :root{--brand:#075e54;--accent:#00a884;--bg:#eef3f2;--card:#fff;
+          --text:#111b21;--muted:#667781;--border:#d7dedd;--warn:#c0392b;}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--text);min-height:100vh;}
+    .head{background:var(--brand);color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px;}
+    .head img{width:34px;height:34px;border-radius:8px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:15px;}.head p{margin:1px 0 0;font-size:11px;opacity:.85;}
+    .wrap{max-width:520px;margin:0 auto;padding:18px 14px 40px;}
+    .card{background:var(--card);border-radius:16px;padding:20px 18px;box-shadow:0 3px 14px rgba(0,0,0,.07);
+          animation:rise .45s both;}
+    @keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+    h2{margin:0 0 4px;font-size:18px;}
+    .sub{color:var(--muted);font-size:13px;margin:0 0 18px;}
+    .label{font-size:13px;font-weight:700;margin:16px 0 7px;}
+    .label .req{color:var(--warn);}
+    input,textarea,select{width:100%;border:2px solid var(--border);border-radius:12px;padding:13px;
+                          font-family:inherit;font-size:15px;background:#fff;color:var(--text);}
+    input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);}
+    input[readonly]{background:#f2f6f5;color:var(--muted);}
+    textarea{min-height:110px;resize:vertical;}
+    .hint{font-size:11px;color:var(--muted);margin-top:5px;}
+    .types{display:grid;gap:8px;}
+    .type{display:flex;flex-direction:column;gap:2px;text-align:left;background:#fff;
+          border:2px solid var(--border);border-radius:12px;padding:12px 13px;cursor:pointer;
+          transition:border-color .15s,background .15s,transform .08s;}
+    .type strong{font-size:14px;font-weight:700;}
+    .type span{font-size:11px;color:var(--muted);}
+    .type.on{border-color:var(--accent);background:#e9f8f4;}
+    .type:active{transform:scale(.99);}
+    .count{text-align:right;font-size:11px;color:var(--muted);margin-top:4px;}
+    .err{color:var(--warn);font-size:13px;margin-top:12px;display:none;}
+    .err.on{display:block;}
+    .submit{width:100%;margin-top:20px;padding:15px;border:0;border-radius:12px;background:var(--accent);
+            color:#fff;font-size:16px;font-weight:700;cursor:pointer;}
+    .submit[disabled]{background:#b8ccc6;cursor:not-allowed;}
+    .foot{text-align:center;font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6;}
+    .msg{text-align:center;padding:44px 18px;color:var(--muted);}
+    .done{display:none;text-align:center;padding:40px 20px;}
+    .done .big{font-size:50px;animation:pop .7s cubic-bezier(.34,1.56,.64,1) both;}
+    @keyframes pop{0%{transform:scale(.3);opacity:0;}60%{transform:scale(1.15);}100%{transform:scale(1);opacity:1;}}
+    .done h2{color:var(--brand);margin:12px 0 6px;}
+    .ticket{display:inline-block;margin:10px 0;padding:10px 18px;border-radius:10px;background:#e9f8f4;
+            color:var(--brand);font-weight:800;font-size:19px;letter-spacing:.5px;}
+    .done p{color:var(--muted);font-size:14px;}
+    .wa{display:inline-block;margin-top:18px;padding:13px 26px;border-radius:24px;background:var(--accent);
+        color:#fff;font-weight:700;text-decoration:none;font-size:15px;}
+    @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none !important;}}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1>Support</h1><p id="sub">Loading…</p></div>
+  </div>
+
+  <div class="wrap">
+    <div class="card" id="form" style="display:none">
+      <h2>How can we help?</h2>
+      <p class="sub">Tell us what's wrong and we'll reply on WhatsApp within 24&ndash;48 hours.<br />
+        Support hours are 9 AM &ndash; 6 PM, every day.</p>
+
+      <div class="label">Your name</div>
+      <input id="name" maxlength="120" placeholder="Your name" />
+
+      <div class="label">Registered mobile</div>
+      <input id="mobile" readonly />
+      <div class="hint">We'll reply to this WhatsApp number. It can't be changed here.</div>
+
+      <div class="label">What is it about? <span class="req">*</span></div>
+      <div class="types" id="types"></div>
+
+      <div class="label">Describe the issue <span class="req">*</span></div>
+      <textarea id="message" maxlength="2000"
+                placeholder="Please include what happened, and when. The more detail, the faster we can fix it."></textarea>
+      <div class="count"><span id="count">0</span>/2000</div>
+
+      <div class="err" id="err"></div>
+      <button class="submit" id="submit" disabled>Send to support</button>
+
+      <div class="foot" id="foot"></div>
+    </div>
+
+    <div class="done" id="done">
+      <div class="big">✅</div>
+      <h2>Request received</h2>
+      <div class="ticket" id="ticket"></div>
+      <p>We'll reply on WhatsApp within 24&ndash;48 hours, during our support hours of
+        9 AM &ndash; 6 PM.<br />Please keep this ticket number handy.</p>
+      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <p id="redir" style="font-size:12px;"></p>
+    </div>
+
+    <div class="msg" id="msg" style="display:none"></div>
+  </div>
+
+<script>
+  const token = new URLSearchParams(location.search).get('token');
+  const $ = (id) => document.getElementById(id);
+  let queryType = null, busy = false;
+
+  const show = (w) => {
+    $('form').style.display = w === 'form' ? 'block' : 'none';
+    $('done').style.display = w === 'done' ? 'block' : 'none';
+    $('msg').style.display  = w === 'msg'  ? 'block' : 'none';
+  };
+  const fail = (t) => { $('msg').textContent = t; show('msg'); $('sub').textContent = ''; };
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function validate() {
+    const ok = !!queryType && $('message').value.trim().length >= 10;
+    $('submit').disabled = !ok;
+    if (ok) $('err').classList.remove('on');
+    return ok;
+  }
+  $('message').oninput = () => { $('count').textContent = $('message').value.length; validate(); };
+
+  $('submit').onclick = async () => {
+    if (busy) return;
+    if (!validate()) {
+      $('err').textContent = !queryType
+        ? 'Please choose what your query is about.'
+        : 'Please describe the issue in at least 10 characters.';
+      $('err').classList.add('on');
+      return;
+    }
+    busy = true; $('submit').disabled = true; $('submit').textContent = 'Sending…';
+    try {
+      const r = await (await fetch('/support/api/submit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, queryType, message: $('message').value.trim(), name: $('name').value.trim() }),
+      })).json();
+      if (!r.success) {
+        busy = false; $('submit').disabled = false; $('submit').textContent = 'Send to support';
+        $('err').textContent = r.error || 'Could not send your request.';
+        $('err').classList.add('on');
+        return;
+      }
+      $('ticket').textContent = r.ticketNo;
+      show('done'); $('sub').textContent = 'Sent';
+      if (r.whatsapp_url) {
+        $('waBtn').href = r.whatsapp_url;
+        let n = 5;
+        const t = setInterval(() => {
+          n--; $('redir').textContent = n > 0 ? `Back to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+          if (n <= 0) { clearInterval(t); location.href = r.whatsapp_url; }
+        }, 1000);
+      } else { $('waBtn').style.display = 'none'; }
+    } catch {
+      busy = false; $('submit').disabled = false; $('submit').textContent = 'Send to support';
+      $('err').textContent = 'Network problem — please try again.';
+      $('err').classList.add('on');
+    }
+  };
+
+  (async () => {
+    if (!token) return fail('Invalid link.');
+    try {
+      const d = await (await fetch(`/support/api/context?token=${encodeURIComponent(token)}`)).json();
+      if (!d.success) return fail(d.error || 'This support link is no longer valid.');
+      $('sub').textContent = d.business?.product_name || 'QuizPe';
+      $('name').value = d.name || '';
+      $('mobile').value = d.mobileMasked;          // masked — the real number never leaves the server
+      $('types').innerHTML = d.queryTypes.map(q =>
+        `<button class="type" data-c="${esc(q.code)}"><strong>${esc(q.label)}</strong><span>${esc(q.hint)}</span></button>`).join('');
+      [...document.querySelectorAll('.type')].forEach(b => b.onclick = () => {
+        queryType = b.dataset.c;
+        [...document.querySelectorAll('.type')].forEach(x => x.classList.toggle('on', x === b));
+        validate();
+      });
+      $('foot').innerHTML = d.business?.support_email
+        ? `Prefer email? <b>${esc(d.business.support_email)}</b><br />${esc(d.business.company_name || '')}`
+        : '';
+      show('form');
+    } catch { fail('Could not load the support form.'); }
+  })();
+</script>
+</body>
+</html>
