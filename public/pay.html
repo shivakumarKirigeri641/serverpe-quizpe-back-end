@@ -82,7 +82,8 @@
     <div class="tick">🎉</div>
     <h2>Payment successful!</h2>
     <p id="doneMsg"></p>
-    <p>We've sent your confirmation and invoice on WhatsApp.</p>
+    <p><b>Your invoice and confirmation are already in your WhatsApp chat.</b></p>
+    <p style="color:#667781;font-size:13px;">Tap the button below, or just close this window to go back to the conversation.</p>
     <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
   </div>
 
@@ -242,6 +243,9 @@
         const rzp = new Razorpay({
           key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency,
           name: ctx.business.product_name, description: ctx.plan.name,
+          // Show the QuizPe mark in the checkout modal. Without this, Razorpay
+          // falls back to the logo on the merchant account, which is ServerPe.
+          image: location.origin + "/assets/logo-mark.png",
           prefill: { contact: ctx.mobile }, theme: { color: "#075e54" },
           handler: async (resp) => {
             $("payBtn").textContent = "Verifying…";
@@ -261,15 +265,23 @@
       const wa = "https://wa.me/916363271302";
       $("waBtn").href = wa;
       $("wrap").style.display = "none"; $("done").style.display = "block";
-      // auto-return to the WhatsApp chat after a short countdown
+
+      // Auto-return to the WhatsApp chat after a short countdown. Try closing the
+      // in-app browser first — that drops straight back into the conversation —
+      // then fall back to the wa.me deep link. The invoice is already delivered,
+      // so this step only navigates; nothing is lost if the user leaves sooner.
       let n = 3;
       const note = document.createElement("p");
-      note.className = "redirect"; note.style.cssText = "font-size:12px;color:#667781;margin-top:10px;";
+      note.style.cssText = "font-size:12px;color:#667781;margin-top:10px;";
       $("done").appendChild(note);
       const t = setInterval(() => {
         n -= 1;
         note.textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : "Opening WhatsApp…";
-        if (n <= 0) { clearInterval(t); location.href = wa; }
+        if (n <= 0) {
+          clearInterval(t);
+          try { window.close(); } catch (e) {}
+          location.href = wa;      // fallback if the window did not close
+        }
       }, 1000);
     }
 

@@ -56,6 +56,12 @@ function deviceId(req, res) {
  * @returns {Promise<{ok:true} | {ok:false, code:string, error:string}>}
  */
 async function claimOrVerify(table, row, req, res) {
+  // Global off-switch. Some in-app browsers (notably WhatsApp's) start a fresh
+  // session on every tap and drop the device cookie, so a legitimate parent can
+  // look like a new device on re-open. Set QUIZ_DEVICE_LOCK=0 to disable the
+  // check — used for previews/testing; leave ON in normal operation.
+  if (process.env.QUIZ_DEVICE_LOCK === '0') return { ok: true, claimed: false };
+
   const id = deviceId(req, res);
 
   // first open — this device now owns the link

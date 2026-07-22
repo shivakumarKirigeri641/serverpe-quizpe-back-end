@@ -46,11 +46,15 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      // Razorpay's checkout widget loads from their CDN and opens its card form
+      // in an iframe that talks back to api.razorpay.com — the payment page is
+      // dead without these three, which is exactly what broke "Pay ₹99".
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://checkout.razorpay.com'],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-      imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https://*.razorpay.com'],
+      connectSrc: ["'self'", 'https://*.razorpay.com', 'https://lumberjack.razorpay.com'],
+      frameSrc: ["'self'", 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
       frameAncestors: ["'none'"],       // no embedding: clickjacking
       objectSrc: ["'none'"],
       upgradeInsecureRequests: BEHIND_TLS ? [] : null,

@@ -95,8 +95,11 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
 
   const biz = (await exec.query(
     `SELECT company_name, company_tagline, product_name, proprietor_name, gstin, pan,
-            address, support_email, product_website, gst_state_code
+            address, support_email, product_support_email, product_website, gst_state_code
        FROM business_details WHERE is_active LIMIT 1`)).rows[0] || {};
+  // A QuizPe invoice goes to a parent, so show the PRODUCT support address
+  // (support@quizpe.in), not the company/grievance one (support@serverpe.in).
+  const invoiceEmail = biz.product_support_email || biz.support_email || '';
   const gstRow = (await exec.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
   const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
 
@@ -156,7 +159,7 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   doc.font('Helvetica').fontSize(8.5).fillColor(C.muted)
      .text(biz.address || '', M, y + 28, { width: colW })
      .text(`GSTIN: ${biz.gstin || ''}   ·   PAN: ${biz.pan || ''}`, M, doc.y + 2, { width: colW })
-     .text(`${biz.support_email || ''}   ·   ${biz.product_website || ''}`, M, doc.y + 2, { width: colW });
+     .text(`${invoiceEmail}   ·   ${biz.product_website || ''}`, M, doc.y + 2, { width: colW });
 
   const bx = M + colW + 20;
   doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(8).text('BILL TO', bx, y);
@@ -234,7 +237,7 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
     doc.switchToPage(range.start + i);
     doc.rect(0, doc.page.height - 24, PW, 24).fill(C.brand);
     doc.fillColor('#cfe9e2').font('Helvetica').fontSize(7.5)
-       .text(`${biz.company_name || 'QuizPe'}  ·  ${biz.support_email || ''}  ·  ${biz.product_website || ''}`, M, doc.page.height - 16, { width: W, align: 'center' });
+       .text(`${biz.company_name || 'QuizPe'}  ·  ${invoiceEmail}  ·  ${biz.product_website || ''}`, M, doc.page.height - 16, { width: W, align: 'center' });
   }
 
   doc.end();
