@@ -82,9 +82,30 @@ async function feedbackAsk({ trackerId, sessionId, mobile }) {
   });
 }
 
+/**
+ * Operator alert email. Goes through the queue so the thing that triggered it —
+ * an enrolment, a payment — is never held up or rolled back by SMTP being slow
+ * or down. A failure here retries with backoff and is logged; it never reaches
+ * the parent.
+ */
+async function adminMail({ template, data }) {
+  const { sendAdminMail } = require('../mail/mailer');
+  const templates = require('../mail/templates');
+  const build = templates[template];
+  if (typeof build !== 'function') {
+    console.error(`[jobs] unknown mail template: ${template}`);
+    return;                                   // unknown template: drop, don't retry forever
+  }
+  const res = await sendAdminMail(build(data));
+  // A configuration gap is not worth retrying five times; a transient SMTP
+  // error is, so only the latter throws.
+  if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'mail failed');
+}
+
 function registerAll() {
   jobs.register('daily_report', dailyReport);
   jobs.register('feedback_ask', feedbackAsk);
+  jobs.register('admin_mail', adminMail);
 }
 
-module.exports = { registerAll, dailyReport, feedbackAsk };
+module.exports = { registerAll, dailyReport, feedbackAsk, adminMail };

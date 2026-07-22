@@ -234,7 +234,10 @@ router.post('/api/create-order', async (req, res) => {
       const existing = oRes.ok ? await oRes.json() : null;
       if (existing?.status === 'paid') {
         const pay = await capturedPaymentForOrder(c.razorpay_order_id, rzp.authHeader);
-        if (pay) { await finalize(c, pay).catch(e => console.error('[pay] reconcile failed:', e.message)); }
+        if (pay) {
+          await finalize(c, pay, { channel: 'Payment reconciled on revisit', at: new Date(), sessionId: c.whatsapp_session_id })
+            .catch(e => console.error('[pay] reconcile failed:', e.message));
+        }
         return res.json({ success: true, already_paid: true });
       }
       if (existing && ['created', 'attempted'].includes(existing.status) && existing.amount === amountPaise) {
@@ -269,7 +272,7 @@ router.post('/api/create-order', async (req, res) => {
  * order/payment — if it's already been finalized, it returns the existing
  * invoice instead of creating a duplicate subscription or double-charging.
  */
-async function finalize(c, pay) {
+async function finalize(c, pay, mailCtx = null) {
   // The server-validated cart is the single source of truth (never the client).
   const cart = c.cart || { students: [], base: Number(c.price), addonTotal: 0, total: Number(c.price), state: null, parent_name: 'Parent' };
   const students = cart.students;
@@ -390,6 +393,37 @@ Your daily quizzes start tonight at ${M.fmtTime(subId.quiz_time)}. 🚀`);
       });
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
 
+    // Operator alert. Queued after COMMIT and never awaited for success, so a
+    // mail problem cannot undo a payment the customer has already made.
+    try {
+      const notify = require('../mail/notify');
+      const M2 = require('../whatsapp/messages');
+      const stateName = cart.state
+        ? (await db.query(`SELECT state_name FROM states_unions WHERE state_code=$1`, [cart.state]))
+            .rows[0]?.state_name || cart.state
+        : null;
+      notify.payment({
+        parent: { name: cart.parent_name || c.mobile_number, mobile: c.mobile_number, state: stateName },
+        children: students.map(s => ({
+          name: s.name, board: s.board, grade: s.grade, medium: s.medium, school: s.school_name,
+        })),
+        plan: {
+          name: c.plan_name, duration: c.duration,
+          start: M2.fmtDate(new Date()), end: M2.fmtDate(subId.plan_end_date),
+          quizTime: M2.fmtTime(subId.quiz_time), reminderTime: M2.fmtTime(slot.reminder_time),
+        },
+        payment: {
+          amount: Number(pay.amount / 100).toFixed(2), method: pay.method, status: pay.status,
+          paymentId: pay.id, orderId: pay.order_id, mode: c.razorpay_mode || 'test',
+        },
+        invoice: {
+          number: inv.invoiceNo, base: inv.amounts?.base, cgst: inv.amounts?.cgst,
+          sgst: inv.amounts?.sgst, igst: inv.amounts?.igst, total: inv.amounts?.total,
+        },
+        ctx: mailCtx || { channel: 'Checkout page', at: new Date(), sessionId: c.whatsapp_session_id },
+      });
+    } catch (e) { console.error('[pay] admin alert skipped:', e.message); }
+
     return { invoice: inv.invoiceNo, end_date: subId.plan_end_date };
   } catch (e) {
     await client.query('ROLLBACK');
@@ -440,7 +474,10 @@ router.post('/api/verify', async (req, res) => {
       console.error(`[pay] amount mismatch: cart ${c.cart.total} vs paid ${pay.amount / 100}`);
       return res.status(400).json({ success: false, error: 'Amount mismatch. Contact support if money was deducted.' });
     }
-    const result = await finalize(c, pay);
+    const { fromRequest } = require('../mail/context');
+    const result = await finalize(c, pay, fromRequest(req, {
+      channel: 'Checkout page (pay.html)', sessionId: c.whatsapp_session_id,
+    }));
     res.json({ success: true, invoice: result.invoice, end_date: result.end_date, already_paid: !!result.already });
   } catch (e) {
     console.error('[pay] verify failed:', e.message);

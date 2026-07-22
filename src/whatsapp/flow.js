@@ -312,6 +312,35 @@ async function activateTrial(session, mobile, stateCode) {
       [session.id, parent]);
 
     await c.query('COMMIT');
+
+    // Operator alert, after COMMIT and never awaited: the parent's trial must
+    // start whether or not the founder's notification email does.
+    try {
+      const notify = require('../mail/notify');
+      const { fromWhatsApp } = require('../mail/context');
+      const meta = (await db.query(
+        `SELECT b.board_code, g.grade_name, m.medium_name, su.state_name, pl.plan_name
+           FROM boards b, grades g, mediums m
+           LEFT JOIN states_unions su ON su.state_code = $4
+           LEFT JOIN quizpe_plans pl ON pl.id = $5
+          WHERE b.board_code=$1 AND g.grade_code=$2 AND m.medium_code=$3 LIMIT 1`,
+        [board_code, grade_code, session.context.medium_code || 'ENGLISH', stateCode, trial.id])).rows[0] || {};
+      notify.trial({
+        parent: { name: session.context.parent_name || 'Parent', mobile, state: meta.state_name || stateCode },
+        children: [{
+          name: student_name, board: meta.board_code || board_code,
+          grade: meta.grade_name || grade_code, medium: meta.medium_name,
+          school: session.context.school_name,
+        }],
+        plan: {
+          name: meta.plan_name || 'Free trial', duration: trial.duration,
+          start: M.fmtDate(new Date()), end: M.fmtDate(sub.plan_end_date),
+          quizTime: M.fmtTime(sub.quiz_time), reminderTime: M.fmtTime(slot.reminder_time),
+        },
+        ctx: fromWhatsApp({ sessionId: session.id, mobile }),
+      });
+    } catch (e) { console.error('[flow] trial admin alert skipped:', e.message); }
+
     return { parentId: parent, studentId: student, ...sub };
   } catch (e) {
     await c.query('ROLLBACK');

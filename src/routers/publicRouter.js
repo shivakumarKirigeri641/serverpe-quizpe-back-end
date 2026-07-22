@@ -228,6 +228,23 @@ router.post('/enquiry', express.json(), async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [ref, name, mobile, String(email || '').trim() || null, query_type, text]);
 
+    // Operator alert — an enquiry from the public site is a prospective customer.
+    try {
+      const notify = require('../mail/notify');
+      const { fromRequest } = require('../mail/context');
+      const label = (await db.query(
+        `SELECT label FROM query_types WHERE code=$1`, [query_type]).catch(() => ({ rows: [] })))
+        .rows[0]?.label || query_type;
+      notify.support({
+        ticket: ref,
+        category: label,
+        subjectLine: `Website enquiry — ${name}`,
+        message: text,
+        parent: { name, mobile, email: String(email || '').trim() || null, isCustomer: false },
+        ctx: fromRequest(req, { channel: 'Website contact form (quizpe.in)' }),
+      });
+    } catch (e) { console.error('[public] enquiry alert skipped:', e.message); }
+
     res.json({ success: true, ref_no: ref, message: 'Thank you — we reply within 24–48 hours, during our support hours of 9 AM – 6 PM.' });
   } catch (e) {
     console.error('[public] enquiry:', e.message);

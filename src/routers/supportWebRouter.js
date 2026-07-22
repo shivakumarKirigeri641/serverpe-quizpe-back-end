@@ -117,6 +117,23 @@ router.post('/api/submit', async (req, res) => {
     await db.query(`UPDATE support_links SET submitted_at = now() WHERE id = $1`, [l.id]);
 
     const label = QUERY_TYPES.find(q => q.code === queryType).label;
+
+    // Operator alert — a support request is only useful if it is seen quickly.
+    try {
+      const notify = require('../mail/notify');
+      const { fromRequest } = require('../mail/context');
+      notify.support({
+        ticket: ticketNo,
+        category: label,
+        subjectLine: `${label} — ${(name || l.parent_name || 'a parent')}`,
+        message: text,
+        parent: {
+          name: name || l.parent_name, mobile: l.mobile_number,
+          isCustomer: Boolean(l.parent_id),
+        },
+        ctx: fromRequest(req, { channel: 'Support page', sessionId: l.whatsapp_session_id }),
+      });
+    } catch (e) { console.error('[support] admin alert skipped:', e.message); }
     try {
       const wa = require('../whatsapp/client');
       await wa.sendText(l.whatsapp_session_id, l.mobile_number,
