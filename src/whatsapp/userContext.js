@@ -156,6 +156,14 @@ function buildMainMenu(ctx) {
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
     { id: 'quiz_report',     title: '📊 Quiz reports',    description: 'Recent scores and progress' },
     { id: 'quiz_schedule',   title: '📅 Quiz schedule',   description: 'When the next quizzes arrive' },
+  );
+  // Only offered to enrolled parents: someone still deciding has nothing to
+  // recommend yet, and asking them to would be presumptuous.
+  if (ctx.exists) {
+    rows.push({ id: 'refer_friend', title: '🎁 Refer a friend',
+                description: 'You both get free days when they subscribe' });
+  }
+  rows.push(
     { id: 'view_plans',      title: '💎 Premium plans',   description: 'Upgrade from just ₹99' },
     { id: 'support',         title: '💬 Support',         description: 'Get help from our team' },
   );

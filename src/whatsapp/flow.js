@@ -311,6 +311,15 @@ async function activateTrial(session, mobile, stateCode) {
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
       [session.id, parent]);
 
+    // Record who sent them, if anyone. Nothing is paid out here — the reward
+    // lands on their first payment, so a free trial cannot be farmed for days.
+    // Any failure is swallowed: a referral must never block an enrolment.
+    if (session.context?.referral_code) {
+      try {
+        await require('../referrals/engine').capture(parent, session.context.referral_code, c);
+      } catch (e) { console.error('[flow] referral capture skipped:', e.message); }
+    }
+
     await c.query('COMMIT');
 
     // Operator alert, after COMMIT and never awaited: the parent's trial must
@@ -595,6 +604,25 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         `Your subscription isn't active. Type *menu* to subscribe. 💎`);
     }
     return;
+  }
+
+  // A referral link pre-fills "JOIN ABC123", so the very first message a
+  // referred parent sends carries the code. It is stashed on the session and
+  // only acted on once they actually enrol — at this point there is no parent
+  // record to attach it to. Falls through so the greeting still happens.
+  {
+    const referrals = require('../referrals/engine');
+    const code = referrals.parseCode(text);
+    if (code && !session.context?.referral_code) {
+      await mergeContext(session, { referral_code: code });
+      const owner = await referrals.ownerOf(code).catch(() => null);
+      if (owner) {
+        const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
+        await wa.sendText(session.id, mobile,
+          `🎁 *${first} invited you to QuizPe!*\n\n` +
+          `Start your free trial below. When you subscribe, you *both* get free days added.`);
+      }
+    }
   }
 
   // Global escapes — work from any state.
@@ -907,6 +935,40 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
     case 'quiz_schedule':
       await wa.sendText(session.id, mobile, M.quizSchedule(ctx, students));
       break;
+
+    case 'refer_friend': {
+      const referrals = require('../referrals/engine');
+      const s = await referrals.summary(ctx.parentId);
+      if (!s.enabled) {
+        await wa.sendText(session.id, mobile, 'Referrals are not running at the moment.');
+        break;
+      }
+
+      // Two messages on purpose. The second contains ONLY the invite text, so
+      // a parent can forward it straight into a school group without having to
+      // edit our explanation out of it first.
+      const earned = s.rewarded > 0
+        ? `\n\n✅ So far: *${s.rewarded}* friend${s.rewarded === 1 ? '' : 's'} subscribed · *${s.days_earned} free days* earned.`
+        : s.joined > 0
+          ? `\n\n👀 *${s.joined}* ${s.joined === 1 ? 'person has' : 'people have'} joined with your code — you get your days when they subscribe.`
+          : '';
+
+      await wa.sendText(session.id, mobile,
+`🎁 *Give ${s.reward_days} days, get ${s.reward_days} days*
+
+Share the message below with another parent. When they subscribe, *you both* get *${s.reward_days} free days* added to your plan.
+
+Your code: *${s.code}*${earned}
+
+_Forward the next message 👇_`);
+
+      await wa.sendText(session.id, mobile,
+`My child does a 10-question maths quiz every evening on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
+
+Try it free, and we both get ${s.reward_days} bonus days:
+${s.link || `Message and send: JOIN ${s.code}`}`);
+      break;
+    }
 
     case 'support': {
       // A form, so every query arrives categorised and with a ticket number —

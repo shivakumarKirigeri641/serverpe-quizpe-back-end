@@ -60,23 +60,44 @@ async function createCheckoutLink(sessionId, mobile, planCode) {
   return { token, url: `${base}/pay.html?token=${token}` };
 }
 
+/**
+ * Replaces the plan's list price with the price actually payable right now.
+ *
+ * Everything downstream — the GST breakup, the Razorpay order amount, the
+ * invoice — reads `price`, so resolving it in one place here means the launch
+ * offer cannot be applied inconsistently. The client never gets a say: it may
+ * display a price, but this is the number that is charged.
+ */
+async function applyOfferPrice(row, client = db) {
+  if (!row) return row;
+  const { priceFor } = require('../utils/launchOffer');
+  const offer = await priceFor(row, Number(row.student_count) || 1, client);
+  row.list_price = offer.regular;          // what it costs without the offer
+  row.price = offer.price;                 // what this parent pays
+  row.offer = {
+    is_launch: offer.isLaunch, saving: offer.saving,
+    seats_left: offer.seatsLeft, label: offer.label,
+  };
+  return row;
+}
+
 async function loadCheckout(token) {
   const { rows } = await db.query(
     `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
-            pl.student_count, pl.duration
+            pl.regular_price, pl.student_count, pl.duration
        FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
       WHERE c.token=$1 AND c.used_at IS NULL AND c.expires_at > now()`, [token]);
-  return rows[0] || null;
+  return applyOfferPrice(rows[0] || null);
 }
 
 /** Like loadCheckout but also returns a used/paid checkout (for idempotent replays). */
 async function loadCheckoutAny(token) {
   const { rows } = await db.query(
     `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
-            pl.student_count, pl.duration
+            pl.regular_price, pl.student_count, pl.duration
        FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
       WHERE c.token=$1 AND c.expires_at > now() + interval '-1 day'`, [token]);
-  return rows[0] || null;
+  return applyOfferPrice(rows[0] || null);
 }
 
 function gstBreakup(price, gstPct, intra) {
@@ -354,12 +375,28 @@ async function finalize(c, pay, mailCtx = null) {
       }
     }
 
+    // A renewal picks up where the current cover ends, so paid days are never
+    // thrown away. Deliberately computed BEFORE the deactivate above is relied
+    // upon — it reads plan_end_date, which deactivating does not clear.
+    const { computePeriod } = require('../utils/subscriptionPeriod');
+    const period = await computePeriod(client, parentId, c.duration);
+
     const subId = (await client.query(
       `INSERT INTO parents_quizpe_subscriptions
-         (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
-       VALUES ($1,$2, CURRENT_DATE + $3::int, $4::time, $5::time)
-       RETURNING id, plan_end_date, quiz_time`,
-      [parentId, c.plan_id, c.duration, slot.quiz_time, slot.reminder_time])).rows[0];
+         (parent_id, plan_id, plan_start_date, plan_end_date, quiz_time, reminder_time)
+       VALUES ($1,$2,$3::date,$4::date,$5::time,$6::time)
+       RETURNING id, plan_start_date, plan_end_date, quiz_time`,
+      [parentId, c.plan_id, period.startDate, period.endDate,
+       slot.quiz_time, slot.reminder_time])).rows[0];
+
+    // If this parent arrived through someone's referral link, this is the
+    // moment it pays out — real money has changed hands. Idempotent, so a
+    // replayed webhook cannot hand out the days twice. Inside the transaction
+    // because the days it grants must not survive a rolled-back payment.
+    let referral = null;
+    try {
+      referral = await require('../referrals/engine').creditOnPayment(parentId, client);
+    } catch (e) { console.error('[pay] referral credit skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -378,6 +415,10 @@ async function finalize(c, pay, mailCtx = null) {
       const wa = require('../whatsapp/client');
       const M = require('../whatsapp/messages');
       const names = students.map(s => s.name).join(', ');
+      // A renewal that carried days forward says so explicitly. The whole point
+      // of stacking is lost if the parent cannot see that it happened.
+      const { stackedMessage } = require('../utils/subscriptionPeriod');
+      const carried = stackedMessage(period, M.fmtDate);
       await wa.sendText(c.whatsapp_session_id, c.mobile_number,
 `🎉 *Payment successful — welcome to ${c.plan_name}!*
 
@@ -385,13 +426,44 @@ async function finalize(c, pay, mailCtx = null) {
 📅 *Valid till:* ${M.fmtDate(subId.plan_end_date)}
 ⏰ *Quiz time:* ${M.fmtTime(subId.quiz_time)} daily
 🧾 *Invoice:* ${inv.invoiceNo}
-
-Your daily quizzes start tonight at ${M.fmtTime(subId.quiz_time)}. 🚀`);
+${carried ? `\n${carried}\n` : ''}
+Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀`);
       await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
       });
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
+
+    // Referral payout — told to BOTH sides, because a reward nobody notices
+    // buys no goodwill and prompts no further sharing.
+    if (referral) {
+      try {
+        const wa = require('../whatsapp/client');
+        const M = require('../whatsapp/messages');
+        if (referral.refereeNewEnd) {
+          await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎁 *Your invite bonus: +${referral.days} free days!*
+
+Because you joined through a friend's link, we've added *${referral.days} days* to your plan.
+📅 Now valid till *${M.fmtDate(referral.refereeNewEnd)}*`);
+        }
+        const ref = (await db.query(
+          `SELECT p.parent_mobile_number AS mobile, p.parent_name AS name,
+                  (SELECT id FROM whatsapp_sessions w
+                    WHERE w.mobile_number = p.parent_mobile_number AND w.is_active
+                    ORDER BY w.id DESC LIMIT 1) AS session_id
+             FROM parents p WHERE p.id = $1`, [referral.referrerId])).rows[0];
+        if (ref && referral.referrerNewEnd) {
+          await wa.sendText(ref.session_id, ref.mobile,
+`🎉 *Someone you invited just subscribed!*
+
+We've added *${referral.days} free days* to your plan as a thank-you.
+📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*
+
+You've earned free days from *${referral.referrerRewardedCount}* friend${referral.referrerRewardedCount === 1 ? '' : 's'} so far. Keep sharing! 💚`);
+        }
+      } catch (e) { console.error('[pay] referral notice failed:', e.message); }
+    }
 
     // Operator alert. Queued after COMMIT and never awaited for success, so a
     // mail problem cannot undo a payment the customer has already made.

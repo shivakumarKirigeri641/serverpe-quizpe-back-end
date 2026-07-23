@@ -355,4 +355,105 @@ async function cohort(day = null) {
   };
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta };
+/**
+ * Enrolment and participation broken down by board and grade.
+ *
+ * This is the view that answers "where actually are my students, and which
+ * segments are quiet?" — so it deliberately returns EVERY board×grade we sell,
+ * including the ones with nobody in them. Returning only populated rows would
+ * hide exactly the gaps worth acting on.
+ *
+ * The three measures are aggregated separately and joined, never stacked as
+ * joins onto students: enrolment × attempts would fan out and inflate counts.
+ */
+async function boardGradeBreakdown(day) {
+  const d = day || null;
+  const { rows } = await db.query(
+    `WITH grid AS (
+       SELECT b.id AS board_id, b.board_code, b.board_name,
+              g.id AS grade_id, g.grade_name, g.display_order
+         FROM boards b CROSS JOIN grades g
+        WHERE b.is_active AND g.is_active),
+     enrolled AS (
+       SELECT st.board_id, st.grade_id,
+              COUNT(*)::int AS students,
+              COUNT(DISTINCT st.parent_id)::int AS families,
+              COUNT(*) FILTER (WHERE EXISTS (
+                SELECT 1 FROM parents_quizpe_subscriptions s
+                  JOIN quizpe_plans p ON p.id = s.plan_id
+                 WHERE s.parent_id = st.parent_id AND s.is_active
+                   AND COALESCE(p.is_trial,false) = false
+                   AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date))::int AS paid
+         FROM students st WHERE st.is_active
+        GROUP BY st.board_id, st.grade_id),
+     today AS (
+       SELECT st.board_id, st.grade_id,
+              COUNT(*)::int AS delivered,
+              COUNT(*) FILTER (WHERE s.status_code IN ('completed','closed'))::int AS attempted,
+              COUNT(*) FILTER (WHERE s.status_code IN ('skipped','expired'))::int  AS skipped,
+              COUNT(*) FILTER (WHERE s.status_code IN ('delivered','yet_to_start','in_progress'))::int AS pending
+         FROM quizpe_tracker t
+         JOIN quizpe_status s ON s.id = t.status_id
+         JOIN students st ON st.id = t.student_id
+        WHERE t.quiz_date = COALESCE($1::date, CURRENT_DATE)
+        GROUP BY st.board_id, st.grade_id),
+     perf AS (
+       SELECT st.board_id, st.grade_id,
+              ROUND(AVG(r.score_pct),1)::numeric AS avg_pct,
+              COUNT(*)::int AS scored,
+              COUNT(*) FILTER (WHERE r.score_pct >= 80)::int AS strong,
+              COUNT(*) FILTER (WHERE r.score_pct <  50)::int AS struggling
+         FROM quiz_reports r JOIN students st ON st.id = r.student_id
+        WHERE r.is_active AND r.quiz_date > CURRENT_DATE - 28
+        GROUP BY st.board_id, st.grade_id)
+     SELECT gr.board_code, gr.board_name, gr.grade_name, gr.display_order,
+            COALESCE(e.students,0)  AS students,
+            COALESCE(e.families,0)  AS families,
+            COALESCE(e.paid,0)      AS paid,
+            COALESCE(t.delivered,0) AS delivered,
+            COALESCE(t.attempted,0) AS attempted,
+            COALESCE(t.skipped,0)   AS skipped,
+            COALESCE(t.pending,0)   AS pending,
+            COALESCE(p.avg_pct,0)   AS avg_pct,
+            COALESCE(p.scored,0)    AS scored,
+            COALESCE(p.strong,0)    AS strong,
+            COALESCE(p.struggling,0) AS struggling
+       FROM grid gr
+       LEFT JOIN enrolled e ON e.board_id=gr.board_id AND e.grade_id=gr.grade_id
+       LEFT JOIN today    t ON t.board_id=gr.board_id AND t.grade_id=gr.grade_id
+       LEFT JOIN perf     p ON p.board_id=gr.board_id AND p.grade_id=gr.grade_id
+      ORDER BY gr.board_code, gr.display_order`, [d]);
+
+  const pctOf = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
+  return rows.map((r) => ({
+    ...r,
+    students: Number(r.students), families: Number(r.families), paid: Number(r.paid),
+    delivered: Number(r.delivered), attempted: Number(r.attempted),
+    skipped: Number(r.skipped), pending: Number(r.pending),
+    avg_pct: Number(r.avg_pct), scored: Number(r.scored),
+    strong: Number(r.strong), struggling: Number(r.struggling),
+    attendance_pct: pctOf(Number(r.attempted), Number(r.delivered)),
+  }));
+}
+
+/** Board-level roll-up of the same figures, for the summary chart. */
+async function boardTotals(day) {
+  const rows = await boardGradeBreakdown(day);
+  const by = {};
+  for (const r of rows) {
+    const b = (by[r.board_code] ||= {
+      board_code: r.board_code, board_name: r.board_name,
+      students: 0, families: 0, paid: 0, delivered: 0, attempted: 0,
+      skipped: 0, pending: 0, strong: 0, struggling: 0, scored: 0, _sum: 0,
+    });
+    for (const k of ['students', 'families', 'paid', 'delivered', 'attempted', 'skipped', 'pending', 'strong', 'struggling', 'scored']) b[k] += r[k];
+    b._sum += r.avg_pct * r.scored;           // weight by how many were scored
+  }
+  return Object.values(by).map(({ _sum, ...b }) => ({
+    ...b,
+    avg_pct: b.scored > 0 ? Math.round((_sum / b.scored) * 10) / 10 : 0,
+    attendance_pct: b.delivered > 0 ? Math.round((b.attempted / b.delivered) * 100) : 0,
+  }));
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals };
