@@ -104,7 +104,8 @@ router.get('/plans', async (req, res) => {
   try {
     const rows = await cached('plans', async () => (await db.query(
       `SELECT plan_code, plan_name, plan_description, price::numeric,
-              comparable_price::numeric, student_count, duration, is_trial
+              regular_price::numeric, comparable_price::numeric,
+              student_count, duration, is_trial
          FROM quizpe_plans
         WHERE is_active
         ORDER BY is_trial DESC, price`)).rows);
@@ -112,21 +113,48 @@ router.get('/plans', async (req, res) => {
     const gst = (await db.query(
       `SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
 
+    // Seat counts move as people enrol, so this is deliberately NOT served from
+    // the plans cache — a banner claiming seats that have gone is worse than no
+    // banner at all.
+    const offer = await require('../utils/launchOffer').status();
+
     res.json({
       success: true,
       gst_pct: gst ? Number(gst.gst_value) : 18,
-      plans: rows.map((p) => ({
-        ...p,
-        price: Number(p.price),
-        comparable_price: p.comparable_price == null ? null : Number(p.comparable_price),
-        // a per-day figure is the honest way to compare a 7-day trial with a
-        // 28-day plan, and it is the number parents actually weigh up
-        per_day: p.duration > 0 ? +(Number(p.price) / p.duration).toFixed(2) : 0,
-      })),
+      offer,
+      plans: rows.map((p) => {
+        const regular = p.regular_price == null ? Number(p.price) : Number(p.regular_price);
+        // Trials are free and never discounted, so the offer must not touch them.
+        const payable = p.is_trial || !offer.active ? (p.is_trial ? Number(p.price) : regular) : Number(p.price);
+        return {
+          ...p,
+          price: payable,
+          regular_price: regular,
+          saving: Math.max(0, regular - payable),
+          is_launch_price: !p.is_trial && offer.active && payable < regular,
+          comparable_price: p.comparable_price == null ? null : Number(p.comparable_price),
+          // a per-day figure is the honest way to compare a 7-day trial with a
+          // 28-day plan, and it is the number parents actually weigh up
+          per_day: p.duration > 0 ? +(payable / p.duration).toFixed(2) : 0,
+        };
+      }),
     });
   } catch (e) {
     console.error('[public] plans:', e.message);
     res.status(500).json({ success: false, error: 'Could not load plans.' });
+  }
+});
+
+/**
+ * Live seat count for the launch banner. Separate from /plans so the website
+ * can poll it cheaply without re-fetching everything, and never cached.
+ */
+router.get('/launch-offer', async (req, res) => {
+  try {
+    res.json({ success: true, ...(await require('../utils/launchOffer').status()) });
+  } catch (e) {
+    console.error('[public] launch-offer:', e.message);
+    res.status(500).json({ success: false, error: 'Could not load offer status.' });
   }
 });
 
@@ -175,6 +203,24 @@ router.post('/feedback', express.json(), async (req, res) => {
   } catch (e) {
     console.error('[public] feedback:', e.message);
     res.status(500).json({ success: false, error: 'Could not save your feedback.' });
+  }
+});
+
+/**
+ * The badge catalogue, so the website can show what a child can earn.
+ *
+ * Catalogue only — no child, no score, no name. Anything identifying belongs
+ * behind a token, not on a public marketing page.
+ */
+router.get('/badges', async (req, res) => {
+  try {
+    const rows = await cached('badges', async () => (await db.query(
+      `SELECT badge_code, badge_name, description, icon, tier
+         FROM badges WHERE is_active ORDER BY display_order`)).rows);
+    res.json({ success: true, badges: rows });
+  } catch (e) {
+    console.error('[public] badges:', e.message);
+    res.status(500).json({ success: false, error: 'Could not load badges.' });
   }
 });
 
@@ -227,6 +273,23 @@ router.post('/enquiry', express.json(), async (req, res) => {
       `INSERT INTO website_enquiries (ref_no, user_name, mobile_number, email, query_type, message)
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [ref, name, mobile, String(email || '').trim() || null, query_type, text]);
+
+    // Operator alert — an enquiry from the public site is a prospective customer.
+    try {
+      const notify = require('../mail/notify');
+      const { fromRequest } = require('../mail/context');
+      const label = (await db.query(
+        `SELECT label FROM query_types WHERE code=$1`, [query_type]).catch(() => ({ rows: [] })))
+        .rows[0]?.label || query_type;
+      notify.support({
+        ticket: ref,
+        category: label,
+        subjectLine: `Website enquiry — ${name}`,
+        message: text,
+        parent: { name, mobile, email: String(email || '').trim() || null, isCustomer: false },
+        ctx: fromRequest(req, { channel: 'Website contact form (quizpe.in)' }),
+      });
+    } catch (e) { console.error('[public] enquiry alert skipped:', e.message); }
 
     res.json({ success: true, ref_no: ref, message: 'Thank you — we reply within 24–48 hours, during our support hours of 9 AM – 6 PM.' });
   } catch (e) {

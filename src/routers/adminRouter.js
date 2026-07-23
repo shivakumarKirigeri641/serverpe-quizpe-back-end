@@ -147,6 +147,29 @@ router.get('/analytics/engagement', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] engagement:', e.message); fail(res, 500, 'Could not load engagement.'); }
 });
 
+/**
+ * Enrolment, today's attendance and 28-day performance for every board and
+ * grade we sell — including the empty ones, which are the interesting ones.
+ */
+router.get('/analytics/board-grade', requireAdmin, async (req, res) => {
+  try {
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? req.query.date : null;
+    const [rows, totals] = await Promise.all([
+      metrics.boardGradeBreakdown(day), metrics.boardTotals(day),
+    ]);
+    ok(res, { rows, totals, date: day || new Date().toISOString().slice(0, 10) });
+  } catch (e) {
+    console.error('[admin] board-grade:', e.message);
+    fail(res, 500, 'Could not load the board and grade breakdown.');
+  }
+});
+
+/** Launch offer status, so the dashboard can show seats remaining. */
+router.get('/analytics/launch-offer', requireAdmin, async (req, res) => {
+  try { ok(res, await require('../utils/launchOffer').status()); }
+  catch (e) { console.error('[admin] launch-offer:', e.message); fail(res, 500, 'Could not load offer status.'); }
+});
+
 /** Unified activity stream: quizzes, subscriptions, feedback, support. */
 router.get('/activity', requireAdmin, async (req, res) => {
   try {

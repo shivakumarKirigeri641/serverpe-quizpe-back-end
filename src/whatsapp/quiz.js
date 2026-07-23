@@ -368,6 +368,12 @@ _Full answers & explanations are in the report below._ 📄`);
   await jobs.push('daily_report', { trackerId, sessionId, mobile },
     { dedupeKey: `report:${trackerId}` });
 
+  // Badges are worked out after the score is safely stored, and queued rather
+  // than awaited: a child's result must never depend on the rewards code
+  // running. Deduped per quiz so a retried finish cannot announce twice.
+  await jobs.push('award_badges', { trackerId, sessionId, mobile },
+    { dedupeKey: `badges:${trackerId}` });
+
   return { total, correct, pct };
 }
 

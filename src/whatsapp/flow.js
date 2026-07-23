@@ -107,6 +107,19 @@ function isStartQuiz(msg, text, id) {
   return /start\s*quiz/.test(hay);
 }
 
+/**
+ * The "View plans" quick reply on the expiring/expired templates.
+ *
+ * A template button arrives as a `button` message, not a list selection, so it
+ * would otherwise fall through to whatever state the session happens to be in
+ * — quite possibly a stale one, since these templates are sent to parents who
+ * have not been in touch for days.
+ */
+function isViewPlans(msg, text, id) {
+  const hay = `${text || ''} ${id || ''} ${msg.button?.text || ''} ${msg.button?.payload || ''}`.toLowerCase();
+  return /view\s*plans?/.test(hay);
+}
+
 async function recordConsent(session, policyId, mobile, waMessageId, parentId = null) {
   await db.query(
     `INSERT INTO policy_consents (session_id, parent_id, policy_id, mobile_number, wa_message_id)
@@ -311,7 +324,45 @@ async function activateTrial(session, mobile, stateCode) {
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
       [session.id, parent]);
 
+    // Record who sent them, if anyone. Nothing is paid out here — the reward
+    // lands on their first payment, so a free trial cannot be farmed for days.
+    // Any failure is swallowed: a referral must never block an enrolment.
+    if (session.context?.referral_code) {
+      try {
+        await require('../referrals/engine').capture(parent, session.context.referral_code, c);
+      } catch (e) { console.error('[flow] referral capture skipped:', e.message); }
+    }
+
     await c.query('COMMIT');
+
+    // Operator alert, after COMMIT and never awaited: the parent's trial must
+    // start whether or not the founder's notification email does.
+    try {
+      const notify = require('../mail/notify');
+      const { fromWhatsApp } = require('../mail/context');
+      const meta = (await db.query(
+        `SELECT b.board_code, g.grade_name, m.medium_name, su.state_name, pl.plan_name
+           FROM boards b, grades g, mediums m
+           LEFT JOIN states_unions su ON su.state_code = $4
+           LEFT JOIN quizpe_plans pl ON pl.id = $5
+          WHERE b.board_code=$1 AND g.grade_code=$2 AND m.medium_code=$3 LIMIT 1`,
+        [board_code, grade_code, session.context.medium_code || 'ENGLISH', stateCode, trial.id])).rows[0] || {};
+      notify.trial({
+        parent: { name: session.context.parent_name || 'Parent', mobile, state: meta.state_name || stateCode },
+        children: [{
+          name: student_name, board: meta.board_code || board_code,
+          grade: meta.grade_name || grade_code, medium: meta.medium_name,
+          school: session.context.school_name,
+        }],
+        plan: {
+          name: meta.plan_name || 'Free trial', duration: trial.duration,
+          start: M.fmtDate(new Date()), end: M.fmtDate(sub.plan_end_date),
+          quizTime: M.fmtTime(sub.quiz_time), reminderTime: M.fmtTime(slot.reminder_time),
+        },
+        ctx: fromWhatsApp({ sessionId: session.id, mobile }),
+      });
+    } catch (e) { console.error('[flow] trial admin alert skipped:', e.message); }
+
     return { parentId: parent, studentId: student, ...sub };
   } catch (e) {
     await c.query('ROLLBACK');
@@ -568,6 +619,35 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // A referral link pre-fills "JOIN ABC123", so the very first message a
+  // referred parent sends carries the code. It is stashed on the session and
+  // only acted on once they actually enrol — at this point there is no parent
+  // record to attach it to. Falls through so the greeting still happens.
+  {
+    const referrals = require('../referrals/engine');
+    const code = referrals.parseCode(text);
+    if (code && !session.context?.referral_code) {
+      await mergeContext(session, { referral_code: code });
+      const owner = await referrals.ownerOf(code).catch(() => null);
+      if (owner) {
+        const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
+        await wa.sendText(session.id, mobile,
+          `🎁 *${first} invited you to QuizPe!*\n\n` +
+          `Start your free trial below. When you subscribe, you *both* get free days added.`);
+      }
+    }
+  }
+
+  // "View plans" on an expiry template. Handled from ANY state, because these
+  // templates reach parents whose session was last used days ago and may be
+  // parked mid-flow. A renewing parent must not be dropped into a half-finished
+  // signup, so the state is reset to the menu first.
+  if (isViewPlans(msg, text, id)) {
+    await setState(session, 'main_menu', 'view_plans_from_template');
+    await handleMenuChoice(session, mobile, ctx, ctx.status === 'EXPIRED' ? 'renew' : 'view_plans');
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }
@@ -694,6 +774,13 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
       const sub = await activateTrial(session, mobile, rows[0].state_code);
       const grade = (await db.query(
         `SELECT grade_name FROM grades WHERE grade_code=$1`, [session.context.grade_code])).rows[0];
+
+      await require('./lifecycle').sendEnrolment({
+        sessionId: session.id, mobile,
+        parentName: session.context?.parent_name || 'there',
+        students: [session.context.student_name],
+        planName: 'Free Trial',
+      });
 
       await wa.sendText(session.id, mobile, M.trialActivated({
         studentName: session.context.student_name,
@@ -878,6 +965,40 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
     case 'quiz_schedule':
       await wa.sendText(session.id, mobile, M.quizSchedule(ctx, students));
       break;
+
+    case 'refer_friend': {
+      const referrals = require('../referrals/engine');
+      const s = await referrals.summary(ctx.parentId);
+      if (!s.enabled) {
+        await wa.sendText(session.id, mobile, 'Referrals are not running at the moment.');
+        break;
+      }
+
+      // Two messages on purpose. The second contains ONLY the invite text, so
+      // a parent can forward it straight into a school group without having to
+      // edit our explanation out of it first.
+      const earned = s.rewarded > 0
+        ? `\n\n✅ So far: *${s.rewarded}* friend${s.rewarded === 1 ? '' : 's'} subscribed · *${s.days_earned} free days* earned.`
+        : s.joined > 0
+          ? `\n\n👀 *${s.joined}* ${s.joined === 1 ? 'person has' : 'people have'} joined with your code — you get your days when they subscribe.`
+          : '';
+
+      await wa.sendText(session.id, mobile,
+`🎁 *Give ${s.reward_days} days, get ${s.reward_days} days*
+
+Share the message below with another parent. When they subscribe, *you both* get *${s.reward_days} free days* added to your plan.
+
+Your code: *${s.code}*${earned}
+
+_Forward the next message 👇_`);
+
+      await wa.sendText(session.id, mobile,
+`My child does a 10-question maths quiz every evening on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
+
+Try it free, and we both get ${s.reward_days} bonus days:
+${s.link || `Message and send: JOIN ${s.code}`}`);
+      break;
+    }
 
     case 'support': {
       // A form, so every query arrives categorised and with a ticket number —
@@ -1070,6 +1191,15 @@ async function handleFlowSubmission(session, mobile, data) {
 
   const sub = await activateTrial(session, mobile, state);
   const gradeRow = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0];
+
+  // Formal welcome first, then the detail. Silently skipped until Meta
+  // approves the template, so the detail message below is never lost.
+  await require('./lifecycle').sendEnrolment({
+    sessionId: session.id, mobile,
+    parentName: session.context?.parent_name || 'there',
+    students: [studentName],
+    planName: 'Free Trial',
+  });
 
   await wa.sendText(session.id, mobile, M.trialActivated({
     studentName, boardCode: board, gradeName: gradeRow.grade_name,

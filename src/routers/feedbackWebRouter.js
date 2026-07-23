@@ -131,6 +131,37 @@ router.post('/api/submit', async (req, res) => {
        l.feedback_type, l.plan_type, l.period_key]);
     saved = true;
 
+    // Operator alert. A low rating is the earliest warning that something is
+    // wrong with the questions, so it reaches the founder immediately.
+    try {
+      const notify = require('../mail/notify');
+      const { fromRequest } = require('../mail/context');
+      const extra = (await db.query(
+        `SELECT st.student_name, b.board_code, g.grade_name,
+                t.quiz_date::text AS quiz_date, s.subject_name,
+                r.score_correct, r.score_total
+           FROM students st
+           LEFT JOIN boards b ON b.id = st.board_id
+           LEFT JOIN grades g ON g.id = st.grade_id
+           LEFT JOIN quizpe_tracker t ON t.id = $2
+           LEFT JOIN subjects s ON s.id = t.subject_id
+           LEFT JOIN quiz_reports r ON r.tracker_id = t.id
+          WHERE st.id = $1`, [l.student_id, l.tracker_id])).rows[0] || {};
+      notify.feedback({
+        feedbackId: `${l.parent_id}:${l.period_key}`,
+        parent: { name: l.parent_name, mobile: l.mobile_number },
+        student: { name: extra.student_name || l.student_name, board: extra.board_code, grade: extra.grade_name },
+        rating: stars,
+        tags: picked,
+        comment: note || null,
+        quiz: extra.quiz_date ? {
+          date: extra.quiz_date, subject: extra.subject_name,
+          score: extra.score_correct != null ? `${extra.score_correct}/${extra.score_total}` : null,
+        } : null,
+        ctx: fromRequest(req, { channel: 'Feedback page', sessionId: l.whatsapp_session_id }),
+      });
+    } catch (e) { console.error('[feedback] admin alert skipped:', e.message); }
+
     // Thank them in chat, naming their own next quiz time.
     let thanks = null;
     try {
