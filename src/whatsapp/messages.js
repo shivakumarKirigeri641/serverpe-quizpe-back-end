@@ -214,7 +214,56 @@ GSTIN: ${b.gstin}
 _Reply with your question and we'll get back to you within 24–48 hours._`;
 }
 
+/**
+ * What to promise about the FIRST quiz, given the time it is right now.
+ *
+ * The personal slot is derived from the parent id, not from when they signed
+ * up, so someone enrolling at 9:10 PM can be handed an 8:15 PM slot that has
+ * already gone. Saying "see you at 8:15 tonight" to that parent is a promise
+ * we then break on day one — the worst possible first impression.
+ *
+ * The quiz window (19:00–23:45) is far wider than the notification slot, so in
+ * most of those cases the quiz is actually available RIGHT NOW. The honest and
+ * more useful answer is to say so and invite them to start.
+ *
+ * @returns {{ first: string, signOff: string }}
+ */
+function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
+  const qw = require('./quizWindow');
+  const nowMin = qw.toMin(qw.nowHHMM());
+  const slotMin = qw.toMin(String(quizTime).slice(0, 5));
+  const detail = `10 fun questions right here on WhatsApp — matched to the ${boardCode} ${gradeName} `
+    + `syllabus for this month. Every answer comes with a simple explanation, so learning happens `
+    + `even from mistakes. 💡`;
+
+  // The slot is still ahead of us today — the original promise holds.
+  if (slotMin > nowMin) {
+    return {
+      first: `Tonight at ${fmtTime(quizTime)}, ${studentName} gets ${detail}`,
+      signOff: `_See you at ${fmtTime(quizTime)}!_ 🚀`,
+    };
+  }
+
+  // Slot gone, but the window is still open: the quiz can be taken now.
+  if (qw.state() === 'open') {
+    return {
+      first: `${studentName}'s daily quiz time is *${fmtTime(quizTime)}*, starting tomorrow.\n\n`
+        + `*Tonight's quiz is ready right now* — ${detail}\n\n`
+        + `Type *menu* and tap *▶️ Start quiz now* to begin. It stays open until `
+        + `${fmtTime(qw.CLOSE_HHMM)} tonight.`,
+      signOff: `_Ready when you are!_ 🚀`,
+    };
+  }
+
+  // Too late in the evening for today — tomorrow it is.
+  return {
+    first: `${studentName}'s first quiz arrives *tomorrow at ${fmtTime(quizTime)}* — ${detail}`,
+    signOff: `_See you tomorrow at ${fmtTime(quizTime)}!_ 🚀`,
+  };
+}
+
 function trialActivated({ parentName, studentName, boardCode, gradeName, endDate, quizTime, duration }) {
+  const when = firstQuizLines({ studentName, quizTime, boardCode, gradeName });
   return `🎉 *Your ${duration || 7}-day FREE trial is ACTIVE!*
 
 👦 *Student:* ${studentName}
@@ -226,13 +275,13 @@ function trialActivated({ parentName, studentName, boardCode, gradeName, endDate
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 *What happens now?*
 
-Tonight at ${fmtTime(quizTime)}, ${studentName} gets 10 fun questions right here on WhatsApp — matched to the ${boardCode} ${gradeName} syllabus for this month. Every answer comes with a simple explanation, so learning happens even from mistakes. 💡
+${when.first}
 
 We quietly mix in questions from earlier chapters too, so what ${studentName} learnt in June is still sharp in December. 🔄
 
 Just 5 minutes a day. That's how a learning habit is built. 🌱
 
-_See you at ${fmtTime(quizTime)}!_ 🚀`;
+${when.signOff}`;
 }
 
 module.exports = {

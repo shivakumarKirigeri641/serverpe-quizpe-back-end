@@ -163,8 +163,11 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // Health check.
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'quizpe-back-end' }));
 
-// WhatsApp Cloud API webhook — mounted at root so Meta's callback URL stays
-// short: <PUBLIC_BASE_URL>/whatsapp/webhook
+// WhatsApp Cloud API webhook. NOTE: it is NOT at the root — the router is
+// mounted on the long public-users prefix further down, so Meta's callback URL
+// must be the full path or verification returns 404:
+//
+//   <PUBLIC_BASE_URL>/serverpe/platform/quizpe/v1/public/users/whatsapp/webhook
 
 // Free-trial signup form APIs (backs public/trial.html).
 app.use('/trial', trialRouter);

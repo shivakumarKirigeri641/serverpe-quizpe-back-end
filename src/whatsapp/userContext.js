@@ -20,6 +20,12 @@
 
 const db = require('../database/connectDB');
 
+/** '23:45' -> '11:45 PM', for menu descriptions. */
+function fmtHour(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
 /** Normalise 919886122415 / +91-98861 22415 / 9886122415 -> 9886122415 */
 function normaliseMobile(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
@@ -149,8 +155,18 @@ function buildMainMenu(ctx) {
                 description: 'Your plan ended — resubscribe to continue' });
   }
   if (ctx.isSubscribed) {
+    // The old wording said "opens at your daily quiz time", which is wrong and
+    // costs us quizzes: the window is 7 PM–11:45 PM for EVERYONE, and the
+    // personal slot only decides when we send the nudge. A parent free at 9 PM
+    // with an 8:15 slot was being told to come back at a time already gone.
+    const qw = require('./quizWindow');
+    const st = qw.state();
     rows.push({ id: 'start_quiz', title: '▶️ Start quiz now',
-                description: "Today's quiz — opens at your daily quiz time" });
+                description: st === 'open'
+                  ? `Open now — until ${fmtHour(qw.CLOSE_HHMM)}. About 5 minutes.`
+                  : st === 'before'
+                    ? `Opens at ${fmtHour(qw.OPEN_HHMM)} tonight. About 5 minutes.`
+                    : "Tonight's quiz has closed — the next one is tomorrow." });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },

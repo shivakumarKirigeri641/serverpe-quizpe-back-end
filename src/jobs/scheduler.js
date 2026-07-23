@@ -180,6 +180,97 @@ async function logSend(row, kind, templateName, waId, error) {
      waId || null, error ? 'failed' : 'sent', error || null]);
 }
 
+/* ------------------------------------------------- subscription lifecycle -- */
+/**
+ * Days before expiry on which a reminder goes out.
+ *
+ * A week's warning, a nudge at three days, then tomorrow and today. Each one
+ * reads differently ("on 30th July" / "tomorrow" / "today"), so they escalate
+ * rather than repeat.
+ */
+const EXPIRING_OFFSETS = [7, 3, 1, 0];
+/** Days AFTER expiry for the one-and-only "it has ended" message. */
+const EXPIRED_AFTER_DAYS = 1;
+/** Both lifecycle notices go out mid-morning, not at quiz time. */
+const LIFECYCLE_AT_HHMM = process.env.LIFECYCLE_AT_HHMM || '10:30';
+
+/**
+ * Parents whose plan is expiring or has expired.
+ *
+ * ONE ROW PER PARENT, not per child. A plan belongs to the parent, so a family
+ * with three children must get one notice, not three — hence DISTINCT ON
+ * (parent) with a representative student. That representative also makes the
+ * existing UNIQUE (student_id, kind, send_date) dedupe per parent for free.
+ */
+async function lifecycleDue(kind) {
+  const expiring = kind === 'expiring';
+  const { rows } = await db.query(
+    `SELECT DISTINCT ON (p.id)
+            p.id AS parent_id, p.parent_name, p.parent_mobile_number,
+            st.id AS student_id, st.student_name,
+            s.plan_end_date, pl.plan_name,
+            (s.plan_end_date - CURRENT_DATE)::int AS days_left,
+            w.id AS session_id
+       FROM parents_quizpe_subscriptions s
+       JOIN parents p  ON p.id = s.parent_id AND p.is_active
+       JOIN quizpe_plans pl ON pl.id = s.plan_id
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       LEFT JOIN LATERAL (SELECT id FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND NOT p.service_paused
+        AND ${expiring
+          ? `(s.plan_end_date - CURRENT_DATE) = ANY($1::int[])`
+          : `(s.plan_end_date - CURRENT_DATE) = -$1::int`}
+        -- Never chase someone who has already renewed past this period.
+        AND NOT EXISTS (
+          SELECT 1 FROM parents_quizpe_subscriptions s2
+           WHERE s2.parent_id = p.id AND s2.plan_end_date > s.plan_end_date)
+        ${expiring ? '' : `
+        -- "Your plan has ended" is said ONCE, ever — not once a day. The
+        -- per-day UNIQUE alone would repeat it every morning.
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_log n
+           WHERE n.parent_id = p.id AND n.kind = 'expired')`}
+      ORDER BY p.id, st.id`,
+    [expiring ? EXPIRING_OFFSETS : EXPIRED_AFTER_DAYS]);
+  return rows;
+}
+
+/** Sends the expiring / expired templates. Skips silently until approved. */
+async function runLifecycleJob(kind) {
+  const hhmm = nowHHMM();
+  const [th, tm] = LIFECYCLE_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = hhmm.split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  const lifecycle = require('../whatsapp/lifecycle');
+  const templateName = lifecycle.TEMPLATES[kind];
+  if (!(await lifecycle.approved(templateName))) return;   // not cleared by Meta yet
+
+  const due = await lifecycleDue(kind);
+  for (const row of due) {
+    if (!(await claimSend(row, kind, templateName))) continue;   // already sent today
+    try {
+      const res = kind === 'expiring'
+        ? await lifecycle.sendExpiring({
+            sessionId: row.session_id, mobile: row.parent_mobile_number,
+            parentName: row.parent_name, planName: row.plan_name, endDate: row.plan_end_date })
+        : await lifecycle.sendExpired({
+            sessionId: row.session_id, mobile: row.parent_mobile_number,
+            parentName: row.parent_name, planName: row.plan_name });
+      await finishSend(row, kind, null, res.sent ? null : res.reason);
+    } catch (e) {
+      await finishSend(row, kind, null, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 250));            // stay under Meta's rate limit
+  }
+  if (due.length) console.log(`[scheduler] ${kind}: ${due.length} parent(s)`);
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -297,6 +388,10 @@ function startScheduler() {
       await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
       // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
       await runJob('quiz_missed', 'qp_quiz_missed_daily_v1');
+      // plan expiry, mid-morning rather than at quiz time — a renewal decision
+      // is made in daylight, not thirty seconds before the child sits down
+      await runLifecycleJob('expiring');
+      await runLifecycleJob('expired');
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();

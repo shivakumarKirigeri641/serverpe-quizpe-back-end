@@ -415,6 +415,16 @@ async function finalize(c, pay, mailCtx = null) {
       const wa = require('../whatsapp/client');
       const M = require('../whatsapp/messages');
       const names = students.map(s => s.name).join(', ');
+
+      // Formal confirmation first, then the detail below. Skipped silently
+      // until Meta approves the template.
+      await require('../whatsapp/lifecycle').sendEnrolment({
+        sessionId: c.whatsapp_session_id, mobile: c.mobile_number,
+        parentName: cart.parent_name || 'there',
+        students: students.map((s) => s.name),
+        planName: c.plan_name,
+      });
+
       // A renewal that carried days forward says so explicitly. The whole point
       // of stacking is lost if the parent cannot see that it happened.
       const { stackedMessage } = require('../utils/subscriptionPeriod');

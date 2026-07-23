@@ -107,6 +107,19 @@ function isStartQuiz(msg, text, id) {
   return /start\s*quiz/.test(hay);
 }
 
+/**
+ * The "View plans" quick reply on the expiring/expired templates.
+ *
+ * A template button arrives as a `button` message, not a list selection, so it
+ * would otherwise fall through to whatever state the session happens to be in
+ * — quite possibly a stale one, since these templates are sent to parents who
+ * have not been in touch for days.
+ */
+function isViewPlans(msg, text, id) {
+  const hay = `${text || ''} ${id || ''} ${msg.button?.text || ''} ${msg.button?.payload || ''}`.toLowerCase();
+  return /view\s*plans?/.test(hay);
+}
+
 async function recordConsent(session, policyId, mobile, waMessageId, parentId = null) {
   await db.query(
     `INSERT INTO policy_consents (session_id, parent_id, policy_id, mobile_number, wa_message_id)
@@ -625,6 +638,16 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     }
   }
 
+  // "View plans" on an expiry template. Handled from ANY state, because these
+  // templates reach parents whose session was last used days ago and may be
+  // parked mid-flow. A renewing parent must not be dropped into a half-finished
+  // signup, so the state is reset to the menu first.
+  if (isViewPlans(msg, text, id)) {
+    await setState(session, 'main_menu', 'view_plans_from_template');
+    await handleMenuChoice(session, mobile, ctx, ctx.status === 'EXPIRED' ? 'renew' : 'view_plans');
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }
@@ -751,6 +774,13 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
       const sub = await activateTrial(session, mobile, rows[0].state_code);
       const grade = (await db.query(
         `SELECT grade_name FROM grades WHERE grade_code=$1`, [session.context.grade_code])).rows[0];
+
+      await require('./lifecycle').sendEnrolment({
+        sessionId: session.id, mobile,
+        parentName: session.context?.parent_name || 'there',
+        students: [session.context.student_name],
+        planName: 'Free Trial',
+      });
 
       await wa.sendText(session.id, mobile, M.trialActivated({
         studentName: session.context.student_name,
@@ -1161,6 +1191,15 @@ async function handleFlowSubmission(session, mobile, data) {
 
   const sub = await activateTrial(session, mobile, state);
   const gradeRow = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0];
+
+  // Formal welcome first, then the detail. Silently skipped until Meta
+  // approves the template, so the detail message below is never lost.
+  await require('./lifecycle').sendEnrolment({
+    sessionId: session.id, mobile,
+    parentName: session.context?.parent_name || 'there',
+    students: [studentName],
+    planName: 'Free Trial',
+  });
 
   await wa.sendText(session.id, mobile, M.trialActivated({
     studentName, boardCode: board, gradeName: gradeRow.grade_name,
