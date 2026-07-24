@@ -242,9 +242,14 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   const bx = PW / 2, bw = W / 2;
   doc.font(doc._F.bold).fontSize(9).fillColor(C.white).text(biz.company_name || '', bx, 24, { width: bw, align: 'right' });
   doc.font(doc._F.regular).fontSize(7.5).fillColor('#cfe9e2');
+  // Step by the real wrapped height so a long address cannot collide with the
+  // GSTIN beneath it.
   let by = 38;
   [biz.address, biz.gstin ? `GSTIN: ${biz.gstin}` : null, [biz.support_email, biz.product_website].filter(Boolean).join('  ·  ')]
-    .filter(Boolean).forEach(l => { doc.text(l, bx, by, { width: bw, align: 'right' }); by += 11; });
+    .filter(Boolean).forEach(l => {
+      doc.text(l, bx, by, { width: bw, align: 'right' });
+      by += doc.heightOfString(l, { width: bw }) + 1.5;
+    });
 
   let y = 126;
 
