@@ -40,9 +40,8 @@ const fail = (res, code, error) => res.status(code).json({ success: false, error
 /**
  * Step 1 — send a one-time code by SMS.
  *
- * Always answers "sent" for a well-formed number, even one that is not an
- * admin. Distinguishing the two would let anyone test numbers until they found
- * the admin's.
+ * Single-admin panel: a number that is not the administrator's is refused
+ * outright (403), so it is obvious that only the authorised number works.
  */
 router.post('/otp', express.json(), async (req, res) => {
   const { mobile } = req.body || {};
@@ -55,8 +54,9 @@ router.post('/otp', express.json(), async (req, res) => {
   }
   try {
     const r = await requestCode(mobile, ip);
-    if (r.error) return fail(res, 429, r.error);
-    ok(res, { ttlMin: r.ttlMin, message: `If that number can sign in, a code is on its way. It is valid for ${r.ttlMin} minutes.` });
+    if (r.unauthorized) return fail(res, 403, r.error);        // not an admin
+    if (r.error) return fail(res, 429, r.error);               // throttled etc.
+    ok(res, { ttlMin: r.ttlMin, message: `A code is on its way. It is valid for ${r.ttlMin} minutes.` });
   } catch (e) {
     console.error('[admin] otp request failed:', e.message);
     fail(res, 500, e.message.startsWith('ADMIN AUTH') ? e.message : 'Could not send the code.');
