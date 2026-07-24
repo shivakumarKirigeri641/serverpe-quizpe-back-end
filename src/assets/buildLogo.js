@@ -16,7 +16,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
+// NOTE: sharp is NOT required at module load. The report only needs `paths`
+// (static PNG file locations), and sharp is a native module that refuses to
+// load on Node < 20.9 — which would crash the whole daily report just for
+// importing this file. sharp is required lazily inside render() instead, which
+// only runs when regenerating the logo art (a dev task, not at runtime).
 
 const DIR = __dirname;
 const FONT = 'Segoe UI, Arial, Helvetica, sans-serif';
@@ -110,6 +114,7 @@ function banner() {
 }
 
 async function render(svg, file, w, h) {
+  const sharp = require('sharp');            // lazy — only when generating art
   const out = path.join(DIR, file);
   await sharp(Buffer.from(svg)).resize(w, h, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png().toFile(out);

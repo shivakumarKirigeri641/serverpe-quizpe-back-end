@@ -21,7 +21,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
+// sharp is required lazily inside renderCard (see the note in buildLogo.js): it
+// is a native module that will not load on Node < 20.9, and requiring it at
+// module load would crash the whole badge job on such a server. Loading it only
+// when a card is actually rendered lets everything else run, and the caller
+// already treats a card failure as skippable.
 
 const SIZE = 1080;
 const OUT_DIR = path.join(__dirname, '..', 'uploads', 'share');
@@ -147,6 +151,7 @@ function buildSvg({ kind = 'streak', name, headline, unit, subtitle, footer }) {
  * they are written under a per-day folder that a cleanup job can drop wholesale.
  */
 async function renderCard(opts) {
+  const sharp = require('sharp');            // lazy — see the note at the top
   const day = new Date().toISOString().slice(0, 10);
   const dir = path.join(OUT_DIR, day);
   fs.mkdirSync(dir, { recursive: true });

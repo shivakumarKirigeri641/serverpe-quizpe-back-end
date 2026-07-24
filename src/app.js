@@ -207,6 +207,32 @@ require('./pdf/reportNumber').ensureSequences()
   .catch((e) => console.error('[startup] report sequences failed:', e.message));
 
 // Invoice numbering sequence — atomic, so concurrent payments can never collide.
+// Make sure the writable upload tree exists BEFORE anything tries to use it.
+// src/uploads is gitignored, so a fresh server checkout does not have it; the
+// report/card/invoice code creates its own dated subfolders, but only if the
+// base tree is writable. Creating it here means a permissions problem (the
+// classic "reports work locally, fail on the server as a different user")
+// surfaces LOUDLY at boot with a clear message, instead of silently failing a
+// child's report hours later.
+(() => {
+  const fs = require('fs');
+  const dirs = [
+    'reports/daily_reports', 'reports/weekly_reports', 'reports/final_reports',
+    'reports/certificates', 'share', 'invoices',
+  ].map((d) => path.join(__dirname, 'uploads', d));
+  try {
+    for (const d of dirs) fs.mkdirSync(d, { recursive: true });
+    // prove it is actually writable, not just present
+    const probe = path.join(__dirname, 'uploads', '.write-probe');
+    fs.writeFileSync(probe, 'ok'); fs.unlinkSync(probe);
+    console.log('[startup] upload folders ready and writable');
+  } catch (e) {
+    console.error(`[startup] ✖ upload folder not writable: ${e.message}\n` +
+      `           Reports, cards and invoices WILL fail. Fix with:\n` +
+      `           mkdir -p ${path.join(__dirname, 'uploads')} && chown -R <node-user> ${path.join(__dirname, 'uploads')}`);
+  }
+})();
+
 require('./pdf/invoice').ensureInvoiceSequence()
   .catch((e) => console.error('[startup] invoice sequence failed:', e.message));
 

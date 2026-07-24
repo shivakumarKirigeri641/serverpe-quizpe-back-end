@@ -185,6 +185,23 @@ async function showMainMenu(session, mobile, ctx) {
   await setState(session, 'main_menu', 'shown_menu');
 }
 
+/**
+ * Right after enrolment, if the quiz window is already open, hand the parent a
+ * one-tap "Start quiz now" button — they should not have to go back to the menu
+ * and hunt for it. The button's TITLE triggers the global start-quiz handler,
+ * so it works from the freshly-'active' state. Silent when the window is shut
+ * (before 7 PM / after 11:45 PM): tomorrow's quiz arrives on schedule instead.
+ */
+async function offerStartQuizIfOpen(session, mobile) {
+  try {
+    const qw = require('./quizWindow');
+    if (qw.state() !== 'open') return;
+    await wa.sendButtons(session.id, mobile,
+      "🎯 *Tonight's quiz is ready.* Tap below to begin now — it takes about 5 minutes.",
+      [{ id: 'start_quiz', title: '▶️ Start quiz now' }]);
+  } catch (e) { console.error('[flow] start-quiz button skipped:', e.message); }
+}
+
 async function showTrialTerms(session, mobile) {
   const t = await M.trialTerms();
   await mergeContext(session, { trial_policy_id: t.policyId });
@@ -830,6 +847,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         quizTime: sub.quiz_time,
       }));
       await setState(session, 'active', 'trial_activated', { subscription_id: sub.id });
+      await offerStartQuizIfOpen(session, mobile);
       break;
     }
 
@@ -1246,6 +1264,7 @@ async function handleFlowSubmission(session, mobile, data) {
     endDate: sub.plan_end_date, quizTime: sub.quiz_time,
   }));
   await setState(session, 'active', 'trial_activated', { subscription_id: sub.id, via: 'flow' });
+  await offerStartQuizIfOpen(session, mobile);
 }
 
 /** Answer id format: ans_<trackerId>_<serial>_<letter> */

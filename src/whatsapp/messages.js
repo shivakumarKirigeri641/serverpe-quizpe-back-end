@@ -244,14 +244,16 @@ function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
     };
   }
 
-  // Slot gone, but the window is still open: the quiz can be taken now.
+  // Slot gone, but the window is still open: the quiz can be taken now. A
+  // "Start quiz now" BUTTON is sent straight after this message (see the
+  // enrolment handlers), so the parent taps rather than hunts through a menu.
   if (qw.state() === 'open') {
     return {
       first: `${studentName}'s daily quiz time is *${fmtTime(quizTime)}*, starting tomorrow.\n\n`
         + `*Tonight's quiz is ready right now* — ${detail}\n\n`
-        + `Type *menu* and tap *▶️ Start quiz now* to begin. It stays open until `
-        + `${fmtTime(qw.CLOSE_HHMM)} tonight.`,
-      signOff: `_Ready when you are!_ 🚀`,
+        + `It stays open until ${fmtTime(qw.CLOSE_HHMM)} tonight.`,
+      signOff: `👇 *Tap the button below to begin.*`,
+      windowOpen: true,
     };
   }
 
