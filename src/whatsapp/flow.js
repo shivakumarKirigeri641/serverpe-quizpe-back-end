@@ -627,13 +627,30 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     const referrals = require('../referrals/engine');
     const code = referrals.parseCode(text);
     if (code && !session.context?.referral_code) {
-      await mergeContext(session, { referral_code: code });
       const owner = await referrals.ownerOf(code).catch(() => null);
+
+      // The owner tapping their OWN link. This is common — a parent tests the
+      // link before sharing it — so it must be handled kindly, not with a
+      // "someone invited you" message to yourself. Nothing is stashed, so the
+      // code cannot later self-credit.
+      if (owner && ctx.parentId && owner.id === ctx.parentId) {
+        await wa.sendText(session.id, mobile,
+          `😊 That's *your own* invite link — share it with another parent, not yourself!\n\n` +
+          `When a friend joins with it, you *both* get free days. Type *menu* → *🎁 Refer a friend* for the message to forward.`);
+        return;
+      }
+
+      // A genuine referral from someone else — stash it for enrolment.
       if (owner) {
+        await mergeContext(session, { referral_code: code });
         const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
         await wa.sendText(session.id, mobile,
           `🎁 *${first} invited you to QuizPe!*\n\n` +
           `Start your free trial below. When you subscribe, you *both* get free days added.`);
+      } else {
+        // Unknown code — remember it anyway so a typo can be looked at later,
+        // but say nothing; a stranger typing "JOIN" should not get an error.
+        await mergeContext(session, { referral_code: code });
       }
     }
   }

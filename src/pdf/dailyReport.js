@@ -229,8 +229,13 @@ async function generateDailyReport(trackerId) {
     biz.gstin ? `GSTIN: ${biz.gstin}` : null,
     [biz.support_email, biz.product_website].filter(Boolean).join('  ·  '),
   ].filter(Boolean);
+  // Advance by the ACTUAL rendered height, not a fixed 11px. The address wraps
+  // to two lines, so a flat step drew the GSTIN on top of the pincode line.
   let by = 38;
-  bizLines.forEach(l => { doc.text(l, bx, by, { width: bw, align: 'right' }); by += 11; });
+  bizLines.forEach(l => {
+    doc.text(l, bx, by, { width: bw, align: 'right' });
+    by += doc.heightOfString(l, { width: bw }) + 1.5;
+  });
 
   let y = 128;
 

@@ -184,12 +184,31 @@ function publicName(name) {
 
 /* ---------------------------------------------------- certificates ------- */
 /**
+ * The current academic year's consistency window: enrolment → 31 March.
+ *
+ * The school year runs June–March, so 31 March is the finish line for everyone.
+ * A child who joined in June has a long run to it; one who joined in January has
+ * a short one — same finish line, same reward, and only unbroken effort counts.
+ *
+ * @param joinedAt the child's (or plan's) start date
+ * @returns {{ from, to }} 'YYYY-MM-DD', where `to` is the coming 31 March
+ */
+function academicYearWindow(joinedAt, today = new Date()) {
+  const d = new Date(joinedAt || today);
+  // If we are already past 1 April, the finish line is next year's 31 March.
+  const y = today.getMonth() >= 3 ? today.getFullYear() + 1 : today.getFullYear();
+  const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  return { from: iso(d), to: `${y}-03-31` };
+}
+
+/**
  * Whether a child has earned the free consistency certificate.
  *
  * "Full consistency" is read strictly, because a certificate that everyone gets
  * is worth nothing: every single quiz in the window attempted, and no gap in
- * cover. `minDays` guards against a child who enrolled in late May getting the
- * same certificate as one who turned up every day since April.
+ * cover. `minDays` is the floor below which the run is too short to certify —
+ * a child who joined on 28 March has not shown the consistency this rewards,
+ * even though they reached 31 March unbroken.
  */
 async function certificateEligibility(studentId, { from, to, minDays = 40 }, client = db) {
   const { rows } = await client.query(
@@ -235,4 +254,5 @@ async function certificateEligibility(studentId, { from, to, minDays = 40 }, cli
   };
 }
 
-module.exports = { streak, stats, awardBadges, badgesOf, leaderboard, publicName, certificateEligibility };
+module.exports = { streak, stats, awardBadges, badgesOf, leaderboard, publicName,
+  certificateEligibility, academicYearWindow };

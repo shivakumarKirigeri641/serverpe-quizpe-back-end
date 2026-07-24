@@ -281,10 +281,30 @@ We quietly mix in questions from earlier chapters too, so what ${studentName} le
 
 Just 5 minutes a day. That's how a learning habit is built. 🌱
 
+${parentGuidance(studentName)}
+
 ${when.signOff}`;
+}
+
+/**
+ * The one thing a parent most needs to hear on day one: let the child answer.
+ *
+ * A parent who supplies the answers gets a perfect report and a child who has
+ * learnt nothing — the quiz then measures the parent, not the pupil. Said
+ * warmly and paired with the reassurance that a full explanation always
+ * follows, so "don't help" does not feel like "leave them to struggle".
+ */
+function parentGuidance(studentName) {
+  const who = studentName || 'your child';
+  return `━━━━━━━━━━━━━━━━━━━━━━━━━━
+👨‍👩‍👧 *A note for you*
+
+Please *guide ${who}, but let ${who} answer* — never give the answer yourself. A wrong answer today is how we know what to teach tomorrow.
+
+After every quiz we send a *full explanation for each question, a summary and a report* — so learning happens even from the ones ${who} gets wrong. 💡`;
 }
 
 module.exports = {
   welcome, trialTerms, plansList, subscriptionDetails,
-  quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, business, fmtDate, fmtTime,
+  quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, parentGuidance, business, fmtDate, fmtTime,
 };

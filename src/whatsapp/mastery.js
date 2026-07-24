@@ -36,10 +36,42 @@ const CFG = {
   PREVIEW_MAX: 2,             // never more than this many, whatever the quiz length
 
   MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
+  MAX_PER_CONCEPT: 3,         // most questions testing one SKILL in a single quiz
   BASE_QUESTIONS: 10,         // doing well -> standard quiz
   MID_QUESTIONS: 15,          // wobbling  -> more practice
   MAX_QUESTIONS: 20,          // struggling -> most practice (hard ceiling)
 };
+
+/**
+ * The CONCEPT a question tests — coarser than its sentence shape.
+ *
+ * A frame-stem separates "Who has MORE?" from "Which is GREATER?" — different
+ * grammar, but the SAME skill: comparing two numbers. In the lower grades that
+ * skill is nearly half the chapter, so capping only by shape still let a child
+ * meet six comparisons in one quiz, worded four different ways. This groups all
+ * of them under 'compare' so the per-concept cap can hold.
+ *
+ * Order matters: the first branch that matches wins, so operator signals ('+',
+ * 'in all', 'gave away') are tested before the looser comparison words, or an
+ * addition ending "how many more" would be miscounted as a comparison.
+ *
+ * Evaluated over lower(question_whatsapp). Purely heuristic — it does not need
+ * to be perfect, only to keep same-skill questions in the same bucket.
+ */
+const CONCEPT_SQL = `
+  CASE
+    WHEN lower(qb.question_whatsapp) ~ '₹' THEN 'money'
+    WHEN lower(qb.question_whatsapp) ~ '(×|✖|multipl| in each|boxes with|rows of|times as|array)' THEN 'multiply'
+    WHEN lower(qb.question_whatsapp) ~ '(÷|➗|divid|shared|share |each get|groups of|packed|per box)' THEN 'divide'
+    WHEN lower(qb.question_whatsapp) ~ '( \\+ |plus|in all|altogether|how many.*(in all|now)|got \\d+ more|gets \\d+ more|buys \\d+ more|and gets)' THEN 'add'
+    WHEN lower(qb.question_whatsapp) ~ '( - |−|minus|gave away|are left|how many.*left|take away|remain|spent|how many more)' THEN 'subtract'
+    WHEN lower(qb.question_whatsapp) ~ '(greater|smaller|greatest|smallest|largest|biggest|who has more|who has fewer|longer|shorter|taller|heavier|lighter)' THEN 'compare'
+    WHEN lower(qb.question_whatsapp) ~ '(next number|comes (just )?(before|after)|which number is between|added each time|missing (number|term)|what comes next|skip count|pattern|triangular)' THEN 'sequence'
+    WHEN lower(qb.question_whatsapp) ~ '(digit|place|tens|ones|hundreds|expanded|face value)' THEN 'place_value'
+    WHEN lower(qb.question_whatsapp) ~ '(number name|in words|written)' THEN 'number_name'
+    WHEN lower(qb.question_whatsapp) ~ '(picture (chart|graph)|tally|how many symbols|stands for)' THEN 'data'
+    ELSE 'other'
+  END`;
 
 /** Ordered chapters for a student's board/grade/subject/medium (seq 1..N). */
 async function chapterSequence(studentId, subjectId, exec = db) {
@@ -73,11 +105,16 @@ async function getProgress(studentId, subjectId, exec = db) {
        RETURNING *`,
       [studentId, subjectId, chapters[0]?.chapter || null, total])).rows[0];
   } else if (p.total_chapters !== total || !p.frontier_chapter) {
+    // Refresh the display chapter by SEQ (a level may hold several chapters),
+    // never by array position — see the note in selectQuestions.
+    const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
+    const fSeq = Math.min(p.frontier_seq, maxSeq);
+    const fChapter = chapters.find(c => c.seq === fSeq)?.chapter || p.frontier_chapter;
     p = (await exec.query(
       `UPDATE student_subject_progress SET total_chapters=$3,
               frontier_chapter=$4, modified_at=now()
         WHERE id=$1 RETURNING *`,
-      [p.id, subjectId, total, chapters[Math.min(p.frontier_seq, total) - 1]?.chapter || p.frontier_chapter])).rows[0];
+      [p.id, subjectId, total, fChapter])).rows[0];
   }
   return { progress: p, chapters };
 }
@@ -114,8 +151,16 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
   if (!chapters.length) return { ids: [], progress, chapters };
 
-  const frontierSeq = Math.min(progress.frontier_seq, chapters.length);
-  const frontierChapter = chapters[frontierSeq - 1].chapter;
+  // A "level" (seq) can hold MORE THAN ONE chapter: the NEP-restructured lower
+  // grades bundle several playful-named chapters into one revision month, so
+  // seq repeats. The frontier is therefore the whole SET of chapters at the
+  // current seq, never a single array position — indexing chapters[seq-1] would
+  // serve one chapter while mastery was judged on another that was never shown,
+  // freezing the child. So everything below keys off seq, not array index.
+  const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
+  const frontierSeq = Math.min(progress.frontier_seq, maxSeq);
+  const frontierChapters = chapters.filter(c => c.seq === frontierSeq).map(c => c.chapter);
+  const frontierChapter = frontierChapters[0];        // representative, for the return value
   const stats = await perChapterStats(studentId, subjectId, chapters, exec);
 
   const weakEarlier = stats.filter(s => s.seq < frontierSeq && s.answered > 0 && !s.mastered)
@@ -140,11 +185,13 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
    * each, and so on — variety when the pool allows it, and a graceful fall back
    * to repeats only once the shapes are exhausted.
    */
-  const pick = async (chapterList, n, exclude, maxPerShape = CFG.MAX_PER_SHAPE) => {
+  const pick = async (chapterList, n, exclude, maxPerShape = CFG.MAX_PER_SHAPE,
+                      maxPerConcept = CFG.MAX_PER_CONCEPT, bannedConcepts = []) => {
     if (!n || !chapterList.length) return [];
     const { rows } = await exec.query(
       `WITH pool AS (
          SELECT qb.id,
+                ${CONCEPT_SQL} AS concept,
                 -- The SENTENCE FRAME, not the opening words.
                 --
                 -- Keeping only function words throws away everything that
@@ -182,57 +229,93 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
                               JOIN quizpe_tracker t ON t.id = h.tracker_id
                              WHERE t.student_id = $1 AND h.question_id = qb.id)
        ), ranked AS (
-         SELECT id, row_number() OVER (PARTITION BY stem ORDER BY random()) AS rn
+         SELECT id, concept,
+                row_number() OVER (PARTITION BY stem    ORDER BY random()) AS rn_shape,
+                row_number() OVER (PARTITION BY concept ORDER BY random()) AS rn_concept
            FROM pool
        )
-       -- Hard cap per shape. Some chapters are genuinely thin — KSEAB Grade 7
-       -- "Fractions" is 3,600 questions built from only 3 shapes — and without
-       -- this the draw fills the whole quiz from those three. Returning FEWER
-       -- than asked is deliberate: the caller then tops up from other unlocked
-       -- chapters, which is a better quiz than four copies of one question.
-       SELECT id FROM ranked WHERE rn <= $6 ORDER BY rn, random() LIMIT $4`,
-      [studentId, subjectId, chapterList, n, exclude, maxPerShape]);
-    return rows.map(r => r.id);
+       -- Two caps, both must hold:
+       --   per SHAPE  — no four copies of one template (thin chapters like
+       --               KSEAB Grade 7 "Fractions", 3,600 questions from 3 shapes)
+       --   per CONCEPT — no six comparisons worded four ways (the Grade 1
+       --               complaint). Ordering by rn_concept first lays down one
+       --               of each skill before any second, so a short quiz is
+       --               spread across skills rather than clustered.
+       -- Returning FEWER than asked is deliberate: the caller tops up from
+       -- other unlocked chapters, a better quiz than repetition.
+       SELECT id, concept FROM ranked
+        WHERE rn_shape <= $6 AND rn_concept <= $7
+          AND concept <> ALL($8::text[])
+        ORDER BY rn_concept, rn_shape, random() LIMIT $4`,
+      [studentId, subjectId, chapterList, n, exclude, maxPerShape, maxPerConcept, bannedConcepts]);
+    return rows;   // [{ id, concept }]
   };
 
-  let ids = [];
+  // ---- assembly with a GLOBAL concept budget --------------------------------
+  // Each pick() spreads WITHIN its own draw, but a quiz is built from several
+  // draws (weak + frontier + revision + top-up), so the same concept can creep
+  // past the cap across them. The budget below is the single enforcement point:
+  // a concept already at the cap is both excluded from the next SQL draw AND
+  // refused here, so the finished quiz can never exceed it.
+  const ids = [];
+  const seen = new Set();
+  const conceptCount = {};
+  const bannedConcepts = () => Object.keys(conceptCount).filter(k => conceptCount[k] >= CFG.MAX_PER_CONCEPT);
 
-  // Stretch questions from the next chapter, for a child who has the current
-  // one well in hand. Deliberately taken BEFORE the frontier fills up, so they
-  // are not squeezed out when the frontier pool is large.
-  const fStat = stats.find(s => s.seq === frontierSeq) || { answered: 0, accuracy: 0 };
-  const nextChapter = chapters[frontierSeq]?.chapter || null;
-  const earnsPreview = nextChapter
-    && fStat.answered >= CFG.PREVIEW_MIN_ANSWERED
-    && fStat.accuracy >= CFG.PREVIEW_ACCURACY;
-  let previewIds = [];
+  const take = async (chapterList, n, opts = {}) => {
+    const want = Math.min(n, count - ids.length);
+    if (want <= 0 || !chapterList.length) return [];
+    const ignoreCap = opts.relax === true;
+    const rows = await pick(
+      chapterList, n, ids, opts.maxPerShape ?? CFG.MAX_PER_SHAPE,
+      opts.maxPerConcept ?? CFG.MAX_PER_CONCEPT, ignoreCap ? [] : bannedConcepts());
+    const added = [];
+    for (const r of rows) {
+      if (ids.length >= count) break;
+      if (seen.has(r.id)) continue;
+      // The real cap: never let a concept exceed the budget, even if a draw
+      // over-supplied it (a concept sitting at 2 is not yet banned in SQL).
+      if (!ignoreCap && (conceptCount[r.concept] || 0) >= CFG.MAX_PER_CONCEPT) continue;
+      ids.push(r.id); seen.add(r.id); added.push(r.id);
+      conceptCount[r.concept] = (conceptCount[r.concept] || 0) + 1;
+    }
+    return added;
+  };
+
+  // Stretch questions from the NEXT level, for a child who has the current one
+  // well in hand. Mastery of the frontier is judged across ALL chapters at the
+  // current seq, aggregated — not one of them.
+  const level = stats.filter(s => s.seq === frontierSeq);
+  const fAnswered = level.reduce((a, s) => a + s.answered, 0);
+  const fAccuracy = fAnswered ? level.reduce((a, s) => a + s.correct, 0) / fAnswered : 0;
+  const nextChapters = chapters.filter(c => c.seq === frontierSeq + 1).map(c => c.chapter);
+  const earnsPreview = nextChapters.length
+    && fAnswered >= CFG.PREVIEW_MIN_ANSWERED
+    && fAccuracy >= CFG.PREVIEW_ACCURACY;
+  let previewCount = 0;
   if (earnsPreview) {
-    previewIds = await pick([nextChapter], Math.min(CFG.PREVIEW_MAX, Math.max(1, Math.floor(count * 0.1))), ids);
-    ids = ids.concat(previewIds);
+    previewCount = (await take(nextChapters, Math.min(CFG.PREVIEW_MAX, Math.max(1, Math.floor(count * 0.1))))).length;
   }
 
   const reinforceN = weakEarlier.length ? Math.round(count * CFG.REINFORCE_RATIO) : 0;
-  // if there's no mastered-revision pool, the frontier takes that share too
   const frontierN = Math.round(count * CFG.FRONTIER_RATIO) + (masteredEarlier.length ? 0 : Math.round(count * 0.2));
 
-  ids = ids.concat(await pick(weakEarlier, reinforceN, ids));
-  ids = ids.concat(await pick([frontierChapter], Math.max(frontierN, count - ids.length - (masteredEarlier.length ? Math.round(count * 0.2) : 0)), ids));
-  if (ids.length < count && masteredEarlier.length) ids = ids.concat(await pick(masteredEarlier, count - ids.length, ids));
-  // Top up from any unlocked chapter — still shape-capped, so a thin frontier
-  // chapter borrows VARIETY from earlier work rather than repeating itself.
+  await take(weakEarlier, reinforceN);
+  await take(frontierChapters, Math.max(frontierN, count - ids.length - (masteredEarlier.length ? Math.round(count * 0.2) : 0)));
+  if (ids.length < count && masteredEarlier.length) await take(masteredEarlier, count - ids.length);
+
+  // Top up from any unlocked chapter — concept budget still holds, so a thin
+  // frontier borrows VARIETY from earlier work rather than repeating itself.
   const unlocked = chapters.slice(0, frontierSeq).map(c => c.chapter);
-  if (ids.length < count) ids = ids.concat(await pick(unlocked, count - ids.length, ids));
+  if (ids.length < count) await take(unlocked, count - ids.length);
 
-  // Last resort: every chapter the child has unlocked is genuinely out of fresh
-  // shapes. Relax the cap rather than send a short quiz — a repeated shape is a
-  // worse quiz, but eight questions instead of ten is a broken one.
-  if (ids.length < count) {
-    ids = ids.concat(await pick(unlocked, count - ids.length, ids, 99));
-  }
+  // Last resort: the child is genuinely out of fresh, varied questions. Relax
+  // both caps rather than send a short quiz — a repeat is a worse quiz, but
+  // eight questions instead of ten is a broken one.
+  if (ids.length < count) await take(unlocked, count - ids.length, { relax: true });
 
-  ids = [...new Set(ids)].slice(0, count);
-  return { ids, progress, chapters, frontierChapter, weakChapters: weakEarlier,
-           previewChapter: previewIds.length ? nextChapter : null, previewCount: previewIds.length };
+  return { ids: ids.slice(0, count), progress, chapters, frontierChapter, weakChapters: weakEarlier,
+           previewChapter: previewCount ? nextChapters[0] : null, previewCount };
 }
 
 /**
@@ -244,31 +327,38 @@ async function evaluateAndPromote(studentId, subjectId, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
   if (progress.status === 'completed' || !chapters.length) return { promoted: false, status: progress.status };
 
-  const frontierSeq = Math.min(progress.frontier_seq, chapters.length);
-  const frontierChapter = chapters[frontierSeq - 1].chapter;
+  const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
+  const frontierSeq = Math.min(progress.frontier_seq, maxSeq);
+  const frontierChapter = chapters.find(c => c.seq === frontierSeq)?.chapter || null;
   const stats = await perChapterStats(studentId, subjectId, chapters, exec);
-  const f = stats.find(s => s.seq === frontierSeq) || { answered: 0, accuracy: 0, mastered: false };
 
-  const masteredNow = f.mastered;
-  const exposed = f.answered >= CFG.EXPOSURE_CAP;
+  // Judge the whole LEVEL: sum answers across every chapter sharing this seq, so
+  // a two-chapter month is mastered on its combined record, not one half of it.
+  const level = stats.filter(s => s.seq === frontierSeq);
+  const answered = level.reduce((a, s) => a + s.answered, 0);
+  const correct = level.reduce((a, s) => a + s.correct, 0);
+  const accuracy = answered ? correct / answered : 0;
+  const masteredNow = answered >= CFG.MIN_ANSWERED && accuracy >= CFG.MASTERY_ACCURACY;
+  const exposed = answered >= CFG.EXPOSURE_CAP;
   if (!masteredNow && !exposed) {
-    return { promoted: false, chapter: frontierChapter, accuracy: f.accuracy, answered: f.answered, status: 'learning' };
+    return { promoted: false, chapter: frontierChapter, accuracy, answered, status: 'learning' };
   }
 
-  if (frontierSeq >= chapters.length) {
-    // reached the last chapter — only "complete" once it's genuinely mastered
+  if (frontierSeq >= maxSeq) {
+    // reached the last level — only "complete" once it is genuinely mastered
     if (masteredNow) {
       await exec.query(`UPDATE student_subject_progress SET status='completed', last_promoted_at=now(), modified_at=now() WHERE id=$1`, [progress.id]);
-      return { promoted: true, from: frontierChapter, to: null, accuracy: f.accuracy, status: 'completed' };
+      return { promoted: true, from: frontierChapter, to: null, accuracy, status: 'completed' };
     }
-    return { promoted: false, chapter: frontierChapter, accuracy: f.accuracy, answered: f.answered, status: 'learning' };
+    return { promoted: false, chapter: frontierChapter, accuracy, answered, status: 'learning' };
   }
 
-  const next = chapters[frontierSeq].chapter;
+  // The next level's representative chapter — found by seq, not array position.
+  const next = chapters.find(c => c.seq === frontierSeq + 1)?.chapter || frontierChapter;
   await exec.query(
     `UPDATE student_subject_progress SET frontier_seq=frontier_seq+1, frontier_chapter=$2, last_promoted_at=now(), modified_at=now() WHERE id=$1`,
     [progress.id, next]);
-  return { promoted: true, from: frontierChapter, to: next, accuracy: f.accuracy, mastered: masteredNow, status: 'learning' };
+  return { promoted: true, from: frontierChapter, to: next, accuracy, mastered: masteredNow, status: 'learning' };
 }
 
 /**
@@ -335,13 +425,17 @@ async function currentStreak(studentId, exec = db) {
 /** Compact progress summary for reports / menus. */
 async function progressSummary(studentId, subjectId, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
-  const mastered = Math.max(0, Math.min(progress.frontier_seq, chapters.length) - 1);
+  // Progress is measured in LEVELS (seq), not raw chapters — a level may bundle
+  // several chapters, so counting chapters would understate how far along a
+  // child in the lower grades actually is.
+  const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
+  const mastered = Math.max(0, Math.min(progress.frontier_seq, maxSeq) - 1);
   return {
     frontier_chapter: progress.frontier_chapter,
     frontier_seq: progress.frontier_seq,
-    mastered, total: chapters.length,
+    mastered, total: maxSeq,
     status: progress.status,
-    pct: chapters.length ? Math.round(mastered * 100 / chapters.length) : 0,
+    pct: maxSeq ? Math.round(mastered * 100 / maxSeq) : 0,
   };
 }
 

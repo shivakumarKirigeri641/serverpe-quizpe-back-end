@@ -437,7 +437,7 @@ async function finalize(c, pay, mailCtx = null) {
 ⏰ *Quiz time:* ${M.fmtTime(subId.quiz_time)} daily
 🧾 *Invoice:* ${inv.invoiceNo}
 ${carried ? `\n${carried}\n` : ''}
-Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀`);
+Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀${period.stacked ? '' : `\n\n${M.parentGuidance(names)}`}`);
       await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,

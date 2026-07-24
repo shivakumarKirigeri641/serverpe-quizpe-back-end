@@ -452,6 +452,41 @@ router.get('/reports/:id/download', requireAdmin, async (req, res) => {
 });
 
 /* --------------------------------------------------------------- financial */
+/** The founder's money view: turnover, GST set-aside and withdrawable profit. */
+router.get('/finance/summary', requireAdmin, async (req, res) => {
+  try { ok(res, await require('../admin/finance').summary()); }
+  catch (e) { console.error('[admin] finance summary:', e.message); fail(res, 500, 'Could not load the money view.'); }
+});
+
+router.get('/finance/monthly', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/finance').monthly(clamp(req.query.months, 12, 36)) }); }
+  catch (e) { console.error('[admin] finance monthly:', e.message); fail(res, 500, 'Could not load monthly figures.'); }
+});
+
+/* ---- expenses: what the founder spent, so profit is real not just turnover */
+router.get('/finance/expenses', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/finance').listExpenses(clamp(req.query.limit, 100, 500)),
+                  categories: require('../admin/finance').CATEGORIES }); }
+  catch (e) { console.error('[admin] expenses:', e.message); fail(res, 500, 'Could not load expenses.'); }
+});
+
+router.post('/finance/expenses', requireAdmin, express.json(), async (req, res) => {
+  try {
+    const id = await require('../admin/finance').addExpense({ ...req.body, added_by: req.admin?.sub });
+    ok(res, { id });
+  } catch (e) {
+    // Validation errors are the user's to fix, so surface the message.
+    fail(res, 400, e.message || 'Could not save the expense.');
+  }
+});
+
+router.delete('/finance/expenses/:id', requireAdmin, async (req, res) => {
+  try {
+    const done = await require('../admin/finance').removeExpense(Number(req.params.id));
+    done ? ok(res, { removed: true }) : fail(res, 404, 'Expense not found.');
+  } catch (e) { console.error('[admin] remove expense:', e.message); fail(res, 500, 'Could not remove the expense.'); }
+});
+
 router.get('/finance/invoices', requireAdmin, async (req, res) => {
   const limit = clamp(req.query.limit, 100, 500);
   try {
