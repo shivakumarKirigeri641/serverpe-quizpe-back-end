@@ -442,6 +442,15 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
       });
+
+      // If they subscribed while the quiz window is open, offer a one-tap start
+      // now rather than making them wait for tonight's scheduled nudge.
+      const qw = require('../whatsapp/quizWindow');
+      if (qw.state() === 'open') {
+        await wa.sendButtons(c.whatsapp_session_id, c.mobile_number,
+          "🎯 *Tonight's quiz is ready.* Tap below to begin now — about 5 minutes.",
+          [{ id: 'start_quiz', title: '▶️ Start quiz now' }]);
+      }
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
 
     // Referral payout — told to BOTH sides, because a reward nobody notices
