@@ -252,7 +252,11 @@ function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
       first: `${studentName}'s daily quiz time is *${fmtTime(quizTime)}*, starting tomorrow.\n\n`
         + `*Tonight's quiz is ready right now* — ${detail}\n\n`
         + `It stays open until ${fmtTime(qw.CLOSE_HHMM)} tonight.`,
-      signOff: `👇 *Tap the button below to begin.*`,
+      // No "tap the button below" here — the button is a separate interactive
+      // message (see offerStartQuizIfOpen), which carries its own prompt. A
+      // "tap below" in this plain-text bubble pointed at a button that isn't in
+      // it, which read as broken.
+      signOff: `_Ready whenever ${studentName} is._ 🚀`,
       windowOpen: true,
     };
   }

@@ -197,7 +197,7 @@ async function offerStartQuizIfOpen(session, mobile) {
     const qw = require('./quizWindow');
     if (qw.state() !== 'open') return;
     await wa.sendButtons(session.id, mobile,
-      "🎯 *Tonight's quiz is ready.* Tap below to begin now — it takes about 5 minutes.",
+      "🎯 *Ready to begin?* Tap below to start now — about 5 minutes.",
       [{ id: 'start_quiz', title: '▶️ Start quiz now' }]);
   } catch (e) { console.error('[flow] start-quiz button skipped:', e.message); }
 }
