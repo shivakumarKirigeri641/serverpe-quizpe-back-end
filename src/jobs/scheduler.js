@@ -279,6 +279,36 @@ const fmtTime = (t) => {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
 };
 
+/**
+ * The variable values for a template, in the order its Meta body expects.
+ *
+ * Templates are authored in Meta and each has its own placeholder count, so
+ * this is the single place that maps our row data onto each one. Sending the
+ * wrong number of values is the (#132000) "Number of parameters" error.
+ */
+function templateParams(templateName, row) {
+  const student = row.student_name;
+  const parent = row.parent_name || 'there';
+  const day = String(row.day_number);
+  const subject = row.subject_name;
+  const time = fmtTime(row.quiz_time);
+
+  switch (templateName) {
+    // 4 placeholders: student, day, subject, start time (no parent name)
+    case 'qp_remainder_daily_v3':
+      return [student, day, subject, time];
+
+    // 8 placeholders: the missed-quiz nudge
+    case 'qp_quiz_missed_daily_v1':
+      return [student, parent, fmtDate(row.quiz_date_label), time, subject, day,
+              String(row.pending_questions || 10), `${row.streak || 0} days`];
+
+    // 5 placeholders: parent, student, day, subject, start time (v1 and v2)
+    default:
+      return [parent, student, day, subject, time];
+  }
+}
+
 /** Send one job's batch, gently paced so we stay under Meta's rate limits. */
 async function runJob(kind, templateNames, offsetMin = 0) {
   const tpl = await approvedTemplate(templateNames);
@@ -327,14 +357,11 @@ async function runJob(kind, templateNames, offsetMin = 0) {
         } catch { row.streak = 0; }
       }
 
-      // v1/v2: parent, student, day, subject, start time
-      // missed: student, parent, date, time, subject, day, questions, streak
-      const params = kind === 'quiz_missed'
-        ? [row.student_name, row.parent_name || 'there', fmtDate(row.quiz_date_label),
-           fmtTime(row.quiz_time), row.subject_name, String(row.day_number),
-           String(row.pending_questions || 10), `${row.streak || 0} days`]
-        : [row.parent_name || 'there', row.student_name, String(row.day_number),
-           row.subject_name, fmtTime(row.quiz_time)];
+      // Each Meta template has its OWN placeholder count and order, so the
+      // params must be built per TEMPLATE, not per kind. Sending the wrong
+      // number is the (#132000) error — which is exactly what a 5-param reminder
+      // hit against v3, whose real template has only 4.
+      const params = templateParams(templateName, row);
 
       // claim first, send second — never the other way round
       if (!await claimSend(row, kind, templateName)) {

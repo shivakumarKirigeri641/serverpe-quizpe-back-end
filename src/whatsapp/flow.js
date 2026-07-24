@@ -146,6 +146,24 @@ async function showWelcome(session, mobile) {
 }
 
 async function showMainMenu(session, mobile, ctx) {
+  // Outbound guard against menu flooding. Whatever the cause — a laggy tunnel
+  // making a parent tap twice, a webhook redelivered past the inbound dedupe,
+  // or two server processes both answering — an identical menu sent seconds ago
+  // means this one is a duplicate. Checked in the DB, not memory, so it holds
+  // across processes. The parent still lands on 'main_menu'; they just don't get
+  // the same card seven times.
+  const recent = await db.query(
+    `SELECT 1 FROM whatsapp_messages
+      WHERE mobile_number = $1 AND direction = 'outbound'
+        AND message_type = 'interactive' AND body LIKE '%What would you like to do?%'
+        AND created_at > now() - ($2 || ' seconds')::interval
+      LIMIT 1`, [mobile, String(MENU_DEDUP_SECONDS)]);
+  if (recent.rowCount) {
+    console.log(`[flow] main menu already sent to ${mobile} in the last ${MENU_DEDUP_SECONDS}s — not resending`);
+    await setState(session, 'main_menu', 'menu_deduped');
+    return;
+  }
+
   const rows = buildMainMenu(ctx);
   const greeting = ctx.exists && ctx.parentName ? `Welcome back, *${ctx.parentName}*! 👋` : `You're all set! 🎉`;
   let body = `${greeting}\n\n`;
@@ -388,6 +406,11 @@ const inFlight = new Map();
 
 // How long an identical repeated tap is treated as an accidental double-tap.
 const REPEAT_TAP_SECONDS = Number(process.env.REPEAT_TAP_SECONDS) || 4;
+// The main menu is idempotent for this long: a second identical menu within the
+// window is suppressed. Wider than REPEAT_TAP because real-world lag (a slow
+// tunnel, a busy server) spaces duplicate triggers further apart than a fast
+// double-tap.
+const MENU_DEDUP_SECONDS = Number(process.env.MENU_DEDUP_SECONDS) || 8;
 
 function serialise(mobile, work) {
   const prev = inFlight.get(mobile) || Promise.resolve();
