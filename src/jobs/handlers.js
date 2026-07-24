@@ -16,6 +16,13 @@ const jobs = require('./jobQueue');
 async function dailyReport({ trackerId, sessionId, mobile }) {
   const wa = require('../whatsapp/client');
 
+  // Try the report, but hold any failure rather than throwing straight away —
+  // the feedback ask below is INDEPENDENT of the report and must still go out.
+  // The previous version threw here, which skipped the feedback enqueue, so a
+  // single PDF failure silently cost the parent BOTH the report and the
+  // feedback prompt. (A common cause on a fresh server: the gitignored
+  // src/uploads/ directory is not writable by the node user — EACCES.)
+  let reportError = null;
   try {
     const { generateDailyReport } = require('../pdf/dailyReport');
     const rep = await generateDailyReport(trackerId);
@@ -27,14 +34,17 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
                `_Includes every question, the correct answer and why._`,
     });
   } catch (e) {
-    // The score is already saved, so a report failure must not block the
-    // feedback ask — but it IS worth retrying, so rethrow after asking.
     console.error(`[jobs] report for tracker ${trackerId} failed:`, e.message);
-    throw e;
+    reportError = e;
   }
 
+  // Always queue the feedback ask, whether or not the report went out.
   await jobs.push('feedback_ask', { trackerId, sessionId, mobile },
     { dedupeKey: `feedback:${trackerId}` });
+
+  // Now surface the report failure so the job retries the PDF — the feedback
+  // is safely queued above, so a retry cannot double-send it (deduped).
+  if (reportError) throw reportError;
 }
 
 /** Thank the parent and — when it is actually due — ask for a rating. */

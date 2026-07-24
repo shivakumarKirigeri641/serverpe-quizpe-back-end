@@ -108,6 +108,16 @@ const clearFailures = (key) => attempts.delete(key);
 async function requestCode(rawMobile, ip) {
   assertNotProductionPin();
   const mobile = norm(rawMobile);
+
+  // Reject a non-admin number OUTRIGHT rather than showing the neutral "maybe"
+  // message. The neutral message exists to stop someone probing the login to
+  // learn who the admins are — worth it for a multi-admin system, pointless
+  // here where there is a single known administrator. A clear refusal is what
+  // the founder expects: only the authorised number is accepted.
+  if (!(await adminMobiles()).has(mobile)) {
+    return { error: 'This number is not authorised to access the admin panel.', unauthorized: true };
+  }
+
   const key = `req|${mobile}|${ip}`;
   const wait = throttled(key);
   if (wait) return { error: `Too many requests. Try again in ${Math.ceil(wait / 60)} minute(s).` };
