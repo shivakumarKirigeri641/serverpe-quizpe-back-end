@@ -63,10 +63,12 @@ const SECRET = process.env.ADMIN_JWT_SECRET
 const TOKEN_HOURS = Number(process.env.ADMIN_TOKEN_HOURS) || 2;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
-// naive in-memory throttle; enough for a single-admin panel
+// naive in-memory throttle; enough for a single-admin panel. Loosened and made
+// tunable because there is one known administrator: the throttle only guards
+// against blind OTP guessing, not admin enumeration, so it can be generous.
 const attempts = new Map();               // key -> { n, until }
-const MAX_ATTEMPTS = 5;
-const LOCK_MS = 10 * 60 * 1000;
+const MAX_ATTEMPTS = Number(process.env.ADMIN_MAX_ATTEMPTS) || 15;
+const LOCK_MS = (Number(process.env.ADMIN_LOCK_MIN) || 2) * 60 * 1000;
 
 /**
  * Loud start-up guard. These are the two ways a production panel ends up
@@ -118,10 +120,11 @@ async function requestCode(rawMobile, ip) {
     return { error: 'This number is not authorised to access the admin panel.', unauthorized: true };
   }
 
-  const key = `req|${mobile}|${ip}`;
-  const wait = throttled(key);
-  if (wait) return { error: `Too many requests. Try again in ${Math.ceil(wait / 60)} minute(s).` };
-  noteFailure(key);                     // counts requests, not just failures
+  // Requesting a code is no longer counted toward the lockout — for a single
+  // known admin the only real cost of a repeat request is an SMS credit, and
+  // otp.request already enforces a short resend cooldown for that. So asking
+  // for a code (even a few times) never locks the panel; only wrong-code
+  // guesses at login do.
   return otp.request(mobile, [...await adminMobiles()], ip);
 }
 
