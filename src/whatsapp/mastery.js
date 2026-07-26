@@ -37,8 +37,8 @@ const CFG = {
 
   MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
   MAX_PER_CONCEPT: 3,         // most questions testing one SKILL in a single quiz
-  BASE_QUESTIONS: 10,         // doing well -> standard quiz
-  MID_QUESTIONS: 15,          // wobbling  -> more practice
+  BASE_QUESTIONS: 15,         // doing well -> standard quiz
+  MID_QUESTIONS: 18,          // wobbling  -> more practice
   MAX_QUESTIONS: 20,          // struggling -> most practice (hard ceiling)
 };
 

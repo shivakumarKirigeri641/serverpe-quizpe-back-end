@@ -108,7 +108,7 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
                          AND h.answered_option IS NULL),
                      (SELECT t3.question_count FROM quizpe_tracker t3
                        WHERE t3.student_id = st.id AND t3.quiz_date = CURRENT_DATE LIMIT 1),
-                     10) AS pending_questions,
+                     15) AS pending_questions,
             w.id AS session_id
        FROM parents_quizpe_subscriptions s
        JOIN parents  p  ON p.id = s.parent_id AND p.is_active
@@ -301,7 +301,7 @@ function templateParams(templateName, row) {
     // 8 placeholders: the missed-quiz nudge
     case 'qp_quiz_missed_daily_v1':
       return [student, parent, fmtDate(row.quiz_date_label), time, subject, day,
-              String(row.pending_questions || 10), `${row.streak || 0} days`];
+              String(row.pending_questions || 15), `${row.streak || 0} days`];
 
     // 5 placeholders: parent, student, day, subject, start time (v1 and v2)
     default:

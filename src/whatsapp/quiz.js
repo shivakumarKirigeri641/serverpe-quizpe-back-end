@@ -13,7 +13,7 @@ const wa = require('./client');
 const mastery = require('./mastery');
 const jobs = require('../jobs/jobQueue');
 
-const QUESTIONS_PER_QUIZ = 10;   // default; per-quiz count lives on quizpe_tracker.question_count
+const QUESTIONS_PER_QUIZ = 15;   // default; per-quiz count lives on quizpe_tracker.question_count
 const LETTERS = ['A', 'B', 'C', 'D'];
 const BASE_SUBJECT = 'MATHS';   // included in every plan; extras come from add-ons
 

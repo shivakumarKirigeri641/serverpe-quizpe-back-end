@@ -128,7 +128,8 @@ function trialStarted({ parent, children, plan, ctx }) {
         ]) +
         section('Children', childRows(children)) +
         section('Plan', [
-          ['Plan', plan?.name], ['Duration', plan?.duration ? `${plan.duration} days` : null],
+          ['Plan', plan?.name], ['Price', plan?.price != null ? `₹${plan.price}` : 'Free (₹0)'],
+          ['Duration', plan?.duration ? `${plan.duration} days` : null],
           ['Starts', plan?.start], ['Ends', plan?.end],
           ['Quiz time', plan?.quizTime], ['Reminder', plan?.reminderTime],
         ]) +
