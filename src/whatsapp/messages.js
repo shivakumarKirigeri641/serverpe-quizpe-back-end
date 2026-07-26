@@ -45,7 +45,7 @@ async function welcome() {
 
 India's simplest daily learning habit for school kids, right here on WhatsApp. No app to download.
 
-📚 A fresh *10-question quiz* every day
+📚 A fresh *15-question quiz* every day
 ✅ Instant answers with kid-friendly explanations
 📊 Weekly progress reports for parents
 
@@ -77,7 +77,7 @@ async function trialTerms() {
 
 *${b.product_name}* — _${b.product_tagline}_
 
-✅ Daily 10-question quiz, ${plan.duration} days
+✅ Daily 15-question quiz, ${plan.duration} days
 ✅ Answers & explanations after each quiz
 ✅ Daily summary & weekly progress PDFs
 ✅ 1 child · Mathematics · CBSE/ICSE/KSEAB
@@ -149,7 +149,7 @@ function quizSchedule(ctx, students) {
 
 ${students.map(s => `👦 *${s.student_name}* — Mathematics · ${s.board_code} ${s.grade_name}`).join('\n')}
 
-You'll get a message with a *Start Quiz* button each evening. 10 questions, about 5 minutes. 🚀`;
+You'll get a message with a *Start Quiz* button each evening. 15 questions, under 10 minutes. 🚀`;
 }
 
 /**
@@ -232,7 +232,7 @@ function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
   const qw = require('./quizWindow');
   const nowMin = qw.toMin(qw.nowHHMM());
   const slotMin = qw.toMin(String(quizTime).slice(0, 5));
-  const detail = `10 fun questions right here on WhatsApp — matched to the ${boardCode} ${gradeName} `
+  const detail = `15 fun questions right here on WhatsApp — matched to the ${boardCode} ${gradeName} `
     + `syllabus for this month. Every answer comes with a simple explanation, so learning happens `
     + `even from mistakes. 💡`;
 
@@ -252,7 +252,11 @@ function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
       first: `${studentName}'s daily quiz time is *${fmtTime(quizTime)}*, starting tomorrow.\n\n`
         + `*Tonight's quiz is ready right now* — ${detail}\n\n`
         + `It stays open until ${fmtTime(qw.CLOSE_HHMM)} tonight.`,
-      signOff: `👇 *Tap the button below to begin.*`,
+      // No "tap the button below" here — the button is a separate interactive
+      // message (see offerStartQuizIfOpen), which carries its own prompt. A
+      // "tap below" in this plain-text bubble pointed at a button that isn't in
+      // it, which read as broken.
+      signOff: `_Ready whenever ${studentName} is._ 🚀`,
       windowOpen: true,
     };
   }
