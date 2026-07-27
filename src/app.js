@@ -198,6 +198,9 @@ app.use('/legal', legalRouter);
 // Aggregate-only figures for the parent-facing website. Never per-person data.
 app.use('/public', publicRouter);
 
+// First-party visitor beacons (page views + WhatsApp-button clicks).
+app.use('/public', require('./routers/trackRouter'));
+
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
@@ -235,6 +238,10 @@ require('./pdf/reportNumber').ensureSequences()
 
 require('./pdf/invoice').ensureInvoiceSequence()
   .catch((e) => console.error('[startup] invoice sequence failed:', e.message));
+
+// Visitor-tracking table + default setting (idempotent).
+require('./tracking/visits').ensureSchema()
+  .catch((e) => console.error('[startup] visits schema failed:', e.message));
 
 // Durable background worker (report rendering, feedback asks). Survives a
 // restart and is safe to run from several processes at once.

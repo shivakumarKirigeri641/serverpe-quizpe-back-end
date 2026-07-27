@@ -11,10 +11,13 @@
  */
 
 const db = require('../database/connectDB');
+const { LAUNCH_DATE } = require('../config/launch');
 
 const TZ = 'Asia/Kolkata';
 /** A date expression in IST, for grouping and comparisons. */
 const IST_DATE = (col) => `(${col} AT TIME ZONE '${TZ}')::date`;
+/** No chart shows anything before real launch — pre-launch is test noise. */
+const START = (days) => `GREATEST(CURRENT_DATE - (${days}::int - 1), DATE '${LAUNCH_DATE}')`;
 
 /** Percentage change, guarding against divide-by-zero. */
 const delta = (now, was) => (was === 0 ? (now === 0 ? 0 : 100) : +(((now - was) / was) * 100).toFixed(1));
@@ -46,7 +49,7 @@ async function overview() {
 async function daily(days = 30) {
   const { rows } = await db.query(`
     WITH span AS (
-      SELECT generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day')::date AS d
+      SELECT generate_series(${START('$1')}, CURRENT_DATE, '1 day')::date AS d
     )
     SELECT span.d::text AS date,
       COALESCE(q.taken, 0)          AS quizzes_taken,
@@ -217,7 +220,7 @@ async function engagement() {
 async function participationDaily(days = 30) {
   const { rows } = await db.query(`
     WITH span AS (
-      SELECT generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day')::date AS d
+      SELECT generate_series(${START('$1')}, CURRENT_DATE, '1 day')::date AS d
     ),
     expected AS (
       SELECT span.d, COUNT(DISTINCT st.id)::int AS n
