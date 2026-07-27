@@ -33,6 +33,26 @@ const { LAUNCH_DATE, TZ } = require('../config/launch');
 
 const BOT_RE = /bot|crawl|spider|slurp|bing|google|yandex|baidu|duckduck|facebookexternalhit|whatsapp|telegram|preview|monitor|curl|wget|python|node-fetch|axios|headless|lighthouse|pingdom|uptime/i;
 
+/** Lightweight user-agent breakdown — no dependency, covers the common cases. */
+function deviceOf(ua = '') {
+  const s = String(ua || '');
+  const os = /Windows NT/i.test(s) ? 'Windows'
+    : /iPhone|iPad|iPod/i.test(s) ? 'iOS'
+    : /Android/i.test(s) ? 'Android'
+    : /Mac OS X/i.test(s) ? 'macOS'
+    : /CrOS/i.test(s) ? 'ChromeOS'
+    : /Linux/i.test(s) ? 'Linux' : 'Unknown OS';
+  const browser = /Edg\//i.test(s) ? 'Edge'
+    : /OPR\/|Opera/i.test(s) ? 'Opera'
+    : /SamsungBrowser/i.test(s) ? 'Samsung Internet'
+    : /Chrome\//i.test(s) ? 'Chrome'
+    : /Firefox\//i.test(s) ? 'Firefox'
+    : /Safari\//i.test(s) ? 'Safari' : 'Unknown browser';
+  const type = /iPad|Tablet/i.test(s) ? 'Tablet'
+    : /Mobi|Android|iPhone|iPod/i.test(s) ? 'Mobile' : 'Desktop';
+  return { os, browser, type, summary: `${type} · ${os} · ${browser}` };
+}
+
 /** Floor every analytics query at the real launch date (IST midnight). */
 const LAUNCH_FLOOR = `(TIMESTAMP '${LAUNCH_DATE} 00:00:00' AT TIME ZONE '${TZ}')`;
 const IST_TS = (c) => `to_char(${c} AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI')`;
@@ -101,7 +121,7 @@ async function record(req, { kind, path, referrer, sid }) {
   const { rows: [row] } = await db.query(
     `INSERT INTO site_visits (kind, path, referrer, country, region, city, ip, user_agent, is_bot, session_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     RETURNING id, kind, path, referrer, country, city, is_bot, session_id, ${IST_TS('created_at')} AS at_ist`,
+     RETURNING id, kind, path, referrer, country, region, city, ip, user_agent, is_bot, session_id, ${IST_TS('created_at')} AS at_ist`,
     [kind === 'wa_click' ? 'wa_click' : 'view', (path || '/').slice(0, 300),
      (referrer || '').slice(0, 300) || null, country, geo?.region || null,
      geo?.city || null, ip || null, ua, isBot, (sid || '').slice(0, 64) || null]);
@@ -119,19 +139,34 @@ async function notifyWaClick(row) {
       [row.session_id]);
     if (dup.n > 1) return; // already alerted for this visitor recently
   }
-  const where = [row.city, row.country].filter(Boolean).join(', ') || 'unknown location';
+  const dev = deviceOf(row.user_agent);
+  const where = [row.city, row.region, row.country].filter(Boolean).join(', ') || 'unknown';
+  const rowHtml = (label, value) =>
+    `<tr><td style="padding:5px 16px 5px 0;color:#5c716a;white-space:nowrap;vertical-align:top">${label}</td>` +
+    `<td style="padding:5px 0;color:#15332b"><b>${value || '—'}</b></td></tr>`;
   await sendAdminMail({
     subject: '🔔 QuizPe — someone tapped "Start on WhatsApp"',
     html: `
-      <div style="font-family:Segoe UI,Arial,sans-serif;color:#15332b">
-        <h2 style="color:#075e54;margin:0 0 8px">A visitor just clicked the WhatsApp button</h2>
-        <p style="margin:0 0 12px;color:#5c716a">They may be about to message you — keep an eye on WhatsApp.</p>
-        <table style="border-collapse:collapse;font-size:14px">
-          <tr><td style="padding:3px 12px 3px 0;color:#5c716a">When</td><td><b>${row.at_ist} IST</b></td></tr>
-          <tr><td style="padding:3px 12px 3px 0;color:#5c716a">From</td><td>${where}</td></tr>
-          <tr><td style="padding:3px 12px 3px 0;color:#5c716a">Page</td><td>${row.path || '/'}</td></tr>
-          <tr><td style="padding:3px 12px 3px 0;color:#5c716a">Came via</td><td>${row.referrer || 'direct'}</td></tr>
+      <div style="font-family:Segoe UI,Arial,sans-serif;color:#15332b;max-width:560px">
+        <h2 style="color:#075e54;margin:0 0 6px">A visitor just clicked the WhatsApp button</h2>
+        <p style="margin:0 0 14px;color:#5c716a">They may be about to message you — keep an eye on WhatsApp.</p>
+        <table style="border-collapse:collapse;font-size:14px;width:100%">
+          ${rowHtml('When', `${row.at_ist} IST`)}
+          ${rowHtml('Device', dev.summary)}
+          ${rowHtml('Browser / OS', `${dev.browser} on ${dev.os}`)}
+          ${rowHtml('IP address', row.ip)}
+          ${rowHtml('Location', where)}
+          ${rowHtml('Page', row.path || '/')}
+          ${rowHtml('Came via', row.referrer || 'direct')}
+          ${rowHtml('Visitor ID', row.session_id)}
         </table>
+        <p style="margin:14px 0 4px;color:#5c716a;font-size:12px">
+          Full user-agent:<br><span style="color:#8a9a94;word-break:break-all">${row.user_agent || '—'}</span>
+        </p>
+        <p style="margin:12px 0 0;color:#8a9a94;font-size:12px;line-height:1.5">
+          Website visitors are anonymous — there is no name until they message you. When their WhatsApp
+          chat arrives, the <b>Visitor ID</b> above lets you match it to this click.
+        </p>
       </div>`,
   });
 }
@@ -208,11 +243,12 @@ async function analytics() {
 async function recent(limit = 60) {
   await ensureSchema();
   const { rows } = await db.query(
-    `SELECT id, kind, path, referrer, country, city, session_id, ${IST_TS('created_at')} AS at_ist
+    `SELECT id, kind, path, referrer, country, region, city, ip, user_agent, session_id,
+            ${IST_TS('created_at')} AS at_ist
        FROM site_visits
       WHERE NOT is_bot AND created_at >= ${LAUNCH_FLOOR}
       ORDER BY id DESC LIMIT $1`, [Math.min(200, Number(limit) || 60)]);
-  return rows;
+  return rows.map((r) => ({ ...r, device: deviceOf(r.user_agent).summary }));
 }
 
 module.exports = { ensureSchema, record, analytics, recent, inboxOn, setInboxOn, clientIp };
