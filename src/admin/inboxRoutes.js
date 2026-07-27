@@ -20,7 +20,7 @@ const ok = (res, data) => res.json({ success: true, ...data });
 const fail = (res, code, error) => res.status(code).json({ success: false, error });
 
 const TZ = 'Asia/Kolkata';
-const IST = (c) => `to_char(${c} AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI')`;
+const IST = (c) => `to_char(${c} AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI')`;
 
 /* --------------------------------------------------------------- enquiries */
 router.get('/enquiries', requireAdmin, async (req, res) => {

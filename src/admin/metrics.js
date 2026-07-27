@@ -14,7 +14,7 @@ const db = require('../database/connectDB');
 
 const TZ = 'Asia/Kolkata';
 /** A date expression in IST, for grouping and comparisons. */
-const IST_DATE = (col) => `(${col} AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date`;
+const IST_DATE = (col) => `(${col} AT TIME ZONE '${TZ}')::date`;
 
 /** Percentage change, guarding against divide-by-zero. */
 const delta = (now, was) => (was === 0 ? (now === 0 ? 0 : 100) : +(((now - was) / was) * 100).toFixed(1));
@@ -161,7 +161,7 @@ async function enrolmentFeed(limit = 50) {
     SELECT s.id, p.parent_name, p.parent_mobile_number, p.state_code,
            pl.plan_code, pl.plan_name, pl.is_trial, pl.price::numeric,
            s.plan_start_date::text, s.plan_end_date::text,
-           to_char(s.created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}', 'DD Mon HH24:MI') AS at,
+           to_char(s.created_at AT TIME ZONE '${TZ}', 'DD Mon HH24:MI') AS at,
            s.created_at,
            (SELECT COUNT(*)::int FROM students st WHERE st.parent_id = p.id AND st.is_active) AS children,
            (SELECT string_agg(st.student_name || ' (' || g.grade_name || ')', ', ')
