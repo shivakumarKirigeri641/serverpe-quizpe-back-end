@@ -3,18 +3,20 @@
  * ---------------------------------------------------------------------------
  * Parent-to-parent referral.
  *
- * WHY THE REWARD LANDS ON PAYMENT, NOT ON SIGNUP
+ * WHY THE REWARD LANDS ON THE FIRST QUIZ, NOT ON SIGNUP
  *
  * The trial is free and needs nothing but a WhatsApp number, so rewarding at
- * signup would pay out for twenty throwaway numbers. The reward is therefore
- * credited when the referred parent makes their FIRST PAYMENT — real money,
- * and hard to fake at any scale worth the trouble.
+ * bare signup would pay out for twenty throwaway numbers. The reward is instead
+ * credited once the referred parent's child COMPLETES THEIR FIRST QUIZ — proof
+ * of a real user (a fake number will never sit down and finish a quiz), while
+ * still landing during the free trial so both parents get extra free days fast.
+ * The same payout also runs on first payment as a fallback.
  *
  * The referrer is still told the moment someone joins through their link, so
  * the loop stays motivating without being exploitable:
  *
- *     joined    "Priya joined using your link!"        (no days yet)
- *     paid      "Priya subscribed — 7 free days added" (days to BOTH)
+ *     joined       "Priya joined using your link!"           (no days yet)
+ *     first quiz   "Priya started — 7 free days added" (days to BOTH)
  *
  * Rewards are paid in DAYS, never cash or a discount. Days cost delivery
  * rather than margin, they deepen the habit on both sides, and they extend the
@@ -118,13 +120,14 @@ async function capture(refereeId, code, client = db) {
 }
 
 /**
- * Pays out a captured referral once the referee has actually paid.
+ * Pays out a captured referral. Called on the referee's first completed quiz
+ * (the normal case) and on first payment (fallback) — whichever happens first.
  *
- * Idempotent — only a row still 'pending' is ever paid, so a retried payment
- * webhook cannot hand out the days twice. Returns null when there is nothing
- * to pay, which is the common case.
+ * Idempotent — only a row still 'pending' is ever paid, so a repeat quiz or a
+ * retried payment webhook can never hand out the days twice. Returns null when
+ * there is nothing to pay, which is the common case.
  */
-async function creditOnPayment(refereeId, client = db) {
+async function credit(refereeId, client = db) {
   const s = await settings(client);
   if (!s.enabled) return null;
 
@@ -224,6 +227,10 @@ function parseCode(text) {
 }
 
 module.exports = {
-  settings, codeFor, ownerOf, capture, creditOnPayment, extendPlan,
+  settings, codeFor, ownerOf, capture, extendPlan,
   summary, shareLink, parseCode,
+  // One trigger-agnostic payout, exposed under both names for the two callers.
+  credit,
+  creditOnFirstQuiz: credit,   // referee's first completed quiz (normal path)
+  creditOnPayment: credit,     // first payment (fallback)
 };

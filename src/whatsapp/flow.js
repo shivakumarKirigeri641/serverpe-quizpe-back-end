@@ -719,8 +719,17 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     case 'welcome':
       if (id === 'agree_terms') {
         await recordConsent(session, session.context.terms_policy_id, mobile, msg.id, ctx.parentId);
-        await setState(session, 'main_menu', 'agreed_terms');
-        await showMainMenu(session, mobile, ctx);
+        // A first-time parent who can start the free trial goes STRAIGHT into
+        // signup (trial terms -> child form) instead of the menu — one fewer
+        // step to the thing they came for. The trial-terms consent is still
+        // captured. Everyone else (already enrolled, trial already used, a
+        // returning parent) lands on the menu exactly as before.
+        if (ctx.canStartTrial) {
+          await showTrialTerms(session, mobile);
+        } else {
+          await setState(session, 'main_menu', 'agreed_terms');
+          await showMainMenu(session, mobile, ctx);
+        }
       } else {
         await wa.sendText(session.id, mobile, 'Please tap *✅ Agree & Continue* to get started.');
       }
