@@ -389,14 +389,19 @@ async function finalize(c, pay, mailCtx = null) {
       [parentId, c.plan_id, period.startDate, period.endDate,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
-    // Referrer reward: this payment is a renewal (or first paid plan) for the
-    // PAYER, so release ONE of their banked referral bonuses onto the plan just
-    // created above ("+7 per renewal"). Idempotent and inside the transaction,
-    // so the days it grants cannot survive a rolled-back payment.
-    let referral = null;
-    try {
-      referral = await require('../referrals/engine').releaseBankedOnRenewal(parentId, client);
-    } catch (e) { console.error('[pay] referral release skipped:', e.message); }
+    // Referral days granted on this payment, both funded by the payment itself:
+    //   • releaseBankedOnRenewal — the PAYER as a REFERRER: release one banked
+    //     referral bonus onto the new plan ("+7 per renewal").
+    //   • creditRefereeOnFirstPayment — the PAYER as a FRIEND who was referred:
+    //     a one-time +7 welcome bonus on their first paid plan.
+    // Both idempotent and inside the transaction, so the days cannot survive a
+    // rolled-back payment. A parent can legitimately receive both.
+    const engine = require('../referrals/engine');
+    let referral = null, refereeBonus = null;
+    try { referral = await engine.releaseBankedOnRenewal(parentId, client); }
+    catch (e) { console.error('[pay] referral release skipped:', e.message); }
+    try { refereeBonus = await engine.creditRefereeOnFirstPayment(parentId, client); }
+    catch (e) { console.error('[pay] referee bonus skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -453,22 +458,33 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
       }
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
 
-    // Referrer reward release — the PAYER is the referrer, and they are in-window
-    // right now (they just paid), so a plain message reaches them.
-    if (referral && referral.referrerNewEnd) {
-      try {
-        const wa = require('../whatsapp/client');
-        const M = require('../whatsapp/messages');
+    // Referral notices — the PAYER is in-window right now (they just paid), so a
+    // plain message reaches them. Both are best-effort and never block the flow.
+    try {
+      const wa = require('../whatsapp/client');
+      const M = require('../whatsapp/messages');
+
+      // As a REFERRED friend: their one-time welcome bonus on this first plan.
+      if (refereeBonus && refereeBonus.refereeNewEnd) {
+        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎁 *Referral welcome bonus — +${refereeBonus.days} free days!*
+
+Because you joined through a friend's invite, we've added *${refereeBonus.days} days* to your plan.
+📅 Now valid till *${M.fmtDate(refereeBonus.refereeNewEnd)}*`);
+      }
+
+      // As a REFERRER: one of their banked bonuses released onto this renewal.
+      if (referral && referral.referrerNewEnd) {
         const more = referral.remainingBanked > 0
           ? `\n\nYou still have *${referral.remainingBanked}* banked — one more releases at your next renewal.`
           : '';
         await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎁 *Referral bonus added — +${referral.days} free days!*
+`🎉 *Referral bonus added — +${referral.days} free days!*
 
 A friend you invited earlier means we've added *${referral.days} days* to this renewal.
 📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*${more}`);
-      } catch (e) { console.error('[pay] referral notice failed:', e.message); }
-    }
+      }
+    } catch (e) { console.error('[pay] referral notice failed:', e.message); }
 
     // Operator alert. Queued after COMMIT and never awaited for success, so a
     // mail problem cannot undo a payment the customer has already made.
