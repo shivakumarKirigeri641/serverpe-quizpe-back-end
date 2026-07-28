@@ -243,6 +243,10 @@ require('./pdf/invoice').ensureInvoiceSequence()
 require('./tracking/visits').ensureSchema()
   .catch((e) => console.error('[startup] visits schema failed:', e.message));
 
+// Referral model columns (qualified_at / banked / reward_kind), idempotent.
+require('./referrals/engine').ensureSchema()
+  .catch((e) => console.error('[startup] referral schema failed:', e.message));
+
 // Durable background worker (report rendering, feedback asks). Survives a
 // restart and is safe to run from several processes at once.
 require('./jobs/handlers').registerAll();

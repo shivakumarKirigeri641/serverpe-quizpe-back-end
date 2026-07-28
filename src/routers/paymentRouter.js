@@ -389,14 +389,14 @@ async function finalize(c, pay, mailCtx = null) {
       [parentId, c.plan_id, period.startDate, period.endDate,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
-    // If this parent arrived through someone's referral link, this is the
-    // moment it pays out — real money has changed hands. Idempotent, so a
-    // replayed webhook cannot hand out the days twice. Inside the transaction
-    // because the days it grants must not survive a rolled-back payment.
+    // Referrer reward: this payment is a renewal (or first paid plan) for the
+    // PAYER, so release ONE of their banked referral bonuses onto the plan just
+    // created above ("+7 per renewal"). Idempotent and inside the transaction,
+    // so the days it grants cannot survive a rolled-back payment.
     let referral = null;
     try {
-      referral = await require('../referrals/engine').creditOnPayment(parentId, client);
-    } catch (e) { console.error('[pay] referral credit skipped:', e.message); }
+      referral = await require('../referrals/engine').releaseBankedOnRenewal(parentId, client);
+    } catch (e) { console.error('[pay] referral release skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -453,34 +453,20 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
       }
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
 
-    // Referral payout — told to BOTH sides, because a reward nobody notices
-    // buys no goodwill and prompts no further sharing.
-    if (referral) {
+    // Referrer reward release — the PAYER is the referrer, and they are in-window
+    // right now (they just paid), so a plain message reaches them.
+    if (referral && referral.referrerNewEnd) {
       try {
         const wa = require('../whatsapp/client');
         const M = require('../whatsapp/messages');
-        if (referral.refereeNewEnd) {
-          await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎁 *Your invite bonus: +${referral.days} free days!*
+        const more = referral.remainingBanked > 0
+          ? `\n\nYou still have *${referral.remainingBanked}* banked — one more releases at your next renewal.`
+          : '';
+        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎁 *Referral bonus added — +${referral.days} free days!*
 
-Because you joined through a friend's link, we've added *${referral.days} days* to your plan.
-📅 Now valid till *${M.fmtDate(referral.refereeNewEnd)}*`);
-        }
-        const ref = (await db.query(
-          `SELECT p.parent_mobile_number AS mobile, p.parent_name AS name,
-                  (SELECT id FROM whatsapp_sessions w
-                    WHERE w.mobile_number = p.parent_mobile_number AND w.is_active
-                    ORDER BY w.id DESC LIMIT 1) AS session_id
-             FROM parents p WHERE p.id = $1`, [referral.referrerId])).rows[0];
-        if (ref && referral.referrerNewEnd) {
-          await wa.sendText(ref.session_id, ref.mobile,
-`🎉 *Someone you invited just subscribed!*
-
-We've added *${referral.days} free days* to your plan as a thank-you.
-📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*
-
-You've earned free days from *${referral.referrerRewardedCount}* friend${referral.referrerRewardedCount === 1 ? '' : 's'} so far. Keep sharing! 💚`);
-        }
+A friend you invited earlier means we've added *${referral.days} days* to this renewal.
+📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*${more}`);
       } catch (e) { console.error('[pay] referral notice failed:', e.message); }
     }
 

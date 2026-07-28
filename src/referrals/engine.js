@@ -3,20 +3,21 @@
  * ---------------------------------------------------------------------------
  * Parent-to-parent referral.
  *
- * WHY THE REWARD LANDS ON THE FIRST QUIZ, NOT ON SIGNUP
+ * THE MODEL — referrer-only, self-limiting, revenue-safe
  *
- * The trial is free and needs nothing but a WhatsApp number, so rewarding at
- * bare signup would pay out for twenty throwaway numbers. The reward is instead
- * credited once the referred parent's child COMPLETES THEIR FIRST QUIZ — proof
- * of a real user (a fake number will never sit down and finish a quiz), while
- * still landing during the free trial so both parents get extra free days fast.
- * The same payout also runs on first payment as a fallback.
+ * The referred friend gets NOTHING extra — just the normal 7-day trial. Only
+ * the REFERRER earns, and only from real users: a referral "qualifies" when the
+ * friend COMPLETES THEIR FIRST QUIZ (a throwaway number never will).
  *
- * The referrer is still told the moment someone joins through their link, so
- * the loop stays motivating without being exploitable:
+ *   • The FIRST qualified referral in the referrer's current period (trial or
+ *     paid) pays +7 immediately, onto their current plan.
+ *   • Any FURTHER qualified referrals in the same period are BANKED, and release
+ *     +7 each — one at a time — at the referrer's next RENEWALS.
  *
- *     joined       "Priya joined using your link!"           (no days yet)
- *     first quiz   "Priya started — 7 free days added" (days to BOTH)
+ * So a period can only stretch once for free; every extra referral rewards the
+ * referrer at a future renewal. Because renewing means paying, the scheme is
+ * funded by the referrer's own subscription and can never quietly run the
+ * platform on free days. A per-referrer cap bounds the total either way.
  *
  * Rewards are paid in DAYS, never cash or a discount. Days cost delivery
  * rather than margin, they deepen the habit on both sides, and they extend the
@@ -120,53 +121,123 @@ async function capture(refereeId, code, client = db) {
 }
 
 /**
- * Pays out a captured referral. Called on the referee's first completed quiz
- * (the normal case) and on first payment (fallback) — whichever happens first.
+ * Additive, idempotent schema for the referrer-only model. Safe to run at every
+ * boot: ADD COLUMN IF NOT EXISTS never rewrites the table for a defaulted
+ * boolean / nullable column, so it cannot lock a live table.
  *
- * Idempotent — only a row still 'pending' is ever paid, so a repeat quiz or a
- * retried payment webhook can never hand out the days twice. Returns null when
- * there is nothing to pay, which is the common case.
+ *   qualified_at  when the friend completed their first quiz (NULL until then)
+ *   banked        qualified but awaiting a referrer renewal to release
+ *   reward_kind   'immediate' (1st of a period) | 'renewal' (released later)
  */
-async function credit(refereeId, client = db) {
+async function ensureSchema(client = db) {
+  await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS qualified_at timestamptz`);
+  await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS banked boolean NOT NULL DEFAULT false`);
+  await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_kind text`);
+}
+
+/** Total already-rewarded referrals for a referrer (the per-referrer cap). */
+async function rewardedCount(referrerId, client) {
+  const { rows: [{ n }] } = await client.query(
+    `SELECT COUNT(*)::int n FROM referrals WHERE referrer_id=$1 AND status='rewarded'`, [referrerId]);
+  return n;
+}
+
+/** The start of the referrer's current cover, or null if they have none live. */
+async function currentPeriodStart(parentId, client) {
+  const { rows } = await client.query(
+    `SELECT plan_start_date FROM parents_quizpe_subscriptions
+      WHERE parent_id=$1 AND is_active AND plan_end_date >= CURRENT_DATE
+      ORDER BY plan_end_date DESC LIMIT 1`, [parentId]);
+  return rows[0] ? rows[0].plan_start_date : null;
+}
+
+/**
+ * Called when a referred friend completes their FIRST quiz. Qualifies their
+ * referral and rewards the REFERRER — immediately if this is the first
+ * qualified referral of the referrer's current period, otherwise banked for a
+ * future renewal. The friend gets nothing (they already have their trial).
+ *
+ * Idempotent: only a still-unqualified referral is ever acted on.
+ */
+async function qualifyOnFirstQuiz(refereeId, client = db) {
   const s = await settings(client);
   if (!s.enabled) return null;
 
-  // FOR UPDATE so two concurrent verifies cannot both see it as pending.
   const { rows } = await client.query(
-    `SELECT r.* FROM referrals r
-      WHERE r.referee_id = $1 AND r.status = 'pending' FOR UPDATE`, [refereeId]);
+    `SELECT * FROM referrals
+      WHERE referee_id=$1 AND status='pending' AND qualified_at IS NULL
+      FOR UPDATE`, [refereeId]);
   const ref = rows[0];
   if (!ref) return null;
 
-  // Cap the payout per referrer. Without it one person with a large group can
-  // earn unbounded free service, and unbounded is not a plan.
-  const { rows: [{ n }] } = await client.query(
-    `SELECT COUNT(*)::int n FROM referrals
-      WHERE referrer_id = $1 AND status = 'rewarded'`, [ref.referrer_id]);
-  if (n >= s.maxRewarded) {
+  await client.query(`UPDATE referrals SET qualified_at=now() WHERE id=$1`, [ref.id]);
+
+  if (await rewardedCount(ref.referrer_id, client) >= s.maxRewarded) {
     await client.query(
-      `UPDATE referrals SET status='blocked', blocked_reason='referrer_cap_reached'
-        WHERE id = $1`, [ref.id]);
+      `UPDATE referrals SET status='blocked', banked=false, blocked_reason='referrer_cap_reached' WHERE id=$1`, [ref.id]);
     return null;
   }
 
+  const periodStart = await currentPeriodStart(ref.referrer_id, client);
+  let immediateUsed = true;
+  if (periodStart) {
+    const { rows: [{ m }] } = await client.query(
+      `SELECT COUNT(*)::int m FROM referrals
+        WHERE referrer_id=$1 AND reward_kind='immediate' AND rewarded_at >= $2::date`,
+      [ref.referrer_id, periodStart]);
+    immediateUsed = m > 0;
+  }
+
+  // Immediate only if the referrer has a live plan AND has not already taken
+  // the one immediate bonus this period. Otherwise bank it for a renewal.
+  if (periodStart && !immediateUsed) {
+    const referrerNewEnd = await extendPlan(ref.referrer_id, s.rewardDays, client);
+    await client.query(
+      `UPDATE referrals SET status='rewarded', reward_kind='immediate', reward_days=$2, rewarded_at=now() WHERE id=$1`,
+      [ref.id, s.rewardDays]);
+    return { referrerId: ref.referrer_id, days: s.rewardDays, kind: 'immediate',
+             referrerNewEnd, referrerRewardedCount: (await rewardedCount(ref.referrer_id, client)) };
+  }
+
+  await client.query(`UPDATE referrals SET banked=true WHERE id=$1`, [ref.id]);
+  return { referrerId: ref.referrer_id, days: s.rewardDays, kind: 'banked' };
+}
+
+/**
+ * Called when a referrer pays (a renewal or their first paid plan). Releases
+ * ONE banked referral onto the freshly-created plan — "+7 per renewal". Returns
+ * null when they have nothing banked, which is the common case.
+ *
+ * Must be called AFTER the new subscription row exists, so extendPlan lands the
+ * days on the new period.
+ */
+async function releaseBankedOnRenewal(referrerId, client = db) {
+  const s = await settings(client);
+  if (!s.enabled) return null;
+
+  const { rows } = await client.query(
+    `SELECT * FROM referrals
+      WHERE referrer_id=$1 AND banked=true AND status='pending'
+      ORDER BY qualified_at NULLS LAST, id
+      LIMIT 1 FOR UPDATE`, [referrerId]);
+  const ref = rows[0];
+  if (!ref) return null;
+
+  if (await rewardedCount(referrerId, client) >= s.maxRewarded) {
+    await client.query(
+      `UPDATE referrals SET status='blocked', banked=false, blocked_reason='referrer_cap_reached' WHERE id=$1`, [ref.id]);
+    return null;
+  }
+
+  const referrerNewEnd = await extendPlan(referrerId, s.rewardDays, client);
   await client.query(
-    `UPDATE referrals SET status='rewarded', reward_days=$2, rewarded_at=now()
-      WHERE id = $1`, [ref.id, s.rewardDays]);
+    `UPDATE referrals SET status='rewarded', reward_kind='renewal', banked=false, reward_days=$2, rewarded_at=now() WHERE id=$1`,
+    [ref.id, s.rewardDays]);
 
-  // Extend both. extendPlan is a no-op for anyone with no active plan, so a
-  // referrer whose own plan has lapsed simply gets nothing rather than an
-  // orphaned subscription row appearing out of nowhere.
-  const referrerNewEnd = await extendPlan(ref.referrer_id, s.rewardDays, client);
-  const refereeNewEnd = await extendPlan(refereeId, s.rewardDays, client);
-
-  return {
-    referrerId: ref.referrer_id,
-    days: s.rewardDays,
-    referrerNewEnd,
-    refereeNewEnd,
-    referrerRewardedCount: n + 1,
-  };
+  const { rows: [{ b }] } = await client.query(
+    `SELECT COUNT(*)::int b FROM referrals WHERE referrer_id=$1 AND banked=true AND status='pending'`, [referrerId]);
+  return { referrerId, days: s.rewardDays, kind: 'renewal', referrerNewEnd,
+           referrerRewardedCount: (await rewardedCount(referrerId, client)), remainingBanked: b };
 }
 
 /**
@@ -193,14 +264,16 @@ async function summary(parentId, client = db) {
   const s = await settings(client);
   const code = await codeFor(parentId, client);
   const { rows: [c] } = await client.query(
-    `SELECT COUNT(*) FILTER (WHERE status='pending')::int  AS joined,
-            COUNT(*) FILTER (WHERE status='rewarded')::int AS rewarded,
+    `SELECT COUNT(*) FILTER (WHERE status='pending' AND NOT banked)::int AS joined,
+            COUNT(*) FILTER (WHERE banked AND status='pending')::int      AS banked,
+            COUNT(*) FILTER (WHERE status='rewarded')::int                AS rewarded,
             COALESCE(SUM(reward_days) FILTER (WHERE status='rewarded'),0)::int AS days_earned
        FROM referrals WHERE referrer_id = $1`, [parentId]);
   return {
     code,
     link: shareLink(code),
-    joined: c.joined,
+    joined: c.joined,               // joined, first quiz still pending
+    banked: c.banked,               // qualified, waiting for a renewal to release
     rewarded: c.rewarded,
     days_earned: c.days_earned,
     reward_days: s.rewardDays,
@@ -227,10 +300,8 @@ function parseCode(text) {
 }
 
 module.exports = {
-  settings, codeFor, ownerOf, capture, extendPlan,
+  ensureSchema, settings, codeFor, ownerOf, capture, extendPlan,
   summary, shareLink, parseCode,
-  // One trigger-agnostic payout, exposed under both names for the two callers.
-  credit,
-  creditOnFirstQuiz: credit,   // referee's first completed quiz (normal path)
-  creditOnPayment: credit,     // first payment (fallback)
+  qualifyOnFirstQuiz,        // friend's first quiz -> reward referrer (now or bank)
+  releaseBankedOnRenewal,    // referrer pays -> release one banked +7
 };

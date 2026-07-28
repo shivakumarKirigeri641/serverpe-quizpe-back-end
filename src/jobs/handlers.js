@@ -113,16 +113,14 @@ async function adminMail({ template, data }) {
 }
 
 /**
- * Credits a captured referral on the referred parent's first completed quiz,
- * then tells BOTH parents. The referred parent (this quiz's owner) is in-window,
- * so a normal message reaches them; the referrer may be outside the 24h window,
- * so they get the template — which stays dormant until Meta approves it, with a
- * free-form fallback for the case where they happen to be in-window.
+ * A referred friend's FIRST quiz qualifies their referral and rewards the
+ * REFERRER — immediately (their period's first) or banked for a renewal. The
+ * friend gets nothing extra and no message; only the referrer is told.
  *
- * `credit()` is idempotent, so calling this after every quiz only ever pays the
- * first time. Whole thing is best-effort — the caller wraps it in try/catch.
+ * qualifyOnFirstQuiz is idempotent, so calling this after every quiz only ever
+ * acts the first time. Best-effort — the caller wraps it in try/catch.
  */
-async function creditReferralOnQuiz(studentId, refereeSessionId, refereeMobile) {
+async function creditReferralOnQuiz(studentId) {
   const referrals = require('../referrals/engine');
   const wa = require('../whatsapp/client');
   const lifecycle = require('../whatsapp/lifecycle');
@@ -132,45 +130,38 @@ async function creditReferralOnQuiz(studentId, refereeSessionId, refereeMobile) 
     `SELECT parent_id FROM students WHERE id = $1`, [studentId]);
   if (!s?.parent_id) return;
 
-  const reward = await referrals.creditOnFirstQuiz(s.parent_id);
+  const reward = await referrals.qualifyOnFirstQuiz(s.parent_id);
   if (!reward) return;                       // no pending referral — the usual case
 
-  const refereeName = (await db.query(
-    `SELECT parent_name FROM parents WHERE id = $1`, [s.parent_id])).rows[0]?.parent_name;
+  const friendName = (await db.query(
+    `SELECT parent_name FROM parents WHERE id = $1`, [s.parent_id])).rows[0]?.parent_name || 'A friend';
+  const ref = (await db.query(
+    `SELECT p.parent_name, p.parent_mobile_number AS mobile, ws.id AS session_id
+       FROM parents p
+       LEFT JOIN whatsapp_sessions ws ON ws.mobile_number = p.parent_mobile_number
+      WHERE p.id = $1`, [reward.referrerId])).rows[0];
+  if (!ref?.session_id) return;
 
-  // Referred parent — in-window (they just finished a quiz).
-  if (refereeSessionId && reward.refereeNewEnd) {
-    await wa.sendText(refereeSessionId, refereeMobile,
-`🎁 *Bonus unlocked — ${reward.days} extra free days!*
-
-You joined through a friend's invite and completed your first quiz, so we've added *${reward.days} days*.
-📅 Your access now runs till *${fmtDate(reward.refereeNewEnd)}*.
-
-You can invite friends too and earn even more! 💚`).catch(() => {});
-  }
-
-  // Referrer — may be outside the 24h window, so try the template first.
-  if (reward.referrerNewEnd) {
-    const ref = (await db.query(
-      `SELECT p.parent_name, p.parent_mobile_number AS mobile, ws.id AS session_id
-         FROM parents p
-         LEFT JOIN whatsapp_sessions ws ON ws.mobile_number = p.parent_mobile_number
-        WHERE p.id = $1`, [reward.referrerId])).rows[0];
-    if (ref?.session_id) {
-      const params = [ref.parent_name || 'there', refereeName || 'your friend',
-                      String(reward.days), fmtDate(reward.referrerNewEnd)];
-      const t = await lifecycle.sendTemplateIfApproved(
-        ref.session_id, ref.mobile, 'qp_referral_reward_v1', params);
-      if (!t.sent) {
-        await wa.sendText(ref.session_id, ref.mobile,
+  if (reward.kind === 'immediate') {
+    // Referrer may be outside the 24h window, so try the template first.
+    const params = [ref.parent_name || 'there', friendName, String(reward.days), fmtDate(reward.referrerNewEnd)];
+    const t = await lifecycle.sendTemplateIfApproved(ref.session_id, ref.mobile, 'qp_referral_reward_v1', params);
+    if (!t.sent) {
+      await wa.sendText(ref.session_id, ref.mobile,
 `🎉 *Your invite worked — +${reward.days} free days!*
 
-${refereeName || 'A friend'} you invited just started their child on QuizPe.
+${friendName} you invited just started their child on QuizPe.
 📅 Your access now runs till *${fmtDate(reward.referrerNewEnd)}*.
 
-That's *${reward.referrerRewardedCount}* friend${reward.referrerRewardedCount === 1 ? '' : 's'} so far — keep sharing! 💚`).catch(() => {});
-      }
+Refer more — each further friend adds *${reward.days} days* at your next renewals! 💚`).catch(() => {});
     }
+  } else if (reward.kind === 'banked') {
+    // Best-effort: reaches them if they are in-window; a template can cover the
+    // out-of-window case later.
+    await wa.sendText(ref.session_id, ref.mobile,
+`🎉 *${friendName} joined through your invite!*
+
+You've already claimed this period's bonus, so this one is *banked* — *+${reward.days} days* will be added at your *next renewal*. Keep referring! 💚`).catch(() => {});
   }
 }
 
@@ -199,7 +190,7 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
   // (during their free trial). Fully isolated: any failure is logged and never
   // touches the quiz, report or the badge/streak flow below.
   try {
-    await creditReferralOnQuiz(studentId, sessionId, mobile);
+    await creditReferralOnQuiz(studentId);
   } catch (e) {
     console.error('[jobs] referral credit skipped:', e.message);
   }
