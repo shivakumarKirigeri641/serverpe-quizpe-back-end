@@ -54,7 +54,10 @@ app.use(helmet({
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:', 'https://*.razorpay.com'],
       connectSrc: ["'self'", 'https://*.razorpay.com', 'https://lumberjack.razorpay.com'],
-      frameSrc: ["'self'", 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
+      // 'blob:' lets the admin panel show a report PDF inline: it fetches the
+      // bytes (with the bearer token an <iframe src> cannot carry) and renders
+      // them from a blob URL. Without it the preview iframe is silently blocked.
+      frameSrc: ["'self'", 'blob:', 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
       frameAncestors: ["'none'"],       // no embedding: clickjacking
       objectSrc: ["'none'"],
       upgradeInsecureRequests: BEHIND_TLS ? [] : null,

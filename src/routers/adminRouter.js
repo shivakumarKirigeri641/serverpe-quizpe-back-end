@@ -233,7 +233,7 @@ router.get('/parents/:id', requireAdmin, async (req, res) => {
     if (!parent) return fail(res, 404, 'Parent not found.');
 
     const [students, subs, invoices, tickets, feedback] = await Promise.all([
-      db.query(`SELECT st.*, b.board_code, g.grade_name, m.medium_code
+      db.query(`SELECT st.*, b.board_code, g.grade_name, g.grade_code, m.medium_code
                   FROM students st
                   JOIN boards b ON b.id=st.board_id JOIN grades g ON g.id=st.grade_id
                   LEFT JOIN mediums m ON m.id=st.medium_id

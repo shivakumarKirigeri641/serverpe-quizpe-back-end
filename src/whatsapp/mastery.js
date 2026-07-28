@@ -186,7 +186,8 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
    * to repeats only once the shapes are exhausted.
    */
   const pick = async (chapterList, n, exclude, maxPerShape = CFG.MAX_PER_SHAPE,
-                      maxPerConcept = CFG.MAX_PER_CONCEPT, bannedConcepts = []) => {
+                      maxPerConcept = CFG.MAX_PER_CONCEPT, bannedConcepts = [],
+                      anyMonth = false) => {
     if (!n || !chapterList.length) return [];
     const { rows } = await exec.query(
       `WITH pool AS (
@@ -222,7 +223,7 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
            FROM question_bank qb JOIN students st ON st.id = $1
           WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
             AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active
-            AND qb.revision = qb.current_month
+            ${anyMonth ? '' : 'AND qb.revision = qb.current_month'}
             AND qb.chapter = ANY($3)
             AND NOT ( qb.id = ANY($5::bigint[]) )
             AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
@@ -268,7 +269,8 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     const ignoreCap = opts.relax === true;
     const rows = await pick(
       chapterList, n, ids, opts.maxPerShape ?? CFG.MAX_PER_SHAPE,
-      opts.maxPerConcept ?? CFG.MAX_PER_CONCEPT, ignoreCap ? [] : bannedConcepts());
+      opts.maxPerConcept ?? CFG.MAX_PER_CONCEPT, ignoreCap ? [] : bannedConcepts(),
+      opts.anyMonth === true);
     const added = [];
     for (const r of rows) {
       if (ids.length >= count) break;
@@ -309,10 +311,17 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   const unlocked = chapters.slice(0, frontierSeq).map(c => c.chapter);
   if (ids.length < count) await take(unlocked, count - ids.length);
 
-  // Last resort: the child is genuinely out of fresh, varied questions. Relax
-  // both caps rather than send a short quiz — a repeat is a worse quiz, but
-  // eight questions instead of ten is a broken one.
-  if (ids.length < count) await take(unlocked, count - ids.length, { relax: true });
+  // Still short? The current MONTH's pool is thin (common in early grades /
+  // low-content chapters). Top up with genuine REVISION: the same unlocked
+  // chapters, but from ANY revision month — still never a repeat, still never a
+  // future chapter, and the concept caps still hold. This is what stops a thin
+  // month from producing an 8-question quiz, without re-introducing repetition.
+  if (ids.length < count) await take(unlocked, count - ids.length, { anyMonth: true });
+
+  // Last resort: the child is genuinely out of fresh, varied questions across
+  // every month. Relax the caps rather than send a stubby quiz — a repeat is a
+  // worse quiz, but eight questions instead of fifteen is a broken one.
+  if (ids.length < count) await take(unlocked, count - ids.length, { anyMonth: true, relax: true });
 
   return { ids: ids.slice(0, count), progress, chapters, frontierChapter, weakChapters: weakEarlier,
            previewChapter: previewCount ? nextChapters[0] : null, previewCount };
