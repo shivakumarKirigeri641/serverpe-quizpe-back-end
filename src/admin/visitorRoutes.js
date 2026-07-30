@@ -23,6 +23,16 @@ router.get('/visitors', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] visitors:', e.message); fail(res, 500, 'Could not load visitor analytics.'); }
 });
 
+router.get('/visitors/geo', requireAdmin, async (req, res) => {
+  try { ok(res, { geo: await visits.geo() }); }
+  catch (e) { console.error('[admin] visitors/geo:', e.message); fail(res, 500, 'Could not load geography.'); }
+});
+
+router.get('/visitors/grouped', requireAdmin, async (req, res) => {
+  try { ok(res, { grouped: await visits.grouped(req.query.kind) }); }
+  catch (e) { console.error('[admin] visitors/grouped:', e.message); fail(res, 500, 'Could not load grouped visits.'); }
+});
+
 router.get('/visitors/recent', requireAdmin, async (req, res) => {
   try {
     const [rows, inbox_on] = await Promise.all([visits.recent(req.query.limit), visits.inboxOn()]);

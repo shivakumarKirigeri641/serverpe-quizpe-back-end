@@ -286,7 +286,32 @@ function sendTemplate(sessionId, to, name, params = [], lang) {
   }, `[template:${name}] ${params.join(' | ')}`, 'template');
 }
 
+/**
+ * Approved template that also carries a DYNAMIC URL BUTTON parameter — the
+ * template is authored in Meta with a button URL ending in `{{1}}`, and
+ * `buttonParam` supplies the suffix (e.g. a signup token). `bodyParams` fills
+ * the body placeholders as usual.
+ */
+function sendTemplateWithButton(sessionId, to, name, { bodyParams = [], buttonParam, buttonIndex = 0 } = {}, lang) {
+  const components = [];
+  if (bodyParams.length) {
+    components.push({ type: 'body', parameters: bodyParams.map((t) => ({ type: 'text', text: String(t) })) });
+  }
+  if (buttonParam != null) {
+    components.push({ type: 'button', sub_type: 'url', index: String(buttonIndex),
+      parameters: [{ type: 'text', text: String(buttonParam) }] });
+  }
+  return send(sessionId, to, {
+    type: 'template',
+    template: {
+      name,
+      language: { code: lang || process.env.WHATSAPP_TEMPLATE_LANG || 'en' },
+      ...(components.length ? { components } : {}),
+    },
+  }, `[template:${name}] ${bodyParams.join(' | ')} | btn:${buttonParam}`, 'template');
+}
+
 module.exports = {
-  sendText, sendButtons, sendList, sendTemplate, sendFlow, sendDocument, sendImage, sendCtaUrl,
+  sendText, sendButtons, sendList, sendTemplate, sendTemplateWithButton, sendFlow, sendDocument, sendImage, sendCtaUrl,
   uploadMedia, cachedMediaId, toWaNumber, DRY_RUN,
 };

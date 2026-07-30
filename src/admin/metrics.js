@@ -459,4 +459,122 @@ async function boardTotals(day) {
   }));
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals };
+/**
+ * The founder's morning briefing: last night's recap, today's money/trials,
+ * WhatsApp intent, and an action list — trials ending without payment and
+ * children who missed last night — each with the parent's number to nudge.
+ */
+async function briefing() {
+  const { rows: [a] } = await db.query(`
+    SELECT
+      (SELECT COUNT(*)::int FROM quizpe_tracker t JOIN quizpe_status s ON s.id=t.status_id
+         WHERE t.quiz_date=CURRENT_DATE-1 AND s.status_code='completed')                       AS done_last_night,
+      (SELECT COUNT(*)::int FROM quizpe_tracker t JOIN quizpe_status s ON s.id=t.status_id
+         WHERE t.quiz_date=CURRENT_DATE-1 AND s.status_code NOT IN ('completed','in_progress')) AS missed_last_night,
+      (SELECT COUNT(*)::int   FROM invoices WHERE is_active AND ${IST_DATE('created_at')}=CURRENT_DATE)        AS payments_today,
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')}=CURRENT_DATE) AS revenue_today,
+      (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
+         WHERE s.is_active AND p.is_trial AND s.plan_start_date=CURRENT_DATE)                   AS trials_today,
+      (SELECT COUNT(*)::int FROM enquiries WHERE status='open')                                 AS open_enquiries,
+      (SELECT COUNT(*)::int FROM testimonials WHERE is_active AND NOT is_approved)              AS testimonials_pending,
+      (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE)   AS wa_today,
+      (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE-1) AS wa_yesterday
+  `);
+
+  const { rows: trialsEnding } = await db.query(`
+    SELECT s.parent_id, p.parent_name, p.parent_mobile_number,
+           s.plan_end_date::text AS plan_end_date,
+           (s.plan_end_date - CURRENT_DATE)::int AS days_left
+      FROM parents_quizpe_subscriptions s
+      JOIN quizpe_plans pl ON pl.id = s.plan_id AND pl.is_trial
+      JOIN parents p       ON p.id  = s.parent_id AND p.is_active
+     WHERE s.is_active AND s.plan_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 2
+       AND NOT EXISTS (
+         SELECT 1 FROM parents_quizpe_subscriptions s2
+           JOIN quizpe_plans pl2 ON pl2.id = s2.plan_id AND NOT pl2.is_trial
+          WHERE s2.parent_id = s.parent_id AND s2.is_active
+            AND CURRENT_DATE <= s2.plan_end_date)
+     ORDER BY s.plan_end_date, p.parent_name
+     LIMIT 25`);
+
+  const { rows: missed } = await db.query(`
+    SELECT st.id AS student_id, st.student_name,
+           p.id AS parent_id, p.parent_name, p.parent_mobile_number
+      FROM quizpe_tracker t
+      JOIN quizpe_status s ON s.id = t.status_id AND s.status_code NOT IN ('completed','in_progress')
+      JOIN students st ON st.id = t.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id AND p.is_active
+     WHERE t.quiz_date = CURRENT_DATE - 1
+     ORDER BY p.parent_name, st.student_name
+     LIMIT 25`);
+
+  return {
+    today: (await db.query(`SELECT to_char(now() AT TIME ZONE '${TZ}', 'FMDay, DD FMMonth') AS d`)).rows[0].d,
+    stats: {
+      done_last_night: a.done_last_night,
+      missed_last_night: a.missed_last_night,
+      payments_today: a.payments_today,
+      revenue_today: Number(a.revenue_today),
+      trials_today: a.trials_today,
+      open_enquiries: a.open_enquiries,
+      testimonials_pending: a.testimonials_pending,
+      wa_today: a.wa_today,
+      wa_yesterday: a.wa_yesterday,
+      wa_delta: delta(a.wa_today, a.wa_yesterday),
+    },
+    trials_ending: trialsEnding,
+    missed,
+  };
+}
+
+/**
+ * Feel-good signals for the admin: the latest payment (to celebrate the moment
+ * it lands), last night's perfect scores, and children on a current streak.
+ */
+async function celebrations() {
+  const { rows: [pay] } = await db.query(`
+    SELECT i.id, i.total::numeric AS amount, p.parent_name,
+           to_char(i.created_at AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI') AS at_ist
+      FROM invoices i
+      JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
+      JOIN parents p ON p.id = s.parent_id
+     WHERE i.is_active
+     ORDER BY i.id DESC LIMIT 1`);
+
+  const { rows: perfect } = await db.query(`
+    SELECT st.student_name, p.parent_name, r.score_total::int AS score_total
+      FROM quiz_reports r
+      JOIN quizpe_tracker t ON t.id = r.tracker_id AND t.quiz_date = CURRENT_DATE - 1
+      JOIN students st ON st.id = t.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id
+     WHERE r.score_total > 0 AND r.score_correct = r.score_total
+     ORDER BY r.score_total DESC, st.student_name
+     LIMIT 8`);
+
+  // Current streak = length of the latest unbroken run of completed daily
+  // quizzes, counted with a gaps-and-islands grouping, shown only if it is
+  // still live (ended yesterday or today) and at least 3 days long.
+  const { rows: streaks } = await db.query(`
+    WITH completed AS (
+      SELECT t.student_id, t.quiz_date
+        FROM quizpe_tracker t
+        JOIN quizpe_status s ON s.id = t.status_id AND s.status_code = 'completed'),
+    runs AS (
+      SELECT student_id, quiz_date,
+             quiz_date - (ROW_NUMBER() OVER (PARTITION BY student_id ORDER BY quiz_date))::int AS grp
+        FROM completed),
+    grouped AS (
+      SELECT student_id, COUNT(*)::int AS len, MAX(quiz_date) AS last
+        FROM runs GROUP BY student_id, grp)
+    SELECT st.student_name, p.parent_name, x.len
+      FROM grouped x
+      JOIN students st ON st.id = x.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id
+     WHERE x.last >= CURRENT_DATE - 1 AND x.len >= 3
+     ORDER BY x.len DESC, st.student_name
+     LIMIT 8`);
+
+  return { latest_payment: pay || null, perfect, streaks };
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations };

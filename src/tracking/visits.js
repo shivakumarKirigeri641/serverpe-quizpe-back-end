@@ -53,6 +53,29 @@ function deviceOf(ua = '') {
   return { os, browser, type, summary: `${type} · ${os} · ${browser}` };
 }
 
+/**
+ * geoip-lite reports region as an ISO-3166-2 subdivision code (e.g. "KA").
+ * Map the Indian ones to readable state / union-territory names so the admin
+ * panel shows "Karnataka", not "KA". Unknown codes fall back to the raw value.
+ */
+const IN_STATES = {
+  AN: 'Andaman & Nicobar', AP: 'Andhra Pradesh', AR: 'Arunachal Pradesh', AS: 'Assam',
+  BR: 'Bihar', CH: 'Chandigarh', CT: 'Chhattisgarh', CG: 'Chhattisgarh',
+  DN: 'Dadra & Nagar Haveli and Daman & Diu', DD: 'Dadra & Nagar Haveli and Daman & Diu',
+  DL: 'Delhi', GA: 'Goa', GJ: 'Gujarat', HR: 'Haryana', HP: 'Himachal Pradesh',
+  JK: 'Jammu & Kashmir', JH: 'Jharkhand', KA: 'Karnataka', KL: 'Kerala', LA: 'Ladakh',
+  LD: 'Lakshadweep', MP: 'Madhya Pradesh', MH: 'Maharashtra', MN: 'Manipur', ML: 'Meghalaya',
+  MZ: 'Mizoram', NL: 'Nagaland', OD: 'Odisha', OR: 'Odisha', PY: 'Puducherry', PB: 'Punjab',
+  RJ: 'Rajasthan', SK: 'Sikkim', TN: 'Tamil Nadu', TG: 'Telangana', TS: 'Telangana',
+  TR: 'Tripura', UP: 'Uttar Pradesh', UK: 'Uttarakhand', UT: 'Uttarakhand', WB: 'West Bengal',
+};
+/** Readable state/union name for a visit (India only; else the raw region). */
+function stateName(region, country) {
+  if (!region) return null;
+  if (country === 'IN') return IN_STATES[String(region).toUpperCase()] || region;
+  return region;
+}
+
 /** Floor every analytics query at the real launch date (IST midnight). */
 const LAUNCH_FLOOR = `(TIMESTAMP '${LAUNCH_DATE} 00:00:00' AT TIME ZONE '${TZ}')`;
 const IST_TS = (c) => `to_char(${c} AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI')`;
@@ -248,7 +271,121 @@ async function recent(limit = 60) {
        FROM site_visits
       WHERE NOT is_bot AND created_at >= ${LAUNCH_FLOOR}
       ORDER BY id DESC LIMIT $1`, [Math.min(200, Number(limit) || 60)]);
-  return rows.map((r) => ({ ...r, device: deviceOf(r.user_agent).summary }));
+  return rows.map((r) => ({
+    ...r,
+    device: deviceOf(r.user_agent).summary,
+    state: stateName(r.region, r.country),
+  }));
 }
 
-module.exports = { ensureSchema, record, analytics, recent, inboxOn, setInboxOn, clientIp };
+/** Top-N {name, n} from a plain {name: count} tally, biggest first. */
+function topN(tally, n = 8) {
+  return Object.entries(tally)
+    .map(([name, count]) => ({ name, n: count }))
+    .sort((a, b) => b.n - a.n)
+    .slice(0, n);
+}
+
+/**
+ * Visits rolled up into mutually-exclusive time buckets (today / yesterday /
+ * earlier this week / earlier this month / older), each with a count and a
+ * breakdown by device, state/union, place (city), country and unique IPs.
+ *
+ * `kind`: 'all' (default), 'view', or 'wa_click' (WhatsApp-intent only — used
+ * by the Conversations page, since WhatsApp chats themselves carry no geo/IP).
+ */
+async function grouped(kind = 'all') {
+  await ensureSchema();
+  const kindFilter = kind === 'wa_click' ? `AND kind = 'wa_click'`
+    : kind === 'view' ? `AND kind = 'view'` : '';
+  const { rows } = await db.query(`
+    WITH t AS (SELECT (now() AT TIME ZONE '${TZ}')::date AS today),
+    v AS (
+      SELECT kind, ip, country, region, city, user_agent, session_id, created_at,
+             (created_at AT TIME ZONE '${TZ}')::date AS d
+        FROM site_visits
+       WHERE NOT is_bot AND created_at >= ${LAUNCH_FLOOR} ${kindFilter})
+    SELECT v.kind, v.ip, v.country, v.region, v.city, v.user_agent, v.session_id,
+      CASE
+        WHEN v.d = t.today                                         THEN 'today'
+        WHEN v.d = t.today - 1                                     THEN 'yesterday'
+        WHEN v.d >= date_trunc('week',  t.today)::date AND v.d < t.today - 1
+                                                                   THEN 'this_week'
+        WHEN v.d >= date_trunc('month', t.today)::date AND v.d < date_trunc('week', t.today)::date
+                                                                   THEN 'this_month'
+        ELSE 'older'
+      END AS bucket
+      FROM v, t
+     ORDER BY v.created_at DESC
+     LIMIT 20000`);
+
+  const KEYS = ['today', 'yesterday', 'this_week', 'this_month', 'older'];
+  const LABELS = {
+    today: 'Today', yesterday: 'Yesterday', this_week: 'Earlier this week',
+    this_month: 'Earlier this month', older: 'Older',
+  };
+  const init = () => ({ total: 0, uniques: new Set(), wa: 0, ips: new Set(), dev: {}, st: {}, pl: {}, co: {} });
+  const acc = Object.fromEntries(KEYS.map((k) => [k, init()]));
+
+  for (const r of rows) {
+    const b = acc[r.bucket];
+    if (!b) continue;
+    b.total++;
+    if (r.session_id) b.uniques.add(r.session_id);
+    if (r.kind === 'wa_click') b.wa++;
+    if (r.ip) b.ips.add(r.ip);
+    const type = deviceOf(r.user_agent).type;
+    b.dev[type] = (b.dev[type] || 0) + 1;
+    const st = stateName(r.region, r.country) || 'Unknown';
+    b.st[st] = (b.st[st] || 0) + 1;
+    const pl = r.city || 'Unknown';
+    b.pl[pl] = (b.pl[pl] || 0) + 1;
+    const co = r.country || 'Unknown';
+    b.co[co] = (b.co[co] || 0) + 1;
+  }
+
+  const buckets = KEYS.map((k) => {
+    const b = acc[k];
+    return {
+      key: k, label: LABELS[k],
+      total: b.total, uniques: b.uniques.size, wa_clicks: b.wa, unique_ips: b.ips.size,
+      devices: topN(b.dev), states: topN(b.st), places: topN(b.pl), countries: topN(b.co),
+    };
+  });
+  return { kind, buckets };
+}
+
+/**
+ * Geography for the India heatmap: website visitors by state (from the geo-IP
+ * region → state name), and enrolled families by state (parents.state_code →
+ * states_unions). Two separate breakdowns because the two sources name states
+ * slightly differently; the panel shows them side by side.
+ */
+async function geo() {
+  await ensureSchema();
+  const { rows: vraw } = await db.query(`
+    SELECT region, country, COUNT(*)::int AS n
+      FROM site_visits
+     WHERE NOT is_bot AND kind='view' AND created_at >= ${LAUNCH_FLOOR}
+     GROUP BY region, country`);
+  const vmap = {};
+  let india = 0, other = 0;
+  for (const r of vraw) {
+    if (r.country === 'IN') {
+      const nm = stateName(r.region, 'IN') || 'Unknown';
+      vmap[nm] = (vmap[nm] || 0) + r.n;
+      india += r.n;
+    } else other += r.n;
+  }
+
+  const { rows: families } = await db.query(`
+    SELECT COALESCE(su.state_name, NULLIF(p.state_code,''), 'Unknown') AS name, COUNT(*)::int AS n
+      FROM parents p
+      LEFT JOIN states_unions su ON su.state_code = p.state_code
+     WHERE p.is_active
+     GROUP BY 1 ORDER BY n DESC`);
+
+  return { visitors: topN(vmap, 100), families, visitors_india: india, visitors_other: other };
+}
+
+module.exports = { ensureSchema, record, analytics, recent, grouped, geo, inboxOn, setInboxOn, clientIp };

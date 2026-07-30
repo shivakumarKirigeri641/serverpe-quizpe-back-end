@@ -37,6 +37,9 @@ const CFG = {
 
   MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
   MAX_PER_CONCEPT: 3,         // most questions testing one SKILL in a single quiz
+  MIN_QUESTIONS: 8,           // hard floor: never deliver fewer than this, for any
+                              // grade — even a thin bank re-asks earlier questions
+                              // rather than send a stub (see the backfill below)
   BASE_QUESTIONS: 15,         // doing well -> standard quiz
   MID_QUESTIONS: 18,          // wobbling  -> more practice
   MAX_QUESTIONS: 20,          // struggling -> most practice (hard ceiling)
@@ -148,6 +151,8 @@ async function perChapterStats(studentId, subjectId, chapters, exec = db) {
  * the newer chapters their class has moved on to. Empty buckets reflow.
  */
 async function selectQuestions(studentId, subjectId, count, exec = db) {
+  // Never aim below the hard floor — a grade must always get at least this many.
+  count = Math.max(Number(count) || 0, CFG.MIN_QUESTIONS);
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
   if (!chapters.length) return { ids: [], progress, chapters };
 
@@ -323,6 +328,30 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   // worse quiz, but eight questions instead of fifteen is a broken one.
   if (ids.length < count) await take(unlocked, count - ids.length, { anyMonth: true, relax: true });
 
+  // Absolute floor (MIN_QUESTIONS): everything above only ever draws questions
+  // the child has NEVER seen, so a thin grade — or a child who has already seen
+  // almost the whole bank — can still fall short. Rather than send fewer than
+  // the minimum, re-ask earlier questions: least-recently-seen first, never a
+  // future chapter, never one already in tonight's quiz. This is the only place
+  // a question can repeat across quizzes, and only to reach the floor.
+  if (ids.length < CFG.MIN_QUESTIONS) {
+    const { rows } = await exec.query(
+      `SELECT qb.id
+         FROM question_bank qb JOIN students st ON st.id = $1
+        WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
+          AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active
+          AND qb.chapter = ANY($3)
+          AND NOT ( qb.id = ANY($4::bigint[]) )
+        ORDER BY (SELECT MAX(t.quiz_date)
+                    FROM student_quizpe_histories h
+                    JOIN quizpe_tracker t ON t.id = h.tracker_id
+                   WHERE t.student_id = $1 AND h.question_id = qb.id) ASC NULLS FIRST,
+                 random()
+        LIMIT $5`,
+      [studentId, subjectId, unlocked, ids, CFG.MIN_QUESTIONS - ids.length]);
+    for (const r of rows) { if (!seen.has(r.id)) { ids.push(r.id); seen.add(r.id); } }
+  }
+
   return { ids: ids.slice(0, count), progress, chapters, frontierChapter, weakChapters: weakEarlier,
            previewChapter: previewCount ? nextChapters[0] : null, previewCount };
 }
@@ -406,7 +435,7 @@ async function recommendedQuestionCount(studentId, subjectId, exec = db) {
   let count = CFG.BASE_QUESTIONS;
   if (acc < 0.60 || weakCount >= 2) count = CFG.MAX_QUESTIONS;        // 20
   else if (acc < 0.80 || weakCount === 1) count = CFG.MID_QUESTIONS;  // 15
-  return count;
+  return Math.max(CFG.MIN_QUESTIONS, count);   // never recommend below the floor
 }
 
 /**

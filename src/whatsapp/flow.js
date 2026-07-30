@@ -771,11 +771,13 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         const { url } = await createSignupLink(session.id, mobile, session.context.parent_name);
         await setState(session, 'awaiting_form', 'agreed_trial');
         await wa.sendCtaUrl(session.id, mobile, {
-          header: 'One quick form',
-          body: `📝 *Almost done!*\n\nTap below to enter your child's name, board, medium, grade and state — takes about 30 seconds.`,
-          displayText: '📝 Fill the form',
+          header: '🎉 One last step!',
+          body: `Your child's *7-day FREE trial* is ready — tonight's quiz can go out in just a few hours. 🌟\n\n`
+            + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
+            + `👇 Tap below and you're done — the first quiz lands on this chat tonight.`,
+          displayText: '✅ Start the free trial',
           url,
-          footer: 'Secure · works for 60 minutes · single use',
+          footer: 'Free for 7 days · no card · ~30 seconds',
         });
       } else {
         await wa.sendText(session.id, mobile, 'Tap *✅ Agree & Proceed* to continue, or *⬅️ Back* for the menu.');

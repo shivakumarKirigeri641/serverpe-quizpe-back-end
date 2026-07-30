@@ -271,6 +271,71 @@ async function runLifecycleJob(kind) {
   if (due.length) console.log(`[scheduler] ${kind}: ${due.length} parent(s)`);
 }
 
+/* ---------------------------------------------- finish-the-child-form nudge -- */
+/**
+ * Many parents agree to the trial, get the "fill your child's details" form
+ * link, and never tap it. This chases them ONCE, `FORM_NUDGE_DELAY_MIN` after
+ * they stalled, with an approved Utility template whose button reopens the
+ * form. A fresh signup token is minted so the link is valid when they tap it.
+ *
+ * Safety: business-hours only (no late-night buzz), once per session (a flag in
+ * the session context), never anyone who has since enrolled or replied STOP,
+ * and only within a 24h window so a week-old stall is left alone.
+ */
+const FORM_NUDGE_TEMPLATE = process.env.FORM_NUDGE_TEMPLATE || 'qp_finish_form_v1';
+const FORM_NUDGE_DELAY_MIN = Number(process.env.FORM_NUDGE_DELAY_MIN) || 30;
+const FORM_NUDGE_FROM = process.env.FORM_NUDGE_FROM || '08:00';
+const FORM_NUDGE_TO = process.env.FORM_NUDGE_TO || '21:30';
+
+async function runFormNudge() {
+  const toMin = (s) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const now = nh * 60 + nm;
+  if (now < toMin(FORM_NUDGE_FROM) || now > toMin(FORM_NUDGE_TO)) return;   // business hours only
+
+  const tpl = await approvedTemplate(FORM_NUDGE_TEMPLATE);
+  if (!tpl) return;                                                          // not cleared by Meta yet
+
+  const { rows } = await db.query(
+    `SELECT w.id AS session_id, w.mobile_number,
+            COALESCE(NULLIF(w.context->>'parent_name',''), 'there') AS parent_name
+       FROM whatsapp_sessions w
+      WHERE w.is_active AND w.state = 'awaiting_form'
+        AND w.modified_at <= now() - ($1 || ' minutes')::interval
+        AND w.modified_at >= now() - interval '24 hours'
+        AND (w.context->>'form_reminder_sent_at') IS NULL
+        AND NOT EXISTS (SELECT 1 FROM parents p
+                          JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id AND s.is_active
+                         WHERE p.parent_mobile_number = w.mobile_number)
+        AND NOT EXISTS (SELECT 1 FROM parents p
+                         WHERE p.parent_mobile_number = w.mobile_number AND p.service_paused)
+      ORDER BY w.modified_at
+      LIMIT 200`, [String(FORM_NUDGE_DELAY_MIN)]);
+  if (!rows.length) return;
+
+  const { createSignupLink } = require('../routers/trialRouter');
+  let sent = 0;
+  for (const r of rows) {
+    // Mark BEFORE sending: a failed send that then retried would spam. Missing
+    // one nudge is far better than sending it twice.
+    await db.query(
+      `UPDATE whatsapp_sessions
+          SET context = context || jsonb_build_object('form_reminder_sent_at', to_char(now(), 'YYYY-MM-DD"T"HH24:MI:SS'))
+        WHERE id = $1`, [r.session_id]);
+    try {
+      const name = r.parent_name === 'there' ? null : r.parent_name;
+      const { token } = await createSignupLink(r.session_id, r.mobile_number, name);
+      await wa.sendTemplateWithButton(r.session_id, r.mobile_number, tpl.template_name,
+        { bodyParams: [r.parent_name], buttonParam: token });
+      sent++;
+    } catch (e) {
+      console.error(`[scheduler] form_nudge failed for ${r.mobile_number}: ${e.message}`);
+    }
+    await new Promise((res) => setTimeout(res, 250));
+  }
+  if (sent) console.log(`[scheduler] form_nudge: ${sent} sent`);
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -419,6 +484,9 @@ function startScheduler() {
       // is made in daylight, not thirty seconds before the child sits down
       await runLifecycleJob('expiring');
       await runLifecycleJob('expired');
+
+      // chase parents who agreed but never opened the child-details form
+      await runFormNudge();
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();

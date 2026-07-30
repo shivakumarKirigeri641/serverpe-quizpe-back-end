@@ -120,6 +120,18 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
   }
 });
 
+/** The founder's morning briefing — night recap + action list. */
+router.get('/briefing', requireAdmin, async (req, res) => {
+  try { ok(res, { briefing: await metrics.briefing() }); }
+  catch (e) { console.error('[admin] briefing:', e.message); fail(res, 500, 'Could not load the briefing.'); }
+});
+
+/** Feel-good signals: latest payment, perfect scores, live streaks. */
+router.get('/celebrations', requireAdmin, async (req, res) => {
+  try { ok(res, { celebrations: await metrics.celebrations() }); }
+  catch (e) { console.error('[admin] celebrations:', e.message); fail(res, 500, 'Could not load celebrations.'); }
+});
+
 /** Cohort health as percentages — participation, scoring spread, movement. */
 router.get('/analytics/cohort', requireAdmin, async (req, res) => {
   try {
