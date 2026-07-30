@@ -132,6 +132,20 @@ router.get('/celebrations', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] celebrations:', e.message); fail(res, 500, 'Could not load celebrations.'); }
 });
 
+/** End-to-end conversion funnel, retention cohorts, and the activity calendar. */
+router.get('/analytics/funnel', requireAdmin, async (req, res) => {
+  try { ok(res, { funnel: await metrics.funnel() }); }
+  catch (e) { console.error('[admin] funnel:', e.message); fail(res, 500, 'Could not load the funnel.'); }
+});
+router.get('/analytics/retention', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.retention() }); }
+  catch (e) { console.error('[admin] retention:', e.message); fail(res, 500, 'Could not load retention.'); }
+});
+router.get('/analytics/activity', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.activityCalendar(clamp(req.query.weeks, 12, 53)) }); }
+  catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
+});
+
 /** Cohort health as percentages — participation, scoring spread, movement. */
 router.get('/analytics/cohort', requireAdmin, async (req, res) => {
   try {
