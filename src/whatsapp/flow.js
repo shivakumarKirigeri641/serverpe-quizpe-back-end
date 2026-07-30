@@ -775,7 +775,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
           body: `Your child's *7-day FREE trial* is ready — tonight's quiz can go out in just a few hours. 🌟\n\n`
             + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
             + `👇 Tap below and you're done — the first quiz lands on this chat tonight.`,
-          displayText: '✅ Start the free trial',
+          displayText: '✅ Fill child form',
           url,
           footer: 'Free for 7 days · no card · ~30 seconds',
         });

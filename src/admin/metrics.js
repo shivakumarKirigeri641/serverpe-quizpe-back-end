@@ -477,7 +477,7 @@ async function briefing() {
       (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')}=CURRENT_DATE) AS revenue_today,
       (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
          WHERE s.is_active AND p.is_trial AND s.plan_start_date=CURRENT_DATE)                   AS trials_today,
-      (SELECT COUNT(*)::int FROM enquiries WHERE status='open')                                 AS open_enquiries,
+      (SELECT COUNT(*)::int FROM website_enquiries WHERE status='open' AND is_active)            AS open_enquiries,
       (SELECT COUNT(*)::int FROM testimonials WHERE is_active AND NOT is_approved)              AS testimonials_pending,
       (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE)   AS wa_today,
       (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE-1) AS wa_yesterday
