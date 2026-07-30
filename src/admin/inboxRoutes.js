@@ -116,6 +116,28 @@ router.get('/feedback/promotable', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] promotable:', e.message); fail(res, 500, 'Could not load ratings.'); }
 });
 
+/** EVERY rating with a computed status — for the full grid under the cards. */
+router.get('/feedback/all', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT f.id, f.rating, f.message, f.tags, ${IST('f.created_at')} AS at_ist,
+              p.parent_name, p.state_code, st.student_name,
+              CASE
+                WHEN t.id IS NOT NULL AND t.is_approved THEN 'published'
+                WHEN t.id IS NOT NULL                    THEN 'pending'
+                WHEN f.rating >= 4 AND f.message IS NOT NULL AND btrim(f.message) <> '' THEN 'publishable'
+                ELSE 'not_eligible'
+              END AS status
+         FROM feedbacks f
+         JOIN parents p ON p.id = f.parent_id
+         LEFT JOIN students st ON st.id = f.student_id
+         LEFT JOIN LATERAL (SELECT id, is_approved FROM testimonials
+                             WHERE feedback_id = f.id ORDER BY id DESC LIMIT 1) t ON true
+        ORDER BY f.id DESC LIMIT 300`);
+    ok(res, { rows });
+  } catch (e) { console.error('[admin] feedback/all:', e.message); fail(res, 500, 'Could not load ratings.'); }
+});
+
 router.post('/feedback/:id/promote', requireAdmin, express.json(), async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return fail(res, 400, 'Bad feedback id.');
