@@ -151,6 +151,7 @@
       $("students").innerHTML = Array.from({ length: r.plan.student_count }, (_, i) => studentBlock(i)).join("");
       fill($("state"), r.states, "state_code", "state_name", "Select state");
       bind();
+      prefillExisting(r.existing);   // renewal: show their saved children, still editable
       recompute();
       $("wrap").style.display = "block";
     }
@@ -187,6 +188,37 @@
       $("parentName").addEventListener("input", validate);
       $("state").addEventListener("change", () => { recompute(); validate(); });
       $("accept").addEventListener("change", validate);
+    }
+
+    // Renewal: drop the family's saved details into the form so the parent can
+    // just accept the terms and pay. Everything stays editable — whatever is in
+    // the fields at payment is exactly what gets charged and enrolled — but the
+    // defaults mean nobody has to retype "Satwik" and accidentally create a new
+    // child by typing a different name into an empty box.
+    function prefillExisting(ex) {
+      if (!ex) return;
+      if (ex.parent_name) $("parentName").value = ex.parent_name;
+      if (ex.state_code)  $("state").value = ex.state_code;
+      const blocks = document.querySelectorAll(".student");
+      (ex.students || []).forEach((s, i) => { if (blocks[i]) prefillStudent(blocks[i], s); });
+      validate();
+    }
+
+    function prefillStudent(el, s) {
+      if (!s) return;
+      el.querySelector(".s-name").value = s.name || "";
+      el.querySelector(".s-school").value = s.school_name || "";
+      const board  = el.querySelector(".s-board"),
+            grade  = el.querySelector(".s-grade"),
+            medium = el.querySelector(".s-medium");
+      // walk the same cascade the change-handlers drive, in order
+      board.value = s.board || "";   board.dispatchEvent(new Event("change"));   // fills grades
+      grade.value = s.grade || "";   grade.dispatchEvent(new Event("change"));   // fills mediums
+      medium.value = s.medium || ""; medium.dispatchEvent(new Event("change"));  // renders add-ons
+      (s.addons || []).forEach(code => {
+        const cb = el.querySelector(`.s-addon[value="${code}"]`);
+        if (cb) cb.checked = true;
+      });
     }
 
     // recompute the whole summary (base + add-ons) and the GST split live

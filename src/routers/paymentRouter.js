@@ -109,6 +109,34 @@ function gstBreakup(price, gstPct, intra) {
     : { base, cgst: 0, sgst: 0, igst: gst, total: gross };
 }
 
+/**
+ * The family already on file for this number, so a RENEWAL can pre-fill the form
+ * with the children they enrolled last time. The parent sees their real details
+ * (e.g. "Satwik") ready to pay, and only edits if something genuinely changed —
+ * an empty form is what led to a new name being typed and a duplicate child.
+ */
+async function existingFamily(mobile) {
+  const m = normMobile(mobile);
+  const p = (await db.query(
+    `SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
+  if (!p) return null;
+  const students = (await db.query(
+    `SELECT st.student_name AS name, COALESCE(st.school_name,'') AS school_name,
+            b.board_code AS board, g.grade_code AS grade, m.medium_code AS medium,
+            COALESCE(ARRAY_AGG(sub.subject_code) FILTER (WHERE sub.subject_code IS NOT NULL), '{}') AS addons
+       FROM students st
+       JOIN boards  b ON b.id = st.board_id
+       JOIN grades  g ON g.id = st.grade_id
+       JOIN mediums m ON m.id = st.medium_id
+       LEFT JOIN student_addons_subscriptions sa ON sa.student_id = st.id AND sa.is_active
+       LEFT JOIN quizpe_addons a ON a.id = sa.addon_id AND a.is_active
+       LEFT JOIN subjects sub ON sub.id = a.subject_id
+      WHERE st.parent_id = $1 AND st.is_active
+      GROUP BY st.id, st.student_name, st.school_name, b.board_code, g.grade_code, m.medium_code
+      ORDER BY st.id`, [p.id])).rows;
+  return { parent_name: p.parent_name || '', state_code: p.state_code || '', students };
+}
+
 /* --------------------------------------------------------------- context */
 router.get('/api/context', async (req, res) => {
   try {
@@ -181,6 +209,7 @@ router.get('/api/context', async (req, res) => {
       boards: boards.rows, mediumsByBoard, grades: grades.rows, states: states.rows,
       availability, gst_pct: gstPct,
       business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
+      existing: await existingFamily(c.mobile_number),   // pre-fill for renewals
     });
   } catch (e) {
     console.error('[pay] context failed:', e.message);
