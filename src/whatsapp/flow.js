@@ -982,7 +982,7 @@ Plan price (incl. GST): ₹${gross}
 Tap below to pay securely on Razorpay. Your quizzes continue the moment it's paid — the invoice and renewal confirmation come automatically. 🌟`,
       displayText: `💳 Pay ₹${renewal.amount}`,
       url: renewal.short_url,
-      footer: 'Secure payment via Razorpay · ServerPe App Solutions (GST-registered)',
+      footer: 'Razorpay · ServerPe App Solutions (GST-registered)',
     });
     return;
   }

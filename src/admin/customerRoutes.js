@@ -96,6 +96,24 @@ router.patch('/parents/:id/expiry', requireAdmin, express.json(), async (req, re
   } catch (e) { console.error('[admin] change expiry:', e.message); fail(res, 400, e.message); }
 });
 
+/* --------------------------------- recover a paid-but-unactivated payment -- */
+/**
+ * When a real payment didn't activate (webhook rejected / not subscribed), paste
+ * the Razorpay payment id (pay_…) here to finalize it manually. Idempotent — the
+ * same finalize() the webhook uses, so it activates the plan, issues the invoice
+ * and sends the confirmation, or just returns the existing invoice if already done.
+ */
+router.post('/pay/reconcile', requireAdmin, express.json(), async (req, res) => {
+  const { payment_id, token } = req.body || {};
+  if (!payment_id) return fail(res, 400, 'Enter the Razorpay payment id (pay_…).');
+  try {
+    const r = await require('../routers/paymentRouter')
+      .reconcileByPaymentId(String(payment_id).trim(), token ? String(token).trim() : null);
+    if (r.error) return fail(res, 400, r.error);
+    ok(res, r);
+  } catch (e) { console.error('[admin] reconcile:', e.message); fail(res, 500, e.message); }
+});
+
 /* ----------------------------------------- add a child mid-plan (pro-rated) */
 /**
  * Enrol one more child on a family's existing PAID plan for the days that

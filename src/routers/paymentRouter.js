@@ -1028,7 +1028,14 @@ async function razorpayWebhook(req, res) {
   let valid = false;
   try { valid = signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature)); }
   catch { valid = false; }
-  if (!valid) { console.warn('[pay] webhook: bad signature'); return res.status(400).send('invalid signature'); }
+  if (!valid) {
+    // Diagnostic (no secret leaked): rawIsBuffer=false means express.json() ate
+    // the body before us — the #1 cause, and independent of the secret. Both
+    // lengths 64 with rawIsBuffer=true instead points at a secret VALUE mismatch.
+    console.warn(`[pay] webhook: bad signature (rawIsBuffer=${Buffer.isBuffer(req.body)} `
+      + `rawLen=${raw.length} sigLen=${signature.length} expLen=${expected.length} secretLen=${secret.length})`);
+    return res.status(400).send('invalid signature');
+  }
 
   let event;
   try { event = JSON.parse(raw.toString('utf8')); }
@@ -1055,8 +1062,56 @@ async function razorpayWebhook(req, res) {
   return res.status(200).json({ received: true });
 }
 
+/**
+ * Manual recovery. When a real payment is made but the webhook never activated
+ * it (bad signature, event not subscribed, downtime), an admin pastes the
+ * Razorpay payment id (pay_…) and this fetches that payment and runs finalize —
+ * the SAME idempotent, amount-checked path the webhook uses. Safe to run twice:
+ * an already-activated payment just returns its existing invoice.
+ *
+ * The checkout is matched by the token (from the link's notes) if given, else by
+ * the payer's mobile + exact amount among recent link_created checkouts.
+ */
+async function reconcileByPaymentId(paymentId, token = null) {
+  paymentId = String(paymentId || '').trim();
+  if (!/^pay_/.test(paymentId)) return { error: 'Enter a valid Razorpay payment id (starts with pay_).' };
+
+  const rzp = await razorpayCreds();   // current mode; must match the mode the payment was taken in
+  const payRes = await fetch(`${RZP}/payments/${paymentId}`, { headers: { Authorization: rzp.authHeader } });
+  const pay = await payRes.json();
+  if (!payRes.ok || !pay.id) {
+    return { error: pay?.error?.description || `Payment not found in ${rzp.mode} mode — check the test/live toggle matches where it was paid.` };
+  }
+  if (!['captured', 'authorized'].includes(pay.status)) {
+    return { error: `Payment status is "${pay.status}", not captured — nothing to activate.` };
+  }
+
+  let c = token ? await loadCheckoutByToken(String(token).trim()) : null;
+  if (!c) {
+    // No token: match on the payer's number + the exact amount among their
+    // recent links, newest first — the amount guard makes a wrong match impossible.
+    const mobile = normMobile(pay.contact || '');
+    const { rows } = await db.query(
+      `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+              pl.regular_price, pl.student_count, pl.duration
+         FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+        WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
+    c = rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null;
+  }
+  if (!c) return { error: 'No matching checkout found for this payment (by token, or by mobile + amount).' };
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    return { error: `Amount mismatch: checkout ₹${c.cart.total} vs payment ₹${Number(pay.amount) / 100}.` };
+  }
+
+  const result = c.cart && c.cart.midplan
+    ? await finalizeAddChild(c, pay)
+    : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
+  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan) };
+}
+
 module.exports = router;
 module.exports.createCheckoutLink = createCheckoutLink;
+module.exports.reconcileByPaymentId = reconcileByPaymentId;
 module.exports.razorpayWebhook = razorpayWebhook;
 module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;

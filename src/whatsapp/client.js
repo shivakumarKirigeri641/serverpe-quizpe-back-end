@@ -111,14 +111,14 @@ function sendText(sessionId, to, text) {
 function sendButtons(sessionId, to, text, buttons, footer, headerImageId) {
   if (buttons.length > 3) throw new Error('WhatsApp allows max 3 reply buttons');
   checkLen('interactive body', text, LIMIT.interactiveBody);
-  checkLen('footer', footer, LIMIT.footer);
+  const ft = clampCodePoints(footer, LIMIT.footer);   // decorative — trim, don't throw
   return send(sessionId, to, {
     type: 'interactive',
     interactive: {
       type: 'button',
       ...(headerImageId ? { header: { type: 'image', image: { id: headerImageId } } } : {}),
       body: { text },
-      ...(footer ? { footer: { text: footer } } : {}),
+      ...(ft ? { footer: { text: ft } } : {}),
       action: {
         buttons: buttons.map((b) => ({
           type: 'reply', reply: { id: b.id, title: b.title.slice(0, 20) },
@@ -135,20 +135,20 @@ function sendButtons(sessionId, to, text, buttons, footer, headerImageId) {
  */
 function sendCtaUrl(sessionId, to, { body, url, displayText, header, footer }) {
   checkLen('interactive body', body, LIMIT.interactiveBody);
-  checkLen('header', header, LIMIT.header);
-  checkLen('footer', footer, LIMIT.footer);
-  // The button LABEL is just a short call-to-action — never let an over-long one
-  // throw and swallow the whole message (the parent would get nothing). Truncate
-  // it to the limit, code-point-safe so an emoji is never cut in half, exactly as
-  // sendButtons already does for reply-button titles.
+  // Header, footer and the button LABEL are short, decorative fields — never let
+  // an over-long one throw and swallow the whole message (the parent would get
+  // nothing). Trim them to the limit, code-point-safe so an emoji is never cut
+  // in half, exactly as sendButtons does for reply-button titles.
+  const hd = clampCodePoints(header, LIMIT.header);
+  const ft = clampCodePoints(footer, LIMIT.footer);
   const label = clampCodePoints(displayText, LIMIT.buttonTitle);
   return send(sessionId, to, {
     type: 'interactive',
     interactive: {
       type: 'cta_url',
-      ...(header ? { header: { type: 'text', text: header } } : {}),
+      ...(hd ? { header: { type: 'text', text: hd } } : {}),
       body: { text: body },
-      ...(footer ? { footer: { text: footer } } : {}),
+      ...(ft ? { footer: { text: ft } } : {}),
       action: { name: 'cta_url', parameters: { display_text: label, url } },
     },
   }, body, 'interactive');
@@ -182,15 +182,15 @@ async function cachedMediaId(filePath, mime = 'image/png', maxAgeDays = 20) {
 function sendList(sessionId, to, { header, text, footer, buttonText, rows }) {
   if (rows.length > 10) throw new Error('WhatsApp allows max 10 list rows');
   checkLen('interactive body', text, LIMIT.interactiveBody);
-  checkLen('header', header, LIMIT.header);
-  checkLen('footer', footer, LIMIT.footer);
+  const hd = clampCodePoints(header, LIMIT.header);   // decorative — trim, don't throw
+  const ft = clampCodePoints(footer, LIMIT.footer);
   return send(sessionId, to, {
     type: 'interactive',
     interactive: {
       type: 'list',
-      ...(header ? { header: { type: 'text', text: header } } : {}),
+      ...(hd ? { header: { type: 'text', text: hd } } : {}),
       body: { text },
-      ...(footer ? { footer: { text: footer } } : {}),
+      ...(ft ? { footer: { text: ft } } : {}),
       action: {
         button: buttonText.slice(0, 20),
         sections: [{
@@ -259,14 +259,15 @@ async function sendDocument(sessionId, to, { filePath, link, filename, caption }
  */
 function sendFlow(sessionId, to, { flowId, flowToken, cta, body, header, footer, screen = 'SIGNUP', data }) {
   checkLen('interactive body', body, LIMIT.interactiveBody);
-  checkLen('footer', footer, LIMIT.footer);
+  const hd = clampCodePoints(header, LIMIT.header);   // decorative — trim, don't throw
+  const ft = clampCodePoints(footer, LIMIT.footer);
   return send(sessionId, to, {
     type: 'interactive',
     interactive: {
       type: 'flow',
-      ...(header ? { header: { type: 'text', text: header } } : {}),
+      ...(hd ? { header: { type: 'text', text: hd } } : {}),
       body: { text: body },
-      ...(footer ? { footer: { text: footer } } : {}),
+      ...(ft ? { footer: { text: ft } } : {}),
       action: {
         name: 'flow',
         parameters: {
