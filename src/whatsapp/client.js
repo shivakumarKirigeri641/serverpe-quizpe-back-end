@@ -93,6 +93,14 @@ function checkLen(label, value, max) {
   }
 }
 
+/** Trim to `max` code points (never splitting an emoji), for labels where a
+ *  too-long value should be shortened rather than throw away the whole message. */
+function clampCodePoints(value, max) {
+  if (value == null) return value;
+  const cps = [...String(value)];
+  return cps.length > max ? cps.slice(0, max).join('') : String(value);
+}
+
 /** Plain text (only valid inside the 24h window). */
 function sendText(sessionId, to, text) {
   checkLen('text body', text, LIMIT.text);
@@ -129,7 +137,11 @@ function sendCtaUrl(sessionId, to, { body, url, displayText, header, footer }) {
   checkLen('interactive body', body, LIMIT.interactiveBody);
   checkLen('header', header, LIMIT.header);
   checkLen('footer', footer, LIMIT.footer);
-  checkLen('button title', displayText, LIMIT.buttonTitle);
+  // The button LABEL is just a short call-to-action — never let an over-long one
+  // throw and swallow the whole message (the parent would get nothing). Truncate
+  // it to the limit, code-point-safe so an emoji is never cut in half, exactly as
+  // sendButtons already does for reply-button titles.
+  const label = clampCodePoints(displayText, LIMIT.buttonTitle);
   return send(sessionId, to, {
     type: 'interactive',
     interactive: {
@@ -137,7 +149,7 @@ function sendCtaUrl(sessionId, to, { body, url, displayText, header, footer }) {
       ...(header ? { header: { type: 'text', text: header } } : {}),
       body: { text: body },
       ...(footer ? { footer: { text: footer } } : {}),
-      action: { name: 'cta_url', parameters: { display_text: displayText, url } },
+      action: { name: 'cta_url', parameters: { display_text: label, url } },
     },
   }, body, 'interactive');
 }

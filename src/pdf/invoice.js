@@ -106,7 +106,13 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   // Line items: base plan (Maths) + any subject add-ons chosen in the cart.
   // All prices are GST-inclusive; taxable value is derived per line.
   const taxableOf = (g) => +(g * 100 / (100 + gstPct)).toFixed(2);
-  const lineItems = [{ desc: `${head.plan_name} — Mathematics (${head.duration} days)`, plan: head.plan_code, qty: head.student_count, gross: Number(head.price) }];
+  // A mid-plan add-child invoice charges a PRO-RATED slice, not the plan's list
+  // price, so the cart may carry a baseLine override describing that slice.
+  // Normal checkout carts have no baseLine and keep the plan's full-price line.
+  const lineItems = cart && cart.baseLine
+    ? [{ desc: cart.baseLine.desc, plan: cart.baseLine.plan || head.plan_code,
+         qty: cart.baseLine.qty ?? head.student_count, gross: Number(cart.baseLine.gross) }]
+    : [{ desc: `${head.plan_name} — Mathematics (${head.duration} days)`, plan: head.plan_code, qty: head.student_count, gross: Number(head.price) }];
   if (cart && Array.isArray(cart.students)) {
     const addonAgg = {};   // subject_code -> { count, price }
     cart.students.forEach(st => (st.addons || []).forEach(a => {
@@ -189,7 +195,11 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   lineItems.forEach((li, idx) => {
     const rowH = idx === 0 ? 34 : 22;
     doc.rect(M, y, W, rowH).fillAndStroke(C.white, C.line);
-    const sub = idx === 0 ? `\n${head.student_count} child${head.student_count > 1 ? 'ren' : ''} · ${fmtDate(head.plan_start_date)} to ${fmtDate(head.plan_end_date)}` : '';
+    const sub = idx === 0
+      ? (cart && cart.baseLine && cart.baseLine.sub != null
+          ? `\n${cart.baseLine.sub}`
+          : `\n${head.student_count} child${head.student_count > 1 ? 'ren' : ''} · ${fmtDate(head.plan_start_date)} to ${fmtDate(head.plan_end_date)}`)
+      : '';
     const cells = [li.desc + sub, li.plan, String(li.qty), money(taxableOf(li.gross)), money(li.gross)];
     cx = M;
     cols.forEach((c, i) => {

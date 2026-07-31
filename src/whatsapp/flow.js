@@ -705,6 +705,21 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // Marketing template quick-reply buttons route to the right flow. Matched on
+  // both the button TITLE (predictable) and optional payload ids, so promos
+  // like "Start free trial" / "Restart quizzes" / "Get my invite link" work
+  // whichever way the template is authored.
+  const mkt = String(text || '').toLowerCase();
+  if (id === 'MKT_START' || /^(start (the )?(free )?trial|start revision|restart (quizzes|revision|my child))/.test(mkt)) {
+    if (ctx.exists) await showMainMenu(session, mobile, ctx);
+    else await showWelcome(session, mobile);
+    return;
+  }
+  if (id === 'MKT_INVITE' || /(get my invite|invite link|refer a friend)/.test(mkt)) {
+    await handleMenuChoice(session, mobile, ctx, 'refer_friend');
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }
@@ -939,10 +954,42 @@ async function startCheckout(session, mobile, planCode) {
   const base = (gross * 100 / (100 + pct)).toFixed(2);
   const tax = (gross - base).toFixed(2);
 
-  const { createCheckoutLink } = require('../routers/paymentRouter');
-  const { url } = await createCheckoutLink(session.id, mobile, planCode);
+  const pr = require('../routers/paymentRouter');
+
+  // Renewal in one tap: an existing family already has its children, state and
+  // add-ons on file, so we can hand them a Razorpay link directly — no form to
+  // refill, and just ONE link in the chat. Falls back to the form link below
+  // when they're new, or the plan's seats no longer match their children.
+  let renewal = null;
+  try { renewal = await pr.createRenewalLink(session.id, mobile, planCode); }
+  catch (e) { console.error('[flow] renewal link:', e.message); }
+
   await setState(session, 'awaiting_payment', 'chose_plan', { plan_code: planCode });
 
+  if (renewal && renewal.short_url) {
+    await wa.sendCtaUrl(session.id, mobile, {
+      header: 'Renew your plan',
+      body:
+`🧾 *${plan.plan_name}* — renewal
+
+Plan price (incl. GST): ₹${gross}
+• Base: ₹${base}
+• GST @ ${pct}%: ₹${tax}
+👦 For ${plan.student_count} child${plan.student_count > 1 ? 'ren' : ''} · ${plan.duration} days
+
+*Total payable: ₹${renewal.amount}*
+
+Tap below to pay securely on Razorpay. Your quizzes continue the moment it's paid — the invoice and renewal confirmation come automatically. 🌟`,
+      displayText: `💳 Pay ₹${renewal.amount}`,
+      url: renewal.short_url,
+      footer: 'Secure payment via Razorpay · ServerPe App Solutions (GST-registered)',
+    });
+    return;
+  }
+
+  // New family (or a seat-count change): send the form checkout link — still a
+  // single link. They fill their children in there and pay on that same page.
+  const { url } = await pr.createCheckoutLink(session.id, mobile, planCode);
   await wa.sendCtaUrl(session.id, mobile, {
     header: `Payment summary`,
     body:

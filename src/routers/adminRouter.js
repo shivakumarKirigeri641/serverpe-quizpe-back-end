@@ -32,6 +32,7 @@ router.use(require('../admin/whatsappRoutes'));
 router.use(require('../admin/inboxRoutes'));
 // first-party site-visitor analytics + inbox toggle
 router.use(require('../admin/visitorRoutes'));
+router.use(require('../admin/broadcastRoutes'));
 
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 const ok = (res, data) => res.json({ success: true, ...data });
