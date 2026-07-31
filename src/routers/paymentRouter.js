@@ -542,7 +542,9 @@ async function finalize(c, pay, mailCtx = null) {
       const { stackedMessage } = require('../utils/subscriptionPeriod');
       const carried = stackedMessage(period, M.fmtDate);
       await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎉 *Payment successful — welcome to ${c.plan_name}!*
+`🎉 *${period.stacked
+  ? `Renewed — your ${c.plan_name} continues!`
+  : `Payment successful — welcome to ${c.plan_name}!`}*
 
 👦 *Student${students.length > 1 ? 's' : ''}:* ${names}
 📅 *Valid till:* ${M.fmtDate(subId.plan_end_date)}

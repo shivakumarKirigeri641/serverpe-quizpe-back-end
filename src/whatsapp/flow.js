@@ -954,42 +954,14 @@ async function startCheckout(session, mobile, planCode) {
   const base = (gross * 100 / (100 + pct)).toFixed(2);
   const tax = (gross - base).toFixed(2);
 
-  const pr = require('../routers/paymentRouter');
-
-  // Renewal in one tap: an existing family already has its children, state and
-  // add-ons on file, so we can hand them a Razorpay link directly — no form to
-  // refill, and just ONE link in the chat. Falls back to the form link below
-  // when they're new, or the plan's seats no longer match their children.
-  let renewal = null;
-  try { renewal = await pr.createRenewalLink(session.id, mobile, planCode); }
-  catch (e) { console.error('[flow] renewal link:', e.message); }
-
+  // One secure checkout link to our approved domain (api.quizpe.in/pay.html).
+  // The parent fills in their children, accepts the terms and pays there via
+  // Razorpay Standard Checkout, which verifies in-browser — so activation never
+  // waits on the webhook. A single link in the chat, no double-link confusion.
+  const { createCheckoutLink } = require('../routers/paymentRouter');
+  const { url } = await createCheckoutLink(session.id, mobile, planCode);
   await setState(session, 'awaiting_payment', 'chose_plan', { plan_code: planCode });
 
-  if (renewal && renewal.short_url) {
-    await wa.sendCtaUrl(session.id, mobile, {
-      header: 'Renew your plan',
-      body:
-`🧾 *${plan.plan_name}* — renewal
-
-Plan price (incl. GST): ₹${gross}
-• Base: ₹${base}
-• GST @ ${pct}%: ₹${tax}
-👦 For ${plan.student_count} child${plan.student_count > 1 ? 'ren' : ''} · ${plan.duration} days
-
-*Total payable: ₹${renewal.amount}*
-
-Tap below to pay securely on Razorpay. Your quizzes continue the moment it's paid — the invoice and renewal confirmation come automatically. 🌟`,
-      displayText: `💳 Pay ₹${renewal.amount}`,
-      url: renewal.short_url,
-      footer: 'Razorpay · ServerPe App Solutions (GST-registered)',
-    });
-    return;
-  }
-
-  // New family (or a seat-count change): send the form checkout link — still a
-  // single link. They fill their children in there and pay on that same page.
-  const { url } = await pr.createCheckoutLink(session.id, mobile, planCode);
   await wa.sendCtaUrl(session.id, mobile, {
     header: `Payment summary`,
     body:
