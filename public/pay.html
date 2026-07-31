@@ -209,7 +209,7 @@
              <div class="sum-row"><span class="k">SGST @ ${pct/2}%</span><span class="v">${inr(gst/2)}</span></div>`
           : `<div class="sum-row"><span class="k">IGST @ ${pct}%</span><span class="v">${inr(gst)}</span></div>`) +
         `<div class="sum-total"><span>Total payable</span><span>${inr(total)}</span></div>`;
-      $("payBtn").textContent = `Pay ${inr(total)}`;
+      $("payBtn").textContent = `Get payment link · ${inr(total)}`;
     }
 
     function collect() {
@@ -234,31 +234,32 @@
     }
 
     $("payBtn").addEventListener("click", async () => {
-      $("err").textContent = ""; $("payBtn").disabled = true; $("payBtn").textContent = "Starting…";
+      $("err").textContent = ""; $("payBtn").disabled = true; $("payBtn").textContent = "Getting link…";
       const students = collect(), state = $("state").value;
       try {
-        const o = await (await fetch("/pay/api/create-order", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, students, state }) })).json();
+        const o = await (await fetch("/pay/api/payment-link", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, students, state }) })).json();
         if (!o.success) { $("err").textContent = o.error; reset(); return; }
-        if (o.already_paid) { showDone("Already paid — your subscription is active."); return; }
-        const rzp = new Razorpay({
-          key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency,
-          name: ctx.business.product_name, description: ctx.plan.name,
-          // Show the QuizPe mark in the checkout modal. Without this, Razorpay
-          // falls back to the logo on the merchant account, which is ServerPe.
-          image: location.origin + "/assets/logo-mark.png",
-          prefill: { contact: ctx.mobile }, theme: { color: "#075e54" },
-          handler: async (resp) => {
-            $("payBtn").textContent = "Verifying…";
-            const v = await (await fetch("/pay/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ token, ...resp, students, state }) })).json();
-            if (!v.success) { $("err").textContent = v.error; reset(); return; }
-            showDone(`Invoice ${v.invoice} · valid till ${new Date(v.end_date).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}`);
-          },
-          modal: { ondismiss: reset },
-        });
-        rzp.open();
+        showLink(o.short_url);
       } catch { $("err").textContent = "Something went wrong."; reset(); }
     });
+
+    // The payment link runs on Razorpay's own page (works while our domain is
+    // under review). We also push it to WhatsApp, so show both here.
+    function showLink(url) {
+      const html =
+        `<div style="text-align:center">
+           <div style="font-size:44px">💳</div>
+           <h2 style="color:var(--brand-dark);margin:8px 0">Your payment link is ready</h2>
+           <p style="color:#667781;font-size:14px;margin:0 0 16px">
+             We've sent this <b>exact same link</b> to your WhatsApp too — the button below and
+             the one in your chat both open the same secure <b>Razorpay</b> page, so you can trust
+             either one. Your child's daily quizzes start the moment it's paid.
+           </p>
+           <a class="btn" href="${url}" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none">💳 Pay securely now</a>
+           <p style="color:#8a9a94;font-size:12px;margin-top:14px">🔒 Powered by Razorpay · ServerPe App Solutions (GST-registered)</p>
+         </div>`;
+      $("wrap").innerHTML = html;
+    }
     function reset(){ $("payBtn").disabled = false; recompute(); }
     function showDone(msg){
       $("doneMsg").textContent = msg;

@@ -288,6 +288,78 @@ router.post('/api/create-order', async (req, res) => {
   }
 });
 
+/* ------------------------------------------------------ create payment link */
+/**
+ * Razorpay Payment Link — the checkout runs on Razorpay's OWN hosted page
+ * (rzp.io), so it works even while our website domain is under review. The link
+ * is returned to the page AND pushed to the parent's WhatsApp. On payment the
+ * `payment_link.paid` webhook activates the plan via finalize(), mapped back by
+ * the token stored in the link's notes.
+ */
+router.post('/api/payment-link', async (req, res) => {
+  try {
+    const { token, students, state } = req.body || {};
+    const c = await loadCheckout(token);
+    if (!c) return res.status(410).json({ success: false, error: 'Link expired.' });
+
+    const built = await buildCart(c, students, state);
+    if (built.error) return res.status(400).json({ success: false, error: built.error });
+    const amountPaise = Math.round(built.total * 100);
+    const rzp = await razorpayCreds();
+    const contact = `+91${String(c.mobile_number).replace(/\D/g, '').slice(-10)}`;
+
+    const plRes = await fetch(`${RZP}/payment_links`, {
+      method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: amountPaise, currency: 'INR', accept_partial: false,
+        description: String(c.plan_name || 'QuizPe plan').slice(0, 200),
+        customer: { name: String(built.cart.parent_name || c.mobile_number).slice(0, 50), contact },
+        notify: { sms: false, email: false }, reminder_enable: false,
+        notes: { token: String(token), checkout_id: String(c.id), plan: String(c.plan_code || ''), mobile: String(c.mobile_number) },
+      }),
+    });
+    const link = await plRes.json();
+    if (!plRes.ok || !link.short_url) {
+      console.error('[pay] payment-link failed:', link);
+      return res.status(502).json({ success: false, error: link?.error?.description || 'Could not create payment link.' });
+    }
+
+    // store the server-validated cart + mode so the webhook can finalize safely
+    await db.query(`UPDATE checkout_sessions SET amount=$2, status='link_created', cart=$3, razorpay_mode=$4 WHERE id=$1`,
+      [c.id, built.total, JSON.stringify(built.cart), rzp.mode]);
+
+    // Share the link on WhatsApp (best-effort — the page also shows it). The
+    // copy is written to defuse the instinctive "is this spam?" reaction: it
+    // names the child + exact plan + amount, says it is the link they JUST
+    // requested, and credits Razorpay + the registered business — all arriving
+    // from the Meta-verified account. It goes as a BUTTON, so no raw URL shows.
+    if (c.whatsapp_session_id) {
+      try {
+        const wa = require('../whatsapp/client');
+        const kids = (built.cart.students || []).map((s) => s.name).filter(Boolean);
+        const kidLabel = kids.length <= 2 ? kids.join(' & ') : `${kids[0]}, ${kids[1]} +${kids.length - 2} more`;
+        const first = String(built.cart.parent_name || '').trim().split(/\s+/)[0] || 'there';
+        await wa.sendCtaUrl(c.whatsapp_session_id, c.mobile_number, {
+          header: '✅ QuizPe — your payment link',
+          body: `Hi ${first} 👋 As you *just requested on the form*, here's your secure link`
+            + `${kidLabel ? ` for *${kidLabel}*` : ''} — *${c.plan_name}, ₹${built.total}*.\n\n`
+            + `🔒 It opens *Razorpay's* official payment page (UPI · card · netbanking).\n`
+            + `✔️ Same link shown on your form just now — nothing extra to pay.\n\n`
+            + `Your child's daily quizzes begin the moment it's paid. 🌟`,
+          displayText: '💳 Pay securely',
+          url: link.short_url,
+          footer: 'Razorpay · ServerPe App Solutions (GST-registered)',
+        });
+      } catch (e) { console.error('[pay] wa link send:', e.message); }
+    }
+
+    res.json({ success: true, short_url: link.short_url, amount: built.total });
+  } catch (e) {
+    console.error('[pay] payment-link route failed:', e.message);
+    res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
+  }
+});
+
 /**
  * Idempotently activate a paid checkout. Safe to call twice for the same
  * order/payment — if it's already been finalized, it returns the existing
@@ -578,5 +650,99 @@ router.post('/api/verify', async (req, res) => {
   }
 });
 
+/* ---------------------------------------------------------------- webhook */
+/** Load a checkout by its Razorpay order id (the webhook has no token). */
+async function loadCheckoutByOrder(orderId) {
+  const { rows } = await db.query(
+    `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+            pl.regular_price, pl.student_count, pl.duration
+       FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+      WHERE c.razorpay_order_id = $1
+      ORDER BY c.id DESC LIMIT 1`, [orderId]);
+  return applyOfferPrice(rows[0] || null);
+}
+
+/** Load a checkout by token, ignoring expiry (webhook is signature-trusted). */
+async function loadCheckoutByToken(token) {
+  const { rows } = await db.query(
+    `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+            pl.regular_price, pl.student_count, pl.duration
+       FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+      WHERE c.token = $1 ORDER BY c.id DESC LIMIT 1`, [token]);
+  return applyOfferPrice(rows[0] || null);
+}
+
+/** Activate from a Payment Link payment, mapped back by the token in notes. */
+async function activateFromToken(token, pay) {
+  if (!['captured', 'authorized'].includes(pay.status)) return;
+  const c = await loadCheckoutByToken(token);
+  if (!c) { console.warn(`[pay] webhook: no checkout for token ${token}`); return; }
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    console.error(`[pay] webhook link amount mismatch token ${token}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
+    return;
+  }
+  const result = await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
+  console.log(`[pay] webhook link ${result.already ? 'already active' : 'ACTIVATED'} token=${token} invoice=${result.invoice}`);
+}
+
+async function activateFromWebhook(pay) {
+  if (!['captured', 'authorized'].includes(pay.status)) return;
+  const c = await loadCheckoutByOrder(pay.order_id);
+  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id}`); return; }
+  // amount safety — the same guard the browser path uses
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    console.error(`[pay] webhook amount mismatch order ${pay.order_id}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
+    return;
+  }
+  const result = await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
+  console.log(`[pay] webhook ${result.already ? 'already active' : 'ACTIVATED'} order=${pay.order_id} invoice=${result.invoice}`);
+}
+
+/**
+ * Razorpay webhook — the server-to-server safety net. If the browser callback
+ * after checkout is lost (parent closes the app), this still activates the plan.
+ * The signature is verified against the RAW body with RAZORPAY_WEBHOOK_SECRET,
+ * and activation is idempotent via finalize(), so a payment the callback already
+ * handled is never activated twice. Registered in app.js BEFORE express.json()
+ * so the raw body survives for signing.
+ */
+async function razorpayWebhook(req, res) {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) { console.error('[pay] webhook: RAZORPAY_WEBHOOK_SECRET not set'); return res.status(500).send('not configured'); }
+
+  const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+  const signature = String(req.headers['x-razorpay-signature'] || '');
+  const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+  let valid = false;
+  try { valid = signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature)); }
+  catch { valid = false; }
+  if (!valid) { console.warn('[pay] webhook: bad signature'); return res.status(400).send('invalid signature'); }
+
+  let event;
+  try { event = JSON.parse(raw.toString('utf8')); }
+  catch { return res.status(200).json({ received: true }); }
+
+  const type = event.event;
+  const pay = event.payload?.payment?.entity || null;
+  try {
+    if (type === 'payment_link.paid') {
+      // Payment Link path — map back to the checkout by the token in notes.
+      const linkNotes = event.payload?.payment_link?.entity?.notes || {};
+      if (linkNotes.token && pay) await activateFromToken(linkNotes.token, pay);
+      else console.warn('[pay] webhook payment_link.paid without token/payment');
+    } else if ((type === 'payment.captured' || type === 'order.paid') && pay?.order_id) {
+      await activateFromWebhook(pay);
+    } else if (type === 'payment.failed') {
+      console.log(`[pay] webhook payment.failed order=${pay?.order_id} id=${pay?.id} reason=${pay?.error_description || ''}`);
+    }
+  } catch (e) {
+    console.error('[pay] webhook activate error:', e.message);
+  }
+  // Always ack — Razorpay retries on non-2xx, and our idempotency makes a repeat
+  // harmless, but there is nothing to retry for a payload we understood.
+  return res.status(200).json({ received: true });
+}
+
 module.exports = router;
 module.exports.createCheckoutLink = createCheckoutLink;
+module.exports.razorpayWebhook = razorpayWebhook;

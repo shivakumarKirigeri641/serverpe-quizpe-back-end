@@ -152,6 +152,12 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// Razorpay webhook — verifies the RAW body signature, so it MUST run before
+// express.json() consumes the request stream. Server-to-server safety net that
+// activates a paid plan even if the browser callback after checkout is lost.
+app.post('/pay/webhook', express.raw({ type: '*/*' }), (req, res) =>
+  paymentRouter.razorpayWebhook(req, res));
+
 // Body parsers — WhatsApp posts JSON.
 app.use(require('cookie-parser')());
 app.use(express.json());
