@@ -41,6 +41,10 @@ async function ensureSchema() {
       created_at    timestamptz NOT NULL DEFAULT now()
     );`);
   await db.query(`CREATE INDEX IF NOT EXISTS idx_mkt_broadcasts_mobile ON marketing_broadcasts(mobile_number, created_at);`);
+  // Header/footer text of a template, for the admin preview only (Meta stores
+  // the live template; these columns just let us show the whole thing).
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS header_text text;`);
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS footer_text text;`);
   schemaReady = true;
 }
 
@@ -103,7 +107,7 @@ router.get('/broadcast/options', requireAdmin, async (req, res) => {
   try {
     await ensureSchema();
     const { rows: templates } = await db.query(
-      `SELECT template_name, send_context, body_text, buttons FROM whatsapp_templates
+      `SELECT template_name, send_context, header_text, body_text, footer_text, buttons FROM whatsapp_templates
         WHERE is_active AND approval_status='APPROVED' ORDER BY template_name`);
     const segCounts = {};
     for (const key of Object.keys(SEGMENTS)) segCounts[key] = (await recipients(key)).length;
