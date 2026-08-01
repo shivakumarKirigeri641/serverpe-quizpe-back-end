@@ -293,9 +293,10 @@ async function runFormNudge() {
   const now = nh * 60 + nm;
   if (now < toMin(FORM_NUDGE_FROM) || now > toMin(FORM_NUDGE_TO)) return;   // business hours only
 
-  const tpl = await approvedTemplate(FORM_NUDGE_TEMPLATE);
-  if (!tpl) return;                                                          // not cleared by Meta yet
-
+  // The nudge only ever fires within 24h of the parent stalling (see the window
+  // in the query below), so it goes as a FREE-FORM message with a button that
+  // reopens the child-form directly — no template approval needed, no marketing
+  // cost, and it drops them straight back where they left off.
   const { rows } = await db.query(
     `SELECT w.id AS session_id, w.mobile_number,
             COALESCE(NULLIF(w.context->>'parent_name',''), 'there') AS parent_name
@@ -324,9 +325,15 @@ async function runFormNudge() {
         WHERE id = $1`, [r.session_id]);
     try {
       const name = r.parent_name === 'there' ? null : r.parent_name;
-      const { token } = await createSignupLink(r.session_id, r.mobile_number, name);
-      await wa.sendTemplateWithButton(r.session_id, r.mobile_number, tpl.template_name,
-        { bodyParams: [r.parent_name], buttonParam: token });
+      const { url } = await createSignupLink(r.session_id, r.mobile_number, name);
+      await wa.sendCtaUrl(r.session_id, r.mobile_number, {
+        header: '✅ One quick step left',
+        body: `Hi ${r.parent_name} 👋 You're almost in! Add your child's name, class and board, `
+          + `and tonight's *free* 5-minute quiz is ready.\n\nIt takes about 30 seconds — tap below. 🌟`,
+        displayText: '✅ Fill child form',
+        url,
+        footer: 'QuizPe · free for 7 days',
+      });
       sent++;
     } catch (e) {
       console.error(`[scheduler] form_nudge failed for ${r.mobile_number}: ${e.message}`);
