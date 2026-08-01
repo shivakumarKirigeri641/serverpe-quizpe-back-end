@@ -103,7 +103,7 @@ router.get('/broadcast/options', requireAdmin, async (req, res) => {
   try {
     await ensureSchema();
     const { rows: templates } = await db.query(
-      `SELECT template_name, send_context FROM whatsapp_templates
+      `SELECT template_name, send_context, body_text, buttons FROM whatsapp_templates
         WHERE is_active AND approval_status='APPROVED' ORDER BY template_name`);
     const segCounts = {};
     for (const key of Object.keys(SEGMENTS)) segCounts[key] = (await recipients(key)).length;

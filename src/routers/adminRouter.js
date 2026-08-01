@@ -560,6 +560,20 @@ router.get('/finance/gstr1', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] gstr1:', e.message); fail(res, 500, 'Could not load GST data.'); }
 });
 
+/** Downloadable GSTR-1 working-summary PDF for a period (to assist filing). */
+router.get('/finance/gstr1/download', requireAdmin, async (req, res) => {
+  const period = /^\d{4}-\d{2}$/.test(req.query.period || '')
+    ? req.query.period : new Date().toISOString().slice(0, 7);
+  try {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="GSTR1-${period}.pdf"`);
+    await require('../pdf/gstr1').streamGstr1(period, res);
+  } catch (e) {
+    console.error('[admin] gstr1 pdf:', e.message);
+    if (!res.headersSent) fail(res, 500, 'Could not generate the GSTR-1 PDF.');
+  }
+});
+
 /* ---------------------------------------------------------------- lookups */
 // CRUD is limited to the reference tables an admin genuinely edits. Parents,
 // students and question_bank are deliberately read-only here: editing them by
