@@ -167,13 +167,17 @@ router.get('/testimonials', async (req, res) => {
     // (app reviews carry feedback_id), otherwise by name + location (website
     // reviews). DISTINCT ON keeps, per parent, their highest-priority / most
     // recent review; the outer query then orders the wall by curation + recency.
+    // `verified` = the review was promoted from a real QuizPe account's in-app
+    // feedback (feedback_id present → a family that actually took the quizzes),
+    // not typed into the public form by anyone. That is the honest authenticity
+    // signal — we do not solicit reviews from friends or relatives.
     const rows = await cached('testimonials', async () => (await db.query(
-      `SELECT author_name, author_role, location, rating, message
+      `SELECT author_name, author_role, location, rating, message, verified
          FROM (
            SELECT DISTINCT ON (COALESCE('p' || f.parent_id::text,
                                         'w|' || lower(t.author_name) || '|' || COALESCE(lower(t.location), '')))
                   t.author_name, t.author_role, t.location, t.rating, t.message,
-                  t.display_order, t.id
+                  t.display_order, t.id, (t.feedback_id IS NOT NULL) AS verified
              FROM testimonials t
              LEFT JOIN feedbacks f ON f.id = t.feedback_id
             WHERE t.is_approved AND t.is_active
