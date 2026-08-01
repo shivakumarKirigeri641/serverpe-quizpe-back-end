@@ -18,7 +18,7 @@
 const db = require('../database/connectDB');
 
 const TZ = 'Asia/Kolkata';
-const IST = (col) => `to_char(${col} AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}', 'DD Mon HH24:MI')`;
+const IST = (col) => `to_char(${col} AT TIME ZONE '${TZ}', 'DD Mon HH24:MI')`;
 
 /**
  * @param {object} opts
@@ -47,7 +47,10 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
               st.student_name, p.parent_name, p.parent_mobile_number,
               ((SELECT COUNT(*) FROM student_quizpe_histories h
                  WHERE h.tracker_id = t.id AND h.answered_option IS NOT NULL)
-               || ' of ' || t.question_count || ' answered'),
+               || ' of ' ||
+               COALESCE((SELECT COUNT(*) FROM student_quizpe_histories h2
+                          WHERE h2.tracker_id = t.id), t.question_count)
+               || ' answered'),
               t.id, st.id, p.id, NULL::numeric
          FROM quizpe_tracker t
          JOIN quizpe_status qs ON qs.id = t.status_id AND qs.status_code = 'in_progress'
@@ -128,14 +131,14 @@ async function todayCounts() {
        (SELECT COUNT(*)::int FROM quizpe_tracker t JOIN quizpe_status s ON s.id=t.status_id
          WHERE t.quiz_date = CURRENT_DATE AND s.status_code='in_progress')    AS quizzes_in_progress,
        (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
-         WHERE p.is_trial AND (s.created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS trials,
+         WHERE p.is_trial AND (s.created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS trials,
        (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
-         WHERE NOT p.is_trial AND (s.created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS paid,
+         WHERE NOT p.is_trial AND (s.created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS paid,
        (SELECT COUNT(*)::int FROM feedbacks
          WHERE rating IS NOT NULL
-           AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS feedback,
+           AND (created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS feedback,
        (SELECT COUNT(*)::int FROM support_tickets
-         WHERE (created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS support`);
+         WHERE (created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS support`);
   return r;
 }
 
@@ -158,10 +161,11 @@ async function tonight() {
             pl.plan_name, pl.is_trial,
             t.id AS tracker_id, t.question_count, qs.status_code,
             COALESCE(h.answered, 0)::int AS answered,
+            COALESCE(h.built, 0)::int AS built_count,
             r.id AS report_id, r.file_name, r.quiz_date::text AS report_date,
             r.score_correct, r.score_total, r.score_pct, r.grade,
             ${IST('t.modified_at')} AS last_activity,
-            (now() AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::time >= sub.quiz_time AS window_open
+            (now() AT TIME ZONE '${TZ}')::time >= sub.quiz_time AS window_open
        FROM students st
        JOIN parents p ON p.id = st.parent_id AND p.is_active
        JOIN parents_quizpe_subscriptions sub
@@ -173,7 +177,8 @@ async function tonight() {
        LEFT JOIN quizpe_tracker t ON t.student_id = st.id AND t.quiz_date = CURRENT_DATE
        LEFT JOIN quizpe_status qs ON qs.id = t.status_id
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) FILTER (WHERE answered_option IS NOT NULL) AS answered
+         SELECT COUNT(*) FILTER (WHERE answered_option IS NOT NULL) AS answered,
+                COUNT(*) AS built
            FROM student_quizpe_histories WHERE tracker_id = t.id) h ON true
        LEFT JOIN quiz_reports r ON r.tracker_id = t.id
       WHERE st.is_active

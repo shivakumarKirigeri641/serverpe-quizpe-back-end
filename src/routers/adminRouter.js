@@ -30,6 +30,9 @@ router.use(require('../admin/questionRoutes'));
 router.use(require('../admin/whatsappRoutes'));
 // website enquiries + testimonial moderation
 router.use(require('../admin/inboxRoutes'));
+// first-party site-visitor analytics + inbox toggle
+router.use(require('../admin/visitorRoutes'));
+router.use(require('../admin/broadcastRoutes'));
 
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 const ok = (res, data) => res.json({ success: true, ...data });
@@ -116,6 +119,32 @@ router.get('/dashboard', requireAdmin, async (req, res) => {
     console.error('[admin] dashboard:', e.message);
     fail(res, 500, 'Could not load the dashboard.');
   }
+});
+
+/** The founder's morning briefing — night recap + action list. */
+router.get('/briefing', requireAdmin, async (req, res) => {
+  try { ok(res, { briefing: await metrics.briefing() }); }
+  catch (e) { console.error('[admin] briefing:', e.message); fail(res, 500, 'Could not load the briefing.'); }
+});
+
+/** Feel-good signals: latest payment, perfect scores, live streaks. */
+router.get('/celebrations', requireAdmin, async (req, res) => {
+  try { ok(res, { celebrations: await metrics.celebrations() }); }
+  catch (e) { console.error('[admin] celebrations:', e.message); fail(res, 500, 'Could not load celebrations.'); }
+});
+
+/** End-to-end conversion funnel, retention cohorts, and the activity calendar. */
+router.get('/analytics/funnel', requireAdmin, async (req, res) => {
+  try { ok(res, { funnel: await metrics.funnel() }); }
+  catch (e) { console.error('[admin] funnel:', e.message); fail(res, 500, 'Could not load the funnel.'); }
+});
+router.get('/analytics/retention', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.retention() }); }
+  catch (e) { console.error('[admin] retention:', e.message); fail(res, 500, 'Could not load retention.'); }
+});
+router.get('/analytics/activity', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.activityCalendar(clamp(req.query.weeks, 12, 53)) }); }
+  catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
 });
 
 /** Cohort health as percentages — participation, scoring spread, movement. */
@@ -231,7 +260,7 @@ router.get('/parents/:id', requireAdmin, async (req, res) => {
     if (!parent) return fail(res, 404, 'Parent not found.');
 
     const [students, subs, invoices, tickets, feedback] = await Promise.all([
-      db.query(`SELECT st.*, b.board_code, g.grade_name, m.medium_code
+      db.query(`SELECT st.*, b.board_code, g.grade_name, g.grade_code, m.medium_code
                   FROM students st
                   JOIN boards b ON b.id=st.board_id JOIN grades g ON g.id=st.grade_id
                   LEFT JOIN mediums m ON m.id=st.medium_id

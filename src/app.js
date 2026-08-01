@@ -54,7 +54,10 @@ app.use(helmet({
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:', 'https://*.razorpay.com'],
       connectSrc: ["'self'", 'https://*.razorpay.com', 'https://lumberjack.razorpay.com'],
-      frameSrc: ["'self'", 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
+      // 'blob:' lets the admin panel show a report PDF inline: it fetches the
+      // bytes (with the bearer token an <iframe src> cannot carry) and renders
+      // them from a blob URL. Without it the preview iframe is silently blocked.
+      frameSrc: ["'self'", 'blob:', 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
       frameAncestors: ["'none'"],       // no embedding: clickjacking
       objectSrc: ["'none'"],
       upgradeInsecureRequests: BEHIND_TLS ? [] : null,
@@ -149,6 +152,12 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
+// Razorpay webhook — verifies the RAW body signature, so it MUST run before
+// express.json() consumes the request stream. Server-to-server safety net that
+// activates a paid plan even if the browser callback after checkout is lost.
+app.post('/pay/webhook', express.raw({ type: '*/*' }), (req, res) =>
+  paymentRouter.razorpayWebhook(req, res));
+
 // Body parsers — WhatsApp posts JSON.
 app.use(require('cookie-parser')());
 app.use(express.json());
@@ -198,6 +207,9 @@ app.use('/legal', legalRouter);
 // Aggregate-only figures for the parent-facing website. Never per-person data.
 app.use('/public', publicRouter);
 
+// First-party visitor beacons (page views + WhatsApp-button clicks).
+app.use('/public', require('./routers/trackRouter'));
+
 // All application routes.
 app.use('/serverpe/platform/quizpe/v1/public/users', parentRouter);
 app.use('/serverpe/platform/quizpe/v1/public/users', whatsappRouter);
@@ -235,6 +247,14 @@ require('./pdf/reportNumber').ensureSequences()
 
 require('./pdf/invoice').ensureInvoiceSequence()
   .catch((e) => console.error('[startup] invoice sequence failed:', e.message));
+
+// Visitor-tracking table + default setting (idempotent).
+require('./tracking/visits').ensureSchema()
+  .catch((e) => console.error('[startup] visits schema failed:', e.message));
+
+// Referral model columns (qualified_at / banked / reward_kind), idempotent.
+require('./referrals/engine').ensureSchema()
+  .catch((e) => console.error('[startup] referral schema failed:', e.message));
 
 // Durable background worker (report rendering, feedback asks). Survives a
 // restart and is safe to run from several processes at once.

@@ -18,6 +18,11 @@ const { handleInbound } = require('../whatsapp/flow');
 
 const router = express.Router();
 
+// Our own WhatsApp number. Meta may deliver a webhook for any number under the
+// same App/WABA (e.g. the sibling ChallanAlerts number). We only act on events
+// addressed to OUR number, otherwise two products reply to one "hi".
+const OWN_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
 // --- GET: verification handshake ---------------------------------------------
 router.get('/whatsapp/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -38,6 +43,19 @@ router.post('/whatsapp/webhook', (req, res) => {
   res.sendStatus(200);
 
   const change = req.body?.entry?.[0]?.changes?.[0]?.value;
+  if (!change) return;
+
+  // Only handle events addressed to OUR number. If the sibling ChallanAlerts
+  // number shares this Meta App, its events are dropped here so QuizPe never
+  // replies on their behalf. Skipped only if our own id is unset (mis-config).
+  const targetId = change.metadata?.phone_number_id;
+  if (!OWN_PHONE_NUMBER_ID) {
+    console.warn('[whatsapp] WHATSAPP_PHONE_NUMBER_ID not set — cannot verify webhook target; processing anyway');
+  } else if (targetId && targetId !== OWN_PHONE_NUMBER_ID) {
+    console.log(`[whatsapp] ignoring webhook for phone_number_id=${targetId} (not ours=${OWN_PHONE_NUMBER_ID})`);
+    return;
+  }
+
   const message = change?.messages?.[0];
 
   if (message) {

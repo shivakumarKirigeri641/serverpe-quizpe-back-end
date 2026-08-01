@@ -26,7 +26,7 @@ const db = require('../database/connectDB');
 
 // Everything is reckoned in IST, so a sale at 11:30 PM lands in the right day
 // and the right month rather than sliding into UTC yesterday.
-const IST = "AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'";
+const IST = "AT TIME ZONE 'Asia/Kolkata'";
 
 /** Turn the raw sums into the founder-facing figures. Shared by every period. */
 function shape(rev, exp) {

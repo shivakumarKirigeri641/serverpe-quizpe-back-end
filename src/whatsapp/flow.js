@@ -705,6 +705,21 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // Marketing template quick-reply buttons route to the right flow. Matched on
+  // both the button TITLE (predictable) and optional payload ids, so promos
+  // like "Start free trial" / "Restart quizzes" / "Get my invite link" work
+  // whichever way the template is authored.
+  const mkt = String(text || '').toLowerCase();
+  if (id === 'MKT_START' || /^(start (the )?(free )?trial|start revision|restart (quizzes|revision|my child))/.test(mkt)) {
+    if (ctx.exists) await showMainMenu(session, mobile, ctx);
+    else await showWelcome(session, mobile);
+    return;
+  }
+  if (id === 'MKT_INVITE' || /(get my invite|invite link|refer a friend)/.test(mkt)) {
+    await handleMenuChoice(session, mobile, ctx, 'refer_friend');
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }
@@ -719,8 +734,17 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     case 'welcome':
       if (id === 'agree_terms') {
         await recordConsent(session, session.context.terms_policy_id, mobile, msg.id, ctx.parentId);
-        await setState(session, 'main_menu', 'agreed_terms');
-        await showMainMenu(session, mobile, ctx);
+        // A first-time parent who can start the free trial goes STRAIGHT into
+        // signup (trial terms -> child form) instead of the menu — one fewer
+        // step to the thing they came for. The trial-terms consent is still
+        // captured. Everyone else (already enrolled, trial already used, a
+        // returning parent) lands on the menu exactly as before.
+        if (ctx.canStartTrial) {
+          await showTrialTerms(session, mobile);
+        } else {
+          await setState(session, 'main_menu', 'agreed_terms');
+          await showMainMenu(session, mobile, ctx);
+        }
       } else {
         await wa.sendText(session.id, mobile, 'Please tap *✅ Agree & Continue* to get started.');
       }
@@ -762,11 +786,13 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         const { url } = await createSignupLink(session.id, mobile, session.context.parent_name);
         await setState(session, 'awaiting_form', 'agreed_trial');
         await wa.sendCtaUrl(session.id, mobile, {
-          header: 'One quick form',
-          body: `📝 *Almost done!*\n\nTap below to enter your child's name, board, medium, grade and state — takes about 30 seconds.`,
-          displayText: '📝 Fill the form',
+          header: '🎉 One last step!',
+          body: `Your child's *7-day FREE trial* is ready — tonight's quiz can go out in just a few hours. 🌟\n\n`
+            + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
+            + `👇 Tap below and you're done — the first quiz lands on this chat tonight.`,
+          displayText: '✅ Fill child form',
           url,
-          footer: 'Secure · works for 60 minutes · single use',
+          footer: 'Free for 7 days · no card · ~30 seconds',
         });
       } else {
         await wa.sendText(session.id, mobile, 'Tap *✅ Agree & Proceed* to continue, or *⬅️ Back* for the menu.');
@@ -928,6 +954,10 @@ async function startCheckout(session, mobile, planCode) {
   const base = (gross * 100 / (100 + pct)).toFixed(2);
   const tax = (gross - base).toFixed(2);
 
+  // One secure checkout link to our approved domain (api.quizpe.in/pay.html).
+  // The parent fills in their children, accepts the terms and pays there via
+  // Razorpay Standard Checkout, which verifies in-browser — so activation never
+  // waits on the webhook. A single link in the chat, no double-link confusion.
   const { createCheckoutLink } = require('../routers/paymentRouter');
   const { url } = await createCheckoutLink(session.id, mobile, planCode);
   await setState(session, 'awaiting_payment', 'chose_plan', { plan_code: planCode });

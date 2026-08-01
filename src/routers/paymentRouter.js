@@ -109,6 +109,34 @@ function gstBreakup(price, gstPct, intra) {
     : { base, cgst: 0, sgst: 0, igst: gst, total: gross };
 }
 
+/**
+ * The family already on file for this number, so a RENEWAL can pre-fill the form
+ * with the children they enrolled last time. The parent sees their real details
+ * (e.g. "Satwik") ready to pay, and only edits if something genuinely changed —
+ * an empty form is what led to a new name being typed and a duplicate child.
+ */
+async function existingFamily(mobile) {
+  const m = normMobile(mobile);
+  const p = (await db.query(
+    `SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
+  if (!p) return null;
+  const students = (await db.query(
+    `SELECT st.student_name AS name, COALESCE(st.school_name,'') AS school_name,
+            b.board_code AS board, g.grade_code AS grade, m.medium_code AS medium,
+            COALESCE(ARRAY_AGG(sub.subject_code) FILTER (WHERE sub.subject_code IS NOT NULL), '{}') AS addons
+       FROM students st
+       JOIN boards  b ON b.id = st.board_id
+       JOIN grades  g ON g.id = st.grade_id
+       JOIN mediums m ON m.id = st.medium_id
+       LEFT JOIN student_addons_subscriptions sa ON sa.student_id = st.id AND sa.is_active
+       LEFT JOIN quizpe_addons a ON a.id = sa.addon_id AND a.is_active
+       LEFT JOIN subjects sub ON sub.id = a.subject_id
+      WHERE st.parent_id = $1 AND st.is_active
+      GROUP BY st.id, st.student_name, st.school_name, b.board_code, g.grade_code, m.medium_code
+      ORDER BY st.id`, [p.id])).rows;
+  return { parent_name: p.parent_name || '', state_code: p.state_code || '', students };
+}
+
 /* --------------------------------------------------------------- context */
 router.get('/api/context', async (req, res) => {
   try {
@@ -181,6 +209,7 @@ router.get('/api/context', async (req, res) => {
       boards: boards.rows, mediumsByBoard, grades: grades.rows, states: states.rows,
       availability, gst_pct: gstPct,
       business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
+      existing: await existingFamily(c.mobile_number),   // pre-fill for renewals
     });
   } catch (e) {
     console.error('[pay] context failed:', e.message);
@@ -237,6 +266,82 @@ async function buildCart(c, students, state) {
   return { cart: { students: cartStudents, base, addonTotal: +addonTotal.toFixed(2), total, state, parent_name: (students[0].parent_name || '').trim() }, total };
 }
 
+/**
+ * Create a Razorpay Payment Link for an already-validated cart on a checkout
+ * session, persist that server-validated cart + mode, and return { short_url }.
+ * Sends nothing — the caller decides how the link reaches the parent, so the
+ * link is only ever delivered through ONE channel.
+ */
+async function createLinkForCheckout(c, built, description) {
+  const rzp = await razorpayCreds();
+  const contact = `+91${normMobile(c.mobile_number)}`;
+  const plRes = await fetch(`${RZP}/payment_links`, {
+    method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: Math.round(built.total * 100), currency: 'INR', accept_partial: false,
+      description: String(description || c.plan_name || 'QuizPe plan').slice(0, 200),
+      customer: { name: String(built.cart.parent_name || c.mobile_number).slice(0, 50), contact },
+      notify: { sms: false, email: false }, reminder_enable: false,
+      notes: { token: String(c.token), checkout_id: String(c.id), plan: String(c.plan_code || ''), mobile: String(c.mobile_number) },
+    }),
+  });
+  const link = await plRes.json();
+  if (!plRes.ok || !link.short_url) {
+    console.error('[pay] payment-link failed:', link);
+    return { error: link?.error?.description || 'Could not create payment link.' };
+  }
+  await db.query(`UPDATE checkout_sessions SET amount=$2, status='link_created', cart=$3, razorpay_mode=$4 WHERE id=$1`,
+    [c.id, built.total, JSON.stringify(built.cart), rzp.mode]);
+  return { short_url: link.short_url, amount: built.total };
+}
+
+/**
+ * Renewal in ONE tap. An existing family already has children, a state and last
+ * time's add-ons on file — nothing to fill in again — so this rebuilds their
+ * cart from what we store and returns a Razorpay Payment Link to send straight
+ * to WhatsApp. No pay.html round-trip, and therefore no second link.
+ *
+ * Returns { error } (the caller then falls back to the form link) whenever
+ * anything doesn't line up: no parent/state, no children, or the chosen plan's
+ * seat count no longer matches the children on file.
+ */
+async function createRenewalLink(sessionId, mobile, planCode) {
+  const parent = (await db.query(
+    `SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [normMobile(mobile)])).rows[0];
+  if (!parent || !parent.state_code) return { error: 'no parent/state on file' };
+
+  const kids = (await db.query(
+    `SELECT st.student_name AS name, b.board_code AS board, g.grade_code AS grade, m.medium_code AS medium,
+            COALESCE(ARRAY_AGG(sub.subject_code) FILTER (WHERE sub.subject_code IS NOT NULL), '{}') AS addons
+       FROM students st
+       JOIN boards  b ON b.id = st.board_id
+       JOIN grades  g ON g.id = st.grade_id
+       JOIN mediums m ON m.id = st.medium_id
+       LEFT JOIN student_addons_subscriptions sa ON sa.student_id = st.id AND sa.is_active
+       LEFT JOIN quizpe_addons a ON a.id = sa.addon_id AND a.is_active
+       LEFT JOIN subjects sub ON sub.id = a.subject_id
+      WHERE st.parent_id = $1 AND st.is_active
+      GROUP BY st.id, st.student_name, b.board_code, g.grade_code, m.medium_code
+      ORDER BY st.id`, [parent.id])).rows;
+  if (!kids.length) return { error: 'no children on file' };
+
+  const { token } = await createCheckoutLink(sessionId, mobile, planCode);
+  const c = await loadCheckout(token);
+  if (!c) return { error: 'plan not available' };
+
+  const studentsInput = kids.map((k, i) => ({
+    name: k.name, board: k.board, grade: k.grade, medium: k.medium,
+    addons: Array.isArray(k.addons) ? k.addons : [],
+    parent_name: i === 0 ? parent.parent_name : undefined,
+  }));
+  const built = await buildCart(c, studentsInput, parent.state_code);
+  if (built.error) return { error: built.error };   // e.g. seat-count mismatch -> caller uses the form
+
+  const r = await createLinkForCheckout(c, built, `${c.plan_name} renewal`);
+  if (r.error) return { error: r.error };
+  return { short_url: r.short_url, amount: built.total, plan_name: c.plan_name };
+}
+
 /* ------------------------------------------------------------ create order */
 router.post('/api/create-order', async (req, res) => {
   try {
@@ -284,6 +389,37 @@ router.post('/api/create-order', async (req, res) => {
     res.json({ success: true, order_id: order.id, amount: amountPaise, currency: 'INR', key: rzp.keyId });
   } catch (e) {
     console.error('[pay] create-order failed:', e.message);
+    res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
+  }
+});
+
+/* ------------------------------------------------------ create payment link */
+/**
+ * Razorpay Payment Link — the checkout runs on Razorpay's OWN hosted page
+ * (rzp.io), so it works even while our website domain is under review. The link
+ * is returned to the page AND pushed to the parent's WhatsApp. On payment the
+ * `payment_link.paid` webhook activates the plan via finalize(), mapped back by
+ * the token stored in the link's notes.
+ */
+router.post('/api/payment-link', async (req, res) => {
+  try {
+    const { token, students, state } = req.body || {};
+    const c = await loadCheckout(token);
+    if (!c) return res.status(410).json({ success: false, error: 'Link expired.' });
+
+    const built = await buildCart(c, students, state);
+    if (built.error) return res.status(400).json({ success: false, error: built.error });
+
+    const r = await createLinkForCheckout(c, built);
+    if (r.error) return res.status(502).json({ success: false, error: r.error });
+
+    // The link is shown ON this page (pay.html renders it right after this
+    // returns). We deliberately do NOT also push it to WhatsApp: the parent is
+    // already here at the checkout, and a second link arriving in the chat is
+    // exactly the "double link" confusion we're avoiding. One link, one place.
+    res.json({ success: true, short_url: r.short_url, amount: r.amount });
+  } catch (e) {
+    console.error('[pay] payment-link route failed:', e.message);
     res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
   }
 });
@@ -389,14 +525,19 @@ async function finalize(c, pay, mailCtx = null) {
       [parentId, c.plan_id, period.startDate, period.endDate,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
-    // If this parent arrived through someone's referral link, this is the
-    // moment it pays out — real money has changed hands. Idempotent, so a
-    // replayed webhook cannot hand out the days twice. Inside the transaction
-    // because the days it grants must not survive a rolled-back payment.
-    let referral = null;
-    try {
-      referral = await require('../referrals/engine').creditOnPayment(parentId, client);
-    } catch (e) { console.error('[pay] referral credit skipped:', e.message); }
+    // Referral days granted on this payment, both funded by the payment itself:
+    //   • releaseBankedOnRenewal — the PAYER as a REFERRER: release one banked
+    //     referral bonus onto the new plan ("+7 per renewal").
+    //   • creditRefereeOnFirstPayment — the PAYER as a FRIEND who was referred:
+    //     a one-time +7 welcome bonus on their first paid plan.
+    // Both idempotent and inside the transaction, so the days cannot survive a
+    // rolled-back payment. A parent can legitimately receive both.
+    const engine = require('../referrals/engine');
+    let referral = null, refereeBonus = null;
+    try { referral = await engine.releaseBankedOnRenewal(parentId, client); }
+    catch (e) { console.error('[pay] referral release skipped:', e.message); }
+    try { refereeBonus = await engine.creditRefereeOnFirstPayment(parentId, client); }
+    catch (e) { console.error('[pay] referee bonus skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -430,7 +571,9 @@ async function finalize(c, pay, mailCtx = null) {
       const { stackedMessage } = require('../utils/subscriptionPeriod');
       const carried = stackedMessage(period, M.fmtDate);
       await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎉 *Payment successful — welcome to ${c.plan_name}!*
+`🎉 *${period.stacked
+  ? `Renewed — your ${c.plan_name} continues!`
+  : `Payment successful — welcome to ${c.plan_name}!`}*
 
 👦 *Student${students.length > 1 ? 's' : ''}:* ${names}
 📅 *Valid till:* ${M.fmtDate(subId.plan_end_date)}
@@ -453,36 +596,33 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
       }
     } catch (e) { console.error('[pay] confirmation send failed:', e.message); }
 
-    // Referral payout — told to BOTH sides, because a reward nobody notices
-    // buys no goodwill and prompts no further sharing.
-    if (referral) {
-      try {
-        const wa = require('../whatsapp/client');
-        const M = require('../whatsapp/messages');
-        if (referral.refereeNewEnd) {
-          await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎁 *Your invite bonus: +${referral.days} free days!*
+    // Referral notices — the PAYER is in-window right now (they just paid), so a
+    // plain message reaches them. Both are best-effort and never block the flow.
+    try {
+      const wa = require('../whatsapp/client');
+      const M = require('../whatsapp/messages');
 
-Because you joined through a friend's link, we've added *${referral.days} days* to your plan.
-📅 Now valid till *${M.fmtDate(referral.refereeNewEnd)}*`);
-        }
-        const ref = (await db.query(
-          `SELECT p.parent_mobile_number AS mobile, p.parent_name AS name,
-                  (SELECT id FROM whatsapp_sessions w
-                    WHERE w.mobile_number = p.parent_mobile_number AND w.is_active
-                    ORDER BY w.id DESC LIMIT 1) AS session_id
-             FROM parents p WHERE p.id = $1`, [referral.referrerId])).rows[0];
-        if (ref && referral.referrerNewEnd) {
-          await wa.sendText(ref.session_id, ref.mobile,
-`🎉 *Someone you invited just subscribed!*
+      // As a REFERRED friend: their one-time welcome bonus on this first plan.
+      if (refereeBonus && refereeBonus.refereeNewEnd) {
+        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎁 *Referral welcome bonus — +${refereeBonus.days} free days!*
 
-We've added *${referral.days} free days* to your plan as a thank-you.
-📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*
+Because you joined through a friend's invite, we've added *${refereeBonus.days} days* to your plan.
+📅 Now valid till *${M.fmtDate(refereeBonus.refereeNewEnd)}*`);
+      }
 
-You've earned free days from *${referral.referrerRewardedCount}* friend${referral.referrerRewardedCount === 1 ? '' : 's'} so far. Keep sharing! 💚`);
-        }
-      } catch (e) { console.error('[pay] referral notice failed:', e.message); }
-    }
+      // As a REFERRER: one of their banked bonuses released onto this renewal.
+      if (referral && referral.referrerNewEnd) {
+        const more = referral.remainingBanked > 0
+          ? `\n\nYou still have *${referral.remainingBanked}* banked — one more releases at your next renewal.`
+          : '';
+        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎉 *Referral bonus added — +${referral.days} free days!*
+
+A friend you invited earlier means we've added *${referral.days} days* to this renewal.
+📅 Now valid till *${M.fmtDate(referral.referrerNewEnd)}*${more}`);
+      }
+    } catch (e) { console.error('[pay] referral notice failed:', e.message); }
 
     // Operator alert. Queued after COMMIT and never awaited for success, so a
     // mail problem cannot undo a payment the customer has already made.
@@ -516,6 +656,279 @@ You've earned free days from *${referral.referrerRewardedCount}* friend${referra
     } catch (e) { console.error('[pay] admin alert skipped:', e.message); }
 
     return { invoice: inv.invoiceNo, end_date: subId.plan_end_date };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ------------------------------------------------ add a child mid-plan ---- */
+/**
+ * Admin flow: enrol ONE more child on a family's existing PAID plan mid-cycle,
+ * charging only the pro-rated slice for the days that remain — aligned to expire
+ * on the same date as their current plan. Refused when 7 days or fewer are left
+ * (they should simply renew instead).
+ *
+ * With dryRun:true it returns the price breakdown only. Otherwise it creates a
+ * Razorpay Payment Link for that amount (works while our domain is under review)
+ * and pushes it to the parent's WhatsApp; on payment the `payment_link.paid`
+ * webhook runs finalizeAddChild(). The child is created only once paid.
+ */
+async function createAddChildLink({ parentId, child, dryRun = false }) {
+  parentId = parseInt(parentId, 10);
+  if (!parentId) return { error: 'Bad parent id.' };
+  const name = String(child?.name || '').trim();
+  if (name.length < 2) return { error: "Please enter the child's name." };
+  if (!child?.board || !child?.grade || !child?.medium) return { error: 'Board, grade and medium are all required.' };
+
+  // the family's current, active, PAID plan
+  const { rows: [p] } = await db.query(
+    `SELECT p.id, p.parent_name, p.parent_mobile_number, p.state_code,
+            s.id AS subscription_id, s.plan_id, s.plan_end_date::text AS plan_end_date,
+            (s.plan_end_date - CURRENT_DATE) AS days_left,
+            pl.plan_code, pl.plan_name, pl.price::numeric AS price, pl.student_count, pl.duration, pl.is_trial
+       FROM parents p
+       JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id AND s.is_active
+       JOIN quizpe_plans pl ON pl.id = s.plan_id
+      WHERE p.id = $1
+      ORDER BY s.plan_end_date DESC, s.id DESC LIMIT 1`, [parentId]);
+  if (!p) return { error: 'This parent has no active plan to add a child to.' };
+  if (p.is_trial) return { error: 'This family is on a free trial — start a paid plan first, then add children.' };
+
+  const daysLeft = Number(p.days_left);
+  if (!(daysLeft > 7)) {
+    return { error: `Only ${daysLeft} day(s) left on the current plan. A pro-rated add needs more than 7 days — renew the plan instead.` };
+  }
+  const duration = Number(p.duration) || 30;
+
+  // content must exist, else the child gets a broken quiz at 8 PM
+  const { isDeliverable } = require('../content/availability');
+  if (!await isDeliverable(child.board, child.grade, child.medium)) {
+    return { error: `No quiz content for ${child.board} · ${child.grade} · ${child.medium} yet.` };
+  }
+  const gradeRow = (await db.query(`SELECT id FROM grades WHERE grade_code=$1 AND is_active`, [child.grade])).rows[0];
+  if (!gradeRow) return { error: 'Unknown grade.' };
+
+  // validate + price any add-on subjects chosen for THIS grade
+  const chosen = Array.isArray(child.addons) ? [...new Set(child.addons)] : [];
+  const addons = [];
+  for (const code of chosen) {
+    const row = (await db.query(
+      `SELECT s.subject_code, a.price::numeric price
+         FROM grade_subjects gs JOIN subjects s ON s.id=gs.subject_id
+         JOIN quizpe_addons a ON a.subject_id=s.id AND a.is_active
+        WHERE gs.grade_id=$1 AND gs.is_active AND s.subject_code=$2 AND s.subject_code<>'MATHS'`,
+      [gradeRow.id, code])).rows[0];
+    if (!row) return { error: `${code} is not available for grade ${child.grade}.` };
+    addons.push({ subject_code: row.subject_code, price: Number(row.price) });
+  }
+
+  // GST in force. A mid-plan add-child is quoted EXCLUSIVE of GST — the
+  // pro-rated figure is the taxable base and GST is ADDED on top (this is stated
+  // to the parent in the policy). That differs from the plan pages, where the
+  // listed price is GST-inclusive.
+  const gstRow = (await db.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const gmul = 1 + gstPct / 100;
+
+  // pro-ration: the per-child rate of the family's OWN plan, for the days left,
+  // taken as the TAXABLE (excl-GST) base
+  const factor = daysLeft / duration;
+  const perChild = Number(p.price) / (Number(p.student_count) || 1);
+  const baseExcl = +(perChild * factor).toFixed(2);
+  const addonsExcl = addons.map(a => ({ subject_code: a.subject_code, price: +(a.price * factor).toFixed(2) }));
+  const addonExclTotal = +addonsExcl.reduce((t, a) => t + a.price, 0).toFixed(2);
+  const calcExcl = +(baseExcl + addonExclTotal).toFixed(2);   // "calculated amount", excluding GST
+  const gstAmt = +(calcExcl * gstPct / 100).toFixed(2);
+  const total = +(calcExcl + gstAmt).toFixed(2);              // what the parent pays, incl GST
+
+  // The invoice generator treats line items as GST-INCLUSIVE and extracts the
+  // tax from within, so hand it the grossed-up (incl-GST) figures.
+  const baseIncl = +(baseExcl * gmul).toFixed(2);
+  const addonsIncl = addonsExcl.map(a => ({ subject_code: a.subject_code, price: +(a.price * gmul).toFixed(2) }));
+  const addonInclTotal = +addonsIncl.reduce((t, a) => t + a.price, 0).toFixed(2);
+
+  const breakdown = {
+    parent_name: p.parent_name, mobile: p.parent_mobile_number, plan_name: p.plan_name,
+    days_left: daysLeft, duration, per_child: +perChild.toFixed(2),
+    prorated_base: baseExcl, addons: addonsExcl, addon_total: addonExclTotal,
+    calc_excl: calcExcl, gst_pct: gstPct, gst: gstAmt, total, align_end_date: p.plan_end_date,
+  };
+  if (total < 1) return { error: 'Pro-rated amount is below ₹1 — too few days left to charge. Add the child free from the panel instead.' };
+  if (dryRun) return { quote: breakdown };
+
+  // the cart the webhook will trust: server-validated, flagged mid-plan
+  const fmtD = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  const endFmt = fmtD(p.plan_end_date);
+  const cart = {
+    midplan: true, parent_id: p.id, subscription_id: p.subscription_id,
+    align_end_date: p.plan_end_date, state: p.state_code, parent_name: p.parent_name,
+    student: {
+      name, board: child.board, medium: child.medium, grade: child.grade,
+      school_name: String(child.school_name || '').trim().slice(0, 120) || null, addons: addonsIncl,
+    },
+    students: [{ name, addons: addonsIncl }],   // drives the invoice add-on lines (incl GST)
+    base: baseIncl, addonTotal: addonInclTotal, total,
+    baseLine: {
+      desc: `Add child: ${name} — Mathematics (pro-rated, ${daysLeft} days)`,
+      plan: p.plan_code, qty: 1, gross: baseIncl,
+      sub: `1 child · ${fmtD(new Date())} to ${endFmt}`,
+    },
+  };
+
+  const sess = (await db.query(
+    `SELECT id FROM whatsapp_sessions WHERE parent_id=$1 ORDER BY id DESC LIMIT 1`, [parentId])).rows[0];
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  const { rows: [ins] } = await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
+    [token, sess?.id || null, p.parent_mobile_number, p.plan_id, total, JSON.stringify(cart)]);
+
+  const rzp = await razorpayCreds();
+  const contact = `+91${normMobile(p.parent_mobile_number)}`;
+  const plRes = await fetch(`${RZP}/payment_links`, {
+    method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: Math.round(total * 100), currency: 'INR', accept_partial: false,
+      description: `Add ${name} to ${p.plan_name} (pro-rated)`.slice(0, 200),
+      customer: { name: String(p.parent_name || p.parent_mobile_number).slice(0, 50), contact },
+      notify: { sms: false, email: false }, reminder_enable: false,
+      notes: { token: String(token), checkout_id: String(ins.id), midplan: '1', mobile: String(p.parent_mobile_number) },
+    }),
+  });
+  const link = await plRes.json();
+  if (!plRes.ok || !link.short_url) {
+    console.error('[pay] add-child link failed:', link);
+    return { error: link?.error?.description || 'Could not create payment link.' };
+  }
+  await db.query(`UPDATE checkout_sessions SET razorpay_mode=$2 WHERE id=$1`, [ins.id, rzp.mode]);
+
+  // push to WhatsApp — same anti-spam framing as the main link (arrives as a
+  // button from the Meta-verified account, names the child + exact amount)
+  if (sess?.id) {
+    try {
+      const wa = require('../whatsapp/client');
+      const first = String(p.parent_name || '').trim().split(/\s+/)[0] || 'there';
+      await wa.sendCtaUrl(sess.id, p.parent_mobile_number, {
+        header: '✅ QuizPe — add your child',
+        body: `Hi ${first} 👋 To add *${name}* to your *${p.plan_name}*, here's your secure link. `
+          + `You only pay for the *${daysLeft} days left* — *₹${calcExcl} + ₹${gstAmt} GST = ₹${total}*.\n\n`
+          + `🔒 It opens *Razorpay's* official payment page (UPI · card · netbanking).\n`
+          + `📅 ${name}'s plan runs right up to *${endFmt}*, same as the rest of the family.\n\n`
+          + `${name}'s daily quizzes begin the moment it's paid. 🌟`,
+        displayText: '💳 Pay securely', url: link.short_url,
+        footer: 'Razorpay · ServerPe App Solutions (GST-registered)',
+      });
+    } catch (e) { console.error('[pay] add-child wa send:', e.message); }
+  }
+
+  return { short_url: link.short_url, amount: total, quote: breakdown, whatsapp_sent: !!sess?.id };
+}
+
+/**
+ * Activate a mid-plan add-child once its Payment Link is paid. Unlike finalize()
+ * this creates NO new subscription and does not touch the existing one — it
+ * enrols the single child on the family's current plan (sharing its end date)
+ * and issues a pro-rated tax invoice against that same subscription. Idempotent.
+ */
+async function finalizeAddChild(c, pay) {
+  const cart = c.cart || {};
+  // idempotent replay: an invoice for this exact payment already exists
+  const done = (await db.query(
+    `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id
+      WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`, [pay.id])).rows[0];
+  if (done) return { already: true, invoice: done.invoice_id, end_date: cart.align_end_date };
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const locked = (await client.query(
+      `SELECT id, used_at, status FROM checkout_sessions WHERE id=$1 FOR UPDATE`, [c.id])).rows[0];
+    if (locked.used_at || locked.status === 'paid') {
+      await client.query('ROLLBACK');
+      const inv = (await db.query(
+        `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id
+          WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`, [pay.id])).rows[0];
+      return { already: true, invoice: inv?.invoice_id, end_date: cart.align_end_date };
+    }
+
+    const paymentDbId = (await client.query(
+      `INSERT INTO payments (payment_id, entity, amount, currency, status, order_id, method, captured,
+                             description, email, contact, notes, api_response)
+       VALUES ($1,'payment',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (payment_id) DO UPDATE SET status=EXCLUDED.status, modified_at=now()
+       RETURNING id`,
+      [pay.id, pay.amount / 100, pay.currency, pay.status, pay.order_id || null, pay.method, pay.captured === true,
+       `Add child (pro-rated) — ${c.plan_name}`, pay.email || null, pay.contact || c.mobile_number,
+       JSON.stringify(pay.notes || {}), JSON.stringify(pay)])).rows[0].id;
+
+    const s = cart.student;
+    const studentId = (await client.query(
+      `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+       VALUES ($1,(SELECT id FROM boards WHERE board_code=$2),(SELECT id FROM grades WHERE grade_code=$3),
+                  (SELECT id FROM mediums WHERE medium_code=$4),$5,$6)
+       ON CONFLICT (parent_id, student_name) DO UPDATE
+         SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id, medium_id=EXCLUDED.medium_id,
+             school_name=COALESCE(EXCLUDED.school_name, students.school_name),
+             is_active=true, modified_at=now()
+       RETURNING id`,
+      [cart.parent_id, s.board, s.grade, s.medium, String(s.name).trim().slice(0, 60), s.school_name || null])).rows[0].id;
+
+    await client.query(`UPDATE student_addons_subscriptions SET is_active=false WHERE student_id=$1`, [studentId]);
+    for (const ad of (s.addons || [])) {
+      await client.query(
+        `INSERT INTO student_addons_subscriptions (student_id, addon_id)
+         VALUES ($1,(SELECT id FROM quizpe_addons WHERE subject_id=(SELECT id FROM subjects WHERE subject_code=$2) AND is_active))
+         ON CONFLICT (student_id, addon_id) DO UPDATE SET is_active=true, modified_at=now()`,
+        [studentId, ad.subject_code]);
+    }
+
+    const { generateInvoice } = require('../pdf/invoice');
+    const inv = await generateInvoice(cart.subscription_id, paymentDbId, client, cart);
+
+    await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
+    await client.query('COMMIT');
+
+    // confirmation + invoice to the parent (best-effort, never unwinds the sale)
+    if (c.whatsapp_session_id) {
+      try {
+        const wa = require('../whatsapp/client');
+        const M = require('../whatsapp/messages');
+        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`🎉 *${s.name} is now on QuizPe!*
+
+📅 *Valid till:* ${M.fmtDate(cart.align_end_date)} (same as the family plan)
+🧾 *Invoice:* ${inv.invoiceNo}
+
+${s.name}'s daily quiz starts tonight. 🚀`);
+        await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
+          filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+          caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
+        });
+      } catch (e) { console.error('[pay] add-child confirm send failed:', e.message); }
+    }
+
+    // operator alert (queued after COMMIT, never awaited for success)
+    try {
+      const notify = require('../mail/notify');
+      const M2 = require('../whatsapp/messages');
+      notify.payment({
+        parent: { name: cart.parent_name || c.mobile_number, mobile: c.mobile_number, state: cart.state },
+        children: [{ name: s.name, board: s.board, grade: s.grade, medium: s.medium, school: s.school_name }],
+        plan: { name: `${c.plan_name} — add child (pro-rated)`, duration: null,
+                start: M2.fmtDate(new Date()), end: M2.fmtDate(cart.align_end_date), quizTime: '—', reminderTime: '—' },
+        payment: { amount: Number(pay.amount / 100).toFixed(2), method: pay.method, status: pay.status,
+                   paymentId: pay.id, orderId: pay.order_id || '—', mode: c.razorpay_mode || 'test' },
+        invoice: { number: inv.invoiceNo, base: inv.amounts?.base, cgst: inv.amounts?.cgst,
+                   sgst: inv.amounts?.sgst, igst: inv.amounts?.igst, total: inv.amounts?.total },
+        ctx: { channel: 'Admin — add child (payment link)', at: new Date(), sessionId: c.whatsapp_session_id },
+      });
+    } catch (e) { console.error('[pay] add-child alert skipped:', e.message); }
+
+    return { invoice: inv.invoiceNo, end_date: cart.align_end_date, studentName: s.name };
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;
@@ -576,5 +989,160 @@ router.post('/api/verify', async (req, res) => {
   }
 });
 
+/* ---------------------------------------------------------------- webhook */
+/** Load a checkout by its Razorpay order id (the webhook has no token). */
+async function loadCheckoutByOrder(orderId) {
+  const { rows } = await db.query(
+    `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+            pl.regular_price, pl.student_count, pl.duration
+       FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+      WHERE c.razorpay_order_id = $1
+      ORDER BY c.id DESC LIMIT 1`, [orderId]);
+  return applyOfferPrice(rows[0] || null);
+}
+
+/** Load a checkout by token, ignoring expiry (webhook is signature-trusted). */
+async function loadCheckoutByToken(token) {
+  const { rows } = await db.query(
+    `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+            pl.regular_price, pl.student_count, pl.duration
+       FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+      WHERE c.token = $1 ORDER BY c.id DESC LIMIT 1`, [token]);
+  return applyOfferPrice(rows[0] || null);
+}
+
+/** Activate from a Payment Link payment, mapped back by the token in notes. */
+async function activateFromToken(token, pay) {
+  if (!['captured', 'authorized'].includes(pay.status)) return;
+  const c = await loadCheckoutByToken(token);
+  if (!c) { console.warn(`[pay] webhook: no checkout for token ${token}`); return; }
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    console.error(`[pay] webhook link amount mismatch token ${token}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
+    return;
+  }
+  // A mid-plan add-child link carries its own activation path (no new
+  // subscription; a pro-rated invoice against the family's current plan).
+  const result = c.cart && c.cart.midplan
+    ? await finalizeAddChild(c, pay)
+    : await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
+  console.log(`[pay] webhook link ${result.already ? 'already active' : 'ACTIVATED'} token=${token} invoice=${result.invoice}`);
+}
+
+async function activateFromWebhook(pay) {
+  if (!['captured', 'authorized'].includes(pay.status)) return;
+  const c = await loadCheckoutByOrder(pay.order_id);
+  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id}`); return; }
+  // amount safety — the same guard the browser path uses
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    console.error(`[pay] webhook amount mismatch order ${pay.order_id}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
+    return;
+  }
+  const result = await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
+  console.log(`[pay] webhook ${result.already ? 'already active' : 'ACTIVATED'} order=${pay.order_id} invoice=${result.invoice}`);
+}
+
+/**
+ * Razorpay webhook — the server-to-server safety net. If the browser callback
+ * after checkout is lost (parent closes the app), this still activates the plan.
+ * The signature is verified against the RAW body with RAZORPAY_WEBHOOK_SECRET,
+ * and activation is idempotent via finalize(), so a payment the callback already
+ * handled is never activated twice. Registered in app.js BEFORE express.json()
+ * so the raw body survives for signing.
+ */
+async function razorpayWebhook(req, res) {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) { console.error('[pay] webhook: RAZORPAY_WEBHOOK_SECRET not set'); return res.status(500).send('not configured'); }
+
+  const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+  const signature = String(req.headers['x-razorpay-signature'] || '');
+  const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+  let valid = false;
+  try { valid = signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature)); }
+  catch { valid = false; }
+  if (!valid) {
+    // Diagnostic (no secret leaked): rawIsBuffer=false means express.json() ate
+    // the body before us — the #1 cause, and independent of the secret. Both
+    // lengths 64 with rawIsBuffer=true instead points at a secret VALUE mismatch.
+    console.warn(`[pay] webhook: bad signature (rawIsBuffer=${Buffer.isBuffer(req.body)} `
+      + `rawLen=${raw.length} sigLen=${signature.length} expLen=${expected.length} secretLen=${secret.length})`);
+    return res.status(400).send('invalid signature');
+  }
+
+  let event;
+  try { event = JSON.parse(raw.toString('utf8')); }
+  catch { return res.status(200).json({ received: true }); }
+
+  const type = event.event;
+  const pay = event.payload?.payment?.entity || null;
+  try {
+    if (type === 'payment_link.paid') {
+      // Payment Link path — map back to the checkout by the token in notes.
+      const linkNotes = event.payload?.payment_link?.entity?.notes || {};
+      if (linkNotes.token && pay) await activateFromToken(linkNotes.token, pay);
+      else console.warn('[pay] webhook payment_link.paid without token/payment');
+    } else if ((type === 'payment.captured' || type === 'order.paid') && pay?.order_id) {
+      await activateFromWebhook(pay);
+    } else if (type === 'payment.failed') {
+      console.log(`[pay] webhook payment.failed order=${pay?.order_id} id=${pay?.id} reason=${pay?.error_description || ''}`);
+    }
+  } catch (e) {
+    console.error('[pay] webhook activate error:', e.message);
+  }
+  // Always ack — Razorpay retries on non-2xx, and our idempotency makes a repeat
+  // harmless, but there is nothing to retry for a payload we understood.
+  return res.status(200).json({ received: true });
+}
+
+/**
+ * Manual recovery. When a real payment is made but the webhook never activated
+ * it (bad signature, event not subscribed, downtime), an admin pastes the
+ * Razorpay payment id (pay_…) and this fetches that payment and runs finalize —
+ * the SAME idempotent, amount-checked path the webhook uses. Safe to run twice:
+ * an already-activated payment just returns its existing invoice.
+ *
+ * The checkout is matched by the token (from the link's notes) if given, else by
+ * the payer's mobile + exact amount among recent link_created checkouts.
+ */
+async function reconcileByPaymentId(paymentId, token = null) {
+  paymentId = String(paymentId || '').trim();
+  if (!/^pay_/.test(paymentId)) return { error: 'Enter a valid Razorpay payment id (starts with pay_).' };
+
+  const rzp = await razorpayCreds();   // current mode; must match the mode the payment was taken in
+  const payRes = await fetch(`${RZP}/payments/${paymentId}`, { headers: { Authorization: rzp.authHeader } });
+  const pay = await payRes.json();
+  if (!payRes.ok || !pay.id) {
+    return { error: pay?.error?.description || `Payment not found in ${rzp.mode} mode — check the test/live toggle matches where it was paid.` };
+  }
+  if (!['captured', 'authorized'].includes(pay.status)) {
+    return { error: `Payment status is "${pay.status}", not captured — nothing to activate.` };
+  }
+
+  let c = token ? await loadCheckoutByToken(String(token).trim()) : null;
+  if (!c) {
+    // No token: match on the payer's number + the exact amount among their
+    // recent links, newest first — the amount guard makes a wrong match impossible.
+    const mobile = normMobile(pay.contact || '');
+    const { rows } = await db.query(
+      `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+              pl.regular_price, pl.student_count, pl.duration
+         FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+        WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
+    c = rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null;
+  }
+  if (!c) return { error: 'No matching checkout found for this payment (by token, or by mobile + amount).' };
+  if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+    return { error: `Amount mismatch: checkout ₹${c.cart.total} vs payment ₹${Number(pay.amount) / 100}.` };
+  }
+
+  const result = c.cart && c.cart.midplan
+    ? await finalizeAddChild(c, pay)
+    : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
+  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan) };
+}
+
 module.exports = router;
 module.exports.createCheckoutLink = createCheckoutLink;
+module.exports.reconcileByPaymentId = reconcileByPaymentId;
+module.exports.razorpayWebhook = razorpayWebhook;
+module.exports.createAddChildLink = createAddChildLink;
+module.exports.createRenewalLink = createRenewalLink;

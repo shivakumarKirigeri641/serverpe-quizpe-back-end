@@ -11,10 +11,15 @@
  */
 
 const db = require('../database/connectDB');
+const { LAUNCH_DATE } = require('../config/launch');
 
 const TZ = 'Asia/Kolkata';
 /** A date expression in IST, for grouping and comparisons. */
-const IST_DATE = (col) => `(${col} AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}')::date`;
+const IST_DATE = (col) => `(${col} AT TIME ZONE '${TZ}')::date`;
+/** No chart shows anything before real launch — pre-launch is test noise. */
+const START = (days) => `GREATEST(CURRENT_DATE - (${days}::int - 1), DATE '${LAUNCH_DATE}')`;
+/** Launch instant as a timestamptz, for windowing event tables. */
+const LAUNCH_TS = `(TIMESTAMP '${LAUNCH_DATE} 00:00:00' AT TIME ZONE '${TZ}')`;
 
 /** Percentage change, guarding against divide-by-zero. */
 const delta = (now, was) => (was === 0 ? (now === 0 ? 0 : 100) : +(((now - was) / was) * 100).toFixed(1));
@@ -46,7 +51,7 @@ async function overview() {
 async function daily(days = 30) {
   const { rows } = await db.query(`
     WITH span AS (
-      SELECT generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day')::date AS d
+      SELECT generate_series(${START('$1')}, CURRENT_DATE, '1 day')::date AS d
     )
     SELECT span.d::text AS date,
       COALESCE(q.taken, 0)          AS quizzes_taken,
@@ -161,7 +166,7 @@ async function enrolmentFeed(limit = 50) {
     SELECT s.id, p.parent_name, p.parent_mobile_number, p.state_code,
            pl.plan_code, pl.plan_name, pl.is_trial, pl.price::numeric,
            s.plan_start_date::text, s.plan_end_date::text,
-           to_char(s.created_at AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}', 'DD Mon HH24:MI') AS at,
+           to_char(s.created_at AT TIME ZONE '${TZ}', 'DD Mon HH24:MI') AS at,
            s.created_at,
            (SELECT COUNT(*)::int FROM students st WHERE st.parent_id = p.id AND st.is_active) AS children,
            (SELECT string_agg(st.student_name || ' (' || g.grade_name || ')', ', ')
@@ -217,7 +222,7 @@ async function engagement() {
 async function participationDaily(days = 30) {
   const { rows } = await db.query(`
     WITH span AS (
-      SELECT generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day')::date AS d
+      SELECT generate_series(${START('$1')}, CURRENT_DATE, '1 day')::date AS d
     ),
     expected AS (
       SELECT span.d, COUNT(DISTINCT st.id)::int AS n
@@ -456,4 +461,214 @@ async function boardTotals(day) {
   }));
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals };
+/**
+ * The founder's morning briefing: last night's recap, today's money/trials,
+ * WhatsApp intent, and an action list — trials ending without payment and
+ * children who missed last night — each with the parent's number to nudge.
+ */
+async function briefing() {
+  const { rows: [a] } = await db.query(`
+    SELECT
+      (SELECT COUNT(*)::int FROM quizpe_tracker t JOIN quizpe_status s ON s.id=t.status_id
+         WHERE t.quiz_date=CURRENT_DATE-1 AND s.status_code='completed')                       AS done_last_night,
+      (SELECT COUNT(*)::int FROM quizpe_tracker t JOIN quizpe_status s ON s.id=t.status_id
+         WHERE t.quiz_date=CURRENT_DATE-1 AND s.status_code NOT IN ('completed','in_progress')) AS missed_last_night,
+      (SELECT COUNT(*)::int   FROM invoices WHERE is_active AND ${IST_DATE('created_at')}=CURRENT_DATE)        AS payments_today,
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')}=CURRENT_DATE) AS revenue_today,
+      (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
+         WHERE s.is_active AND p.is_trial AND s.plan_start_date=CURRENT_DATE)                   AS trials_today,
+      (SELECT COUNT(*)::int FROM website_enquiries WHERE status='open' AND is_active)            AS open_enquiries,
+      (SELECT COUNT(*)::int FROM testimonials WHERE is_active AND NOT is_approved)              AS testimonials_pending,
+      (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE)   AS wa_today,
+      (SELECT COUNT(*)::int FROM site_visits WHERE kind='wa_click' AND NOT is_bot AND ${IST_DATE('created_at')}=CURRENT_DATE-1) AS wa_yesterday
+  `);
+
+  const { rows: trialsEnding } = await db.query(`
+    SELECT s.parent_id, p.parent_name, p.parent_mobile_number,
+           s.plan_end_date::text AS plan_end_date,
+           (s.plan_end_date - CURRENT_DATE)::int AS days_left
+      FROM parents_quizpe_subscriptions s
+      JOIN quizpe_plans pl ON pl.id = s.plan_id AND pl.is_trial
+      JOIN parents p       ON p.id  = s.parent_id AND p.is_active
+     WHERE s.is_active AND s.plan_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 2
+       AND NOT EXISTS (
+         SELECT 1 FROM parents_quizpe_subscriptions s2
+           JOIN quizpe_plans pl2 ON pl2.id = s2.plan_id AND NOT pl2.is_trial
+          WHERE s2.parent_id = s.parent_id AND s2.is_active
+            AND CURRENT_DATE <= s2.plan_end_date)
+     ORDER BY s.plan_end_date, p.parent_name
+     LIMIT 25`);
+
+  const { rows: missed } = await db.query(`
+    SELECT st.id AS student_id, st.student_name,
+           p.id AS parent_id, p.parent_name, p.parent_mobile_number
+      FROM quizpe_tracker t
+      JOIN quizpe_status s ON s.id = t.status_id AND s.status_code NOT IN ('completed','in_progress')
+      JOIN students st ON st.id = t.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id AND p.is_active
+     WHERE t.quiz_date = CURRENT_DATE - 1
+     ORDER BY p.parent_name, st.student_name
+     LIMIT 25`);
+
+  return {
+    today: (await db.query(`SELECT to_char(now() AT TIME ZONE '${TZ}', 'FMDay, DD FMMonth') AS d`)).rows[0].d,
+    stats: {
+      done_last_night: a.done_last_night,
+      missed_last_night: a.missed_last_night,
+      payments_today: a.payments_today,
+      revenue_today: Number(a.revenue_today),
+      trials_today: a.trials_today,
+      open_enquiries: a.open_enquiries,
+      testimonials_pending: a.testimonials_pending,
+      wa_today: a.wa_today,
+      wa_yesterday: a.wa_yesterday,
+      wa_delta: delta(a.wa_today, a.wa_yesterday),
+    },
+    trials_ending: trialsEnding,
+    missed,
+  };
+}
+
+/**
+ * Feel-good signals for the admin: the latest payment (to celebrate the moment
+ * it lands), last night's perfect scores, and children on a current streak.
+ */
+async function celebrations() {
+  const { rows: [pay] } = await db.query(`
+    SELECT i.id, i.total::numeric AS amount, p.parent_name,
+           to_char(i.created_at AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI') AS at_ist
+      FROM invoices i
+      JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
+      JOIN parents p ON p.id = s.parent_id
+     WHERE i.is_active
+     ORDER BY i.id DESC LIMIT 1`);
+
+  const { rows: perfect } = await db.query(`
+    SELECT st.student_name, p.parent_name, r.score_total::int AS score_total
+      FROM quiz_reports r
+      JOIN quizpe_tracker t ON t.id = r.tracker_id AND t.quiz_date = CURRENT_DATE - 1
+      JOIN students st ON st.id = t.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id
+     WHERE r.score_total > 0 AND r.score_correct = r.score_total
+     ORDER BY r.score_total DESC, st.student_name
+     LIMIT 8`);
+
+  // Current streak = length of the latest unbroken run of completed daily
+  // quizzes, counted with a gaps-and-islands grouping, shown only if it is
+  // still live (ended yesterday or today) and at least 3 days long.
+  const { rows: streaks } = await db.query(`
+    WITH completed AS (
+      SELECT t.student_id, t.quiz_date
+        FROM quizpe_tracker t
+        JOIN quizpe_status s ON s.id = t.status_id AND s.status_code = 'completed'),
+    runs AS (
+      SELECT student_id, quiz_date,
+             quiz_date - (ROW_NUMBER() OVER (PARTITION BY student_id ORDER BY quiz_date))::int AS grp
+        FROM completed),
+    grouped AS (
+      SELECT student_id, COUNT(*)::int AS len, MAX(quiz_date) AS last
+        FROM runs GROUP BY student_id, grp)
+    SELECT st.student_name, p.parent_name, x.len
+      FROM grouped x
+      JOIN students st ON st.id = x.student_id AND st.is_active
+      JOIN parents  p  ON p.id  = st.parent_id
+     WHERE x.last >= CURRENT_DATE - 1 AND x.len >= 3
+     ORDER BY x.len DESC, st.student_name
+     LIMIT 8`);
+
+  return { latest_payment: pay || null, perfect, streaks };
+}
+
+/**
+ * The end-to-end conversion funnel, stage by stage, so the biggest leak is
+ * obvious. Web stages (views, taps) are anonymous sessions and the WhatsApp
+ * stages are by mobile, so these are STAGE COUNTS, not one tracked individual —
+ * but the drop between adjacent stages is still the signal that matters (e.g.
+ * "agreed to the trial" -> "filled the child form").
+ */
+async function funnel() {
+  const { rows: [r] } = await db.query(`
+    SELECT
+      (SELECT COUNT(DISTINCT session_id)::int FROM site_visits
+        WHERE kind='view' AND NOT is_bot AND session_id IS NOT NULL AND created_at >= ${LAUNCH_TS})     AS views,
+      (SELECT COUNT(DISTINCT session_id)::int FROM site_visits
+        WHERE kind='wa_click' AND NOT is_bot AND session_id IS NOT NULL AND created_at >= ${LAUNCH_TS})  AS wa_taps,
+      (SELECT COUNT(*)::int FROM whatsapp_sessions)                                                       AS conversations,
+      (SELECT COUNT(DISTINCT session_id)::int FROM whatsapp_session_events WHERE event='agreed_trial')    AS agreed,
+      (SELECT COUNT(DISTINCT session_id)::int FROM whatsapp_session_events WHERE event='trial_activated') AS form_filled,
+      (SELECT COUNT(DISTINCT t.student_id)::int FROM quizpe_tracker t
+         JOIN quizpe_status q ON q.id=t.status_id WHERE q.status_code IN ('completed','closed'))          AS first_quiz,
+      (SELECT COUNT(DISTINCT s.parent_id)::int FROM parents_quizpe_subscriptions s
+         JOIN quizpe_plans p ON p.id=s.plan_id AND NOT p.is_trial)                                        AS paid`);
+  const stages = [
+    ['views', 'Visited quizpe.in'],
+    ['wa_taps', 'Tapped “Start on WhatsApp”'],
+    ['conversations', 'Started a WhatsApp chat'],
+    ['agreed', 'Agreed to the trial'],
+    ['form_filled', 'Filled the child form'],
+    ['first_quiz', 'First quiz completed'],
+    ['paid', 'Upgraded to paid'],
+  ];
+  const top = Math.max(1, Number(r.views) || 0, Number(r.wa_taps) || 0);
+  let prev = null;
+  return stages.map(([k, label]) => {
+    const count = Number(r[k]) || 0;
+    const row = {
+      key: k, label, count,
+      pct_of_top: Math.round((count / top) * 100),
+      drop_from_prev: prev === null ? null : (prev > 0 ? Math.round(((count - prev) / prev) * 100) : 0),
+    };
+    prev = count;
+    return row;
+  });
+}
+
+/**
+ * Retention by signup-week cohort: of the children who started in a given week,
+ * what share did a quiz on day 1 / 3 / 7 / 14 after their own start date. The
+ * single truest read on whether the daily habit sticks. `age_days` lets the UI
+ * blank out a day-column a young cohort has not reached yet.
+ */
+async function retention() {
+  const { rows } = await db.query(`
+    WITH kids AS (
+      SELECT st.id AS student_id, MIN(s.plan_start_date) AS start_date
+        FROM students st
+        JOIN parents_quizpe_subscriptions s ON s.parent_id = st.parent_id
+       WHERE st.is_active AND s.plan_start_date >= DATE '${LAUNCH_DATE}'
+       GROUP BY st.id),
+    comp AS (
+      SELECT DISTINCT t.student_id, t.quiz_date
+        FROM quizpe_tracker t JOIN quizpe_status q ON q.id=t.status_id
+       WHERE q.status_code IN ('completed','closed'))
+    SELECT date_trunc('week', k.start_date)::date AS cohort_start,
+           COUNT(*)::int AS size,
+           COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM comp c WHERE c.student_id=k.student_id AND c.quiz_date=k.start_date+1))::int  AS d1,
+           COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM comp c WHERE c.student_id=k.student_id AND c.quiz_date=k.start_date+3))::int  AS d3,
+           COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM comp c WHERE c.student_id=k.student_id AND c.quiz_date=k.start_date+7))::int  AS d7,
+           COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM comp c WHERE c.student_id=k.student_id AND c.quiz_date=k.start_date+14))::int AS d14,
+           (CURRENT_DATE - date_trunc('week', k.start_date)::date)::int AS age_days
+      FROM kids k
+     GROUP BY 1 ORDER BY 1 DESC LIMIT 8`);
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
+  return rows.map((r) => ({
+    cohort_start: r.cohort_start, size: r.size, age_days: r.age_days,
+    d1: pct(r.d1, r.size), d3: pct(r.d3, r.size), d7: pct(r.d7, r.size), d14: pct(r.d14, r.size),
+  }));
+}
+
+/** Daily completed-quiz counts for the last `weeks` weeks — a calendar heatmap. */
+async function activityCalendar(weeks = 12) {
+  const days = Math.max(7, Math.min(53 * 7, (Number(weeks) || 12) * 7));
+  const { rows } = await db.query(`
+    SELECT to_char(d, 'YYYY-MM-DD') AS day, COALESCE(x.n, 0)::int AS n
+      FROM generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, '1 day') d
+      LEFT JOIN (
+        SELECT t.quiz_date, COUNT(*) FILTER (WHERE q.status_code IN ('completed','closed'))::int AS n
+          FROM quizpe_tracker t JOIN quizpe_status q ON q.id = t.status_id
+         GROUP BY t.quiz_date) x ON x.quiz_date = d::date
+     ORDER BY day`, [days]);
+  return rows;
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar };

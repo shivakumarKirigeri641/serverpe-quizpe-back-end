@@ -25,7 +25,7 @@ const fail = (res, code, error) => res.status(code).json({ success: false, error
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 
 const TZ = 'Asia/Kolkata';
-const IST = (col) => `to_char(${col} AT TIME ZONE 'UTC' AT TIME ZONE '${TZ}', 'DD Mon YYYY, HH24:MI:SS')`;
+const IST = (col) => `to_char(${col} AT TIME ZONE '${TZ}', 'DD Mon YYYY, HH24:MI:SS')`;
 
 /* --------------------------------------------------------------- sessions */
 router.get('/whatsapp/sessions', requireAdmin, async (req, res) => {

@@ -151,6 +151,7 @@
       $("students").innerHTML = Array.from({ length: r.plan.student_count }, (_, i) => studentBlock(i)).join("");
       fill($("state"), r.states, "state_code", "state_name", "Select state");
       bind();
+      prefillExisting(r.existing);   // renewal: show their saved children, still editable
       recompute();
       $("wrap").style.display = "block";
     }
@@ -189,6 +190,37 @@
       $("accept").addEventListener("change", validate);
     }
 
+    // Renewal: drop the family's saved details into the form so the parent can
+    // just accept the terms and pay. Everything stays editable — whatever is in
+    // the fields at payment is exactly what gets charged and enrolled — but the
+    // defaults mean nobody has to retype "Satwik" and accidentally create a new
+    // child by typing a different name into an empty box.
+    function prefillExisting(ex) {
+      if (!ex) return;
+      if (ex.parent_name) $("parentName").value = ex.parent_name;
+      if (ex.state_code)  $("state").value = ex.state_code;
+      const blocks = document.querySelectorAll(".student");
+      (ex.students || []).forEach((s, i) => { if (blocks[i]) prefillStudent(blocks[i], s); });
+      validate();
+    }
+
+    function prefillStudent(el, s) {
+      if (!s) return;
+      el.querySelector(".s-name").value = s.name || "";
+      el.querySelector(".s-school").value = s.school_name || "";
+      const board  = el.querySelector(".s-board"),
+            grade  = el.querySelector(".s-grade"),
+            medium = el.querySelector(".s-medium");
+      // walk the same cascade the change-handlers drive, in order
+      board.value = s.board || "";   board.dispatchEvent(new Event("change"));   // fills grades
+      grade.value = s.grade || "";   grade.dispatchEvent(new Event("change"));   // fills mediums
+      medium.value = s.medium || ""; medium.dispatchEvent(new Event("change"));  // renders add-ons
+      (s.addons || []).forEach(code => {
+        const cb = el.querySelector(`.s-addon[value="${code}"]`);
+        if (cb) cb.checked = true;
+      });
+    }
+
     // recompute the whole summary (base + add-ons) and the GST split live
     function recompute() {
       const base = ctx.plan.price;
@@ -209,7 +241,7 @@
              <div class="sum-row"><span class="k">SGST @ ${pct/2}%</span><span class="v">${inr(gst/2)}</span></div>`
           : `<div class="sum-row"><span class="k">IGST @ ${pct}%</span><span class="v">${inr(gst)}</span></div>`) +
         `<div class="sum-total"><span>Total payable</span><span>${inr(total)}</span></div>`;
-      $("payBtn").textContent = `Pay ${inr(total)}`;
+      $("payBtn").textContent = `Pay securely · ${inr(total)}`;
     }
 
     function collect() {
@@ -233,31 +265,41 @@
       $("payBtn").disabled = !ok;
     }
 
+    // Standard Checkout on our approved domain: create the order, open Razorpay's
+    // checkout modal, and verify server-side the instant it succeeds — activation
+    // happens in the browser, so it never waits on the webhook.
     $("payBtn").addEventListener("click", async () => {
-      $("err").textContent = ""; $("payBtn").disabled = true; $("payBtn").textContent = "Starting…";
+      $("err").textContent = ""; $("payBtn").disabled = true;
+      const label = $("payBtn").textContent;
+      $("payBtn").textContent = "Starting secure payment…";
       const students = collect(), state = $("state").value;
       try {
         const o = await (await fetch("/pay/api/create-order", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, students, state }) })).json();
         if (!o.success) { $("err").textContent = o.error; reset(); return; }
-        if (o.already_paid) { showDone("Already paid — your subscription is active."); return; }
+        if (o.already_paid) { showDone("This plan is already active. 🎉"); return; }
+
         const rzp = new Razorpay({
-          key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency,
-          name: ctx.business.product_name, description: ctx.plan.name,
-          // Show the QuizPe mark in the checkout modal. Without this, Razorpay
-          // falls back to the logo on the merchant account, which is ServerPe.
-          image: location.origin + "/assets/logo-mark.png",
-          prefill: { contact: ctx.mobile }, theme: { color: "#075e54" },
+          key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency || "INR",
+          name: (ctx.business && ctx.business.product_name) || "QuizPe",
+          description: (ctx.plan && ctx.plan.name) || "QuizPe plan",
+          prefill: { contact: ctx.mobile || "" },
+          theme: { color: "#075e54" },
           handler: async (resp) => {
-            $("payBtn").textContent = "Verifying…";
-            const v = await (await fetch("/pay/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ token, ...resp, students, state }) })).json();
-            if (!v.success) { $("err").textContent = v.error; reset(); return; }
-            showDone(`Invoice ${v.invoice} · valid till ${new Date(v.end_date).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}`);
+            $("wrap").innerHTML = "<div style='text-align:center;padding:48px 0;color:#667781'>Verifying your payment…</div>";
+            try {
+              const v = await (await fetch("/pay/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token, students, state,
+                  razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature }) })).json();
+              if (v.success) showDone(v.already_paid ? "This plan is already active. 🎉" : "Payment successful! Your invoice is on its way to WhatsApp. 🎉");
+              else { $("wrap").style.display = "block"; $("err").textContent = v.error || "We couldn't confirm the payment. If money was deducted, contact support."; reset(); }
+            } catch { $("wrap").style.display = "block"; $("err").textContent = "Payment taken but confirmation failed. If money was deducted, contact support."; reset(); }
           },
-          modal: { ondismiss: reset },
+          modal: { ondismiss: () => reset() },
         });
+        rzp.on("payment.failed", (r) => { $("err").textContent = (r.error && r.error.description) || "Payment failed. Please try again."; reset(); });
         rzp.open();
-      } catch { $("err").textContent = "Something went wrong."; reset(); }
+        $("payBtn").textContent = label;   // modal is open now; restore the button
+      } catch { $("err").textContent = "Something went wrong. Please try again."; reset(); }
     });
     function reset(){ $("payBtn").disabled = false; recompute(); }
     function showDone(msg){

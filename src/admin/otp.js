@@ -32,7 +32,12 @@ const SENDER_ID = process.env.FAST2SMS_SENDER_ID || 'SRVRPE';
 const TEMPLATE  = process.env.FAST2SMS_DLT_MESSAGE_ID || process.env.FAST2SMS_TEMPLATE_ID || '219444';
 const ROUTE     = process.env.FAST2SMS_ROUTE || 'dlt';
 const TTL_MIN   = Number(process.env.ADMIN_OTP_TTL_MIN) || 3;
-const MAX_TRIES = 5;
+const MAX_TRIES = Number(process.env.ADMIN_OTP_MAX_TRIES) || 10;
+// Seconds a fresh code must wait before another can be sent, purely to stop
+// SMS credits being burned by a rapid re-tap. Single-admin panel, so kept short
+// and tunable; set ADMIN_OTP_RESEND_SEC=0 to disable entirely.
+const RESEND_SEC = process.env.ADMIN_OTP_RESEND_SEC != null
+  ? Number(process.env.ADMIN_OTP_RESEND_SEC) : 10;
 const IS_PROD   = process.env.NODE_ENV === 'production';
 
 const hash = (code) => crypto.createHash('sha256').update(String(code)).digest('hex');
@@ -97,12 +102,14 @@ async function request(mobile, allowed, ip) {
   // not an admin turns this endpoint into a way to enumerate admins.
   if (!allowed.includes(mobile)) return { ok: true, ttlMin: TTL_MIN };
 
-  const recent = await db.query(
-    `SELECT created_at FROM admin_otps
-      WHERE mobile_number = $1 AND created_at > now() - interval '45 seconds'
-      ORDER BY id DESC LIMIT 1`, [mobile]);
-  if (recent.rowCount) {
-    return { error: 'A code was just sent. Please wait a moment before asking for another.' };
+  if (RESEND_SEC > 0) {
+    const recent = await db.query(
+      `SELECT created_at FROM admin_otps
+        WHERE mobile_number = $1 AND created_at > now() - ($2 || ' seconds')::interval
+        ORDER BY id DESC LIMIT 1`, [mobile, String(RESEND_SEC)]);
+    if (recent.rowCount) {
+      return { error: 'A code was just sent. Please wait a moment before asking for another.' };
+    }
   }
 
   const code = generate();
