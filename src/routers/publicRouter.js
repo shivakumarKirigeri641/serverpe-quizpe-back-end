@@ -162,11 +162,30 @@ router.get('/launch-offer', async (req, res) => {
 /** Only moderated, approved testimonials are ever public. */
 router.get('/testimonials', async (req, res) => {
   try {
+    // One review per distinct parent, so the wall never shows the same family
+    // twice. Parents are matched by the feedback they came from where available
+    // (app reviews carry feedback_id), otherwise by name + location (website
+    // reviews). DISTINCT ON keeps, per parent, their highest-priority / most
+    // recent review; the outer query then orders the wall by curation + recency.
+    // `verified` = the review was promoted from a real QuizPe account's in-app
+    // feedback (feedback_id present → a family that actually took the quizzes),
+    // not typed into the public form by anyone. That is the honest authenticity
+    // signal — we do not solicit reviews from friends or relatives.
     const rows = await cached('testimonials', async () => (await db.query(
-      `SELECT author_name, author_role, location, rating, message
-         FROM testimonials
-        WHERE is_approved AND is_active
-        ORDER BY display_order, id DESC
+      `SELECT author_name, author_role, location, rating, message, verified
+         FROM (
+           SELECT DISTINCT ON (COALESCE('p' || f.parent_id::text,
+                                        'w|' || lower(t.author_name) || '|' || COALESCE(lower(t.location), '')))
+                  t.author_name, t.author_role, t.location, t.rating, t.message,
+                  t.display_order, t.id, (t.feedback_id IS NOT NULL) AS verified
+             FROM testimonials t
+             LEFT JOIN feedbacks f ON f.id = t.feedback_id
+            WHERE t.is_approved AND t.is_active
+            ORDER BY COALESCE('p' || f.parent_id::text,
+                              'w|' || lower(t.author_name) || '|' || COALESCE(lower(t.location), '')),
+                     t.display_order, t.id DESC
+         ) d
+        ORDER BY d.display_order, d.id DESC
         LIMIT 24`)).rows);
     res.json({ success: true, rows });
   } catch (e) {

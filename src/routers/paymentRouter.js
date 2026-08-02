@@ -517,12 +517,26 @@ async function finalize(c, pay, mailCtx = null) {
     const { computePeriod } = require('../utils/subscriptionPeriod');
     const period = await computePeriod(client, parentId, c.duration);
 
+    // Launch offer — a parent's VERY FIRST paid plan (any tier: 99 / 169 / 249)
+    // gets +7 free days and a tree planted in their child's name. Checked BEFORE
+    // the new row is inserted; any prior non-trial subscription means this is a
+    // renewal, not a first, so the bonus never repeats.
+    const firstPremium = (await client.query(
+      `SELECT NOT EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s
+         JOIN quizpe_plans p ON p.id = s.plan_id
+        WHERE s.parent_id = $1 AND COALESCE(p.is_trial, false) = false) AS first`, [parentId])).rows[0].first;
+    let planEnd = period.endDate;
+    if (firstPremium) {
+      const d = new Date(`${period.endDate}T00:00:00`); d.setDate(d.getDate() + 7);
+      planEnd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
     const subId = (await client.query(
       `INSERT INTO parents_quizpe_subscriptions
          (parent_id, plan_id, plan_start_date, plan_end_date, quiz_time, reminder_time)
        VALUES ($1,$2,$3::date,$4::date,$5::time,$6::time)
        RETURNING id, plan_start_date, plan_end_date, quiz_time`,
-      [parentId, c.plan_id, period.startDate, period.endDate,
+      [parentId, c.plan_id, period.startDate, planEnd,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
     // Referral days granted on this payment, both funded by the payment itself:
@@ -579,7 +593,7 @@ async function finalize(c, pay, mailCtx = null) {
 📅 *Valid till:* ${M.fmtDate(subId.plan_end_date)}
 ⏰ *Quiz time:* ${M.fmtTime(subId.quiz_time)} daily
 🧾 *Invoice:* ${inv.invoiceNo}
-${carried ? `\n${carried}\n` : ''}
+${firstPremium ? `\n🎁 *Launch bonus:* we've added *7 free days*, and we'll plant a real tree in ${students.length > 1 ? "your children's" : `${students[0].name}'s`} name! 🌱\n` : ''}${carried ? `\n${carried}\n` : ''}
 Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀${period.stacked ? '' : `\n\n${M.parentGuidance(names)}`}`);
       await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
@@ -654,6 +668,21 @@ A friend you invited earlier means we've added *${referral.days} days* to this r
         ctx: mailCtx || { channel: 'Checkout page', at: new Date(), sessionId: c.whatsapp_session_id },
       });
     } catch (e) { console.error('[pay] admin alert skipped:', e.message); }
+
+    // Record the launch tree pledge so the operator can plant it and showcase it
+    // on YouTube. Post-commit and best-effort — a missing table or error here can
+    // never unwind a payment the parent has already made.
+    if (firstPremium) {
+      try {
+        await db.query(`CREATE TABLE IF NOT EXISTS tree_pledges (
+          id bigserial PRIMARY KEY, parent_id bigint, mobile_number text, child_names text,
+          plan_name text, planted boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`);
+        await db.query(
+          `INSERT INTO tree_pledges (parent_id, mobile_number, child_names, plan_name) VALUES ($1,$2,$3,$4)`,
+          [parentId, c.mobile_number, students.map((s) => s.name).join(', '), c.plan_name]);
+        console.log(`[pay] 🌱 tree pledge for ${c.mobile_number} — ${students.map((s) => s.name).join(', ')}`);
+      } catch (e) { console.error('[pay] tree pledge skipped:', e.message); }
+    }
 
     return { invoice: inv.invoiceNo, end_date: subId.plan_end_date };
   } catch (e) {
