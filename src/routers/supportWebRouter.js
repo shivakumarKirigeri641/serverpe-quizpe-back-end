@@ -158,7 +158,64 @@ _Type *menu* for other options._`);
   }
 });
 
+/** Only an APPROVED, active template may be sent outside the 24h window. */
+async function approvedTemplate(name) {
+  if (!name) return null;
+  const { rows } = await db.query(
+    `SELECT template_name FROM whatsapp_templates
+      WHERE template_name=$1 AND is_active AND approval_status='APPROVED'`, [name]);
+  return rows[0] || null;
+}
+
+/**
+ * Tell the parent their ticket has been resolved, with the resolution text and
+ * a one-tap "re-open" if they're not satisfied. Uses an approved resolution
+ * TEMPLATE when one is configured (works even if the parent is outside the 24h
+ * window); otherwise a free-form message (works only inside the window). The
+ * template you create should carry a QUICK-REPLY button titled "Re-open ticket".
+ */
+async function notifyResolution(t) {
+  const wa = require('../whatsapp/client');
+  const sess = (await db.query(
+    `SELECT id FROM whatsapp_sessions WHERE mobile_number=$1 ORDER BY id DESC LIMIT 1`, [t.mobile_number])).rows[0];
+  if (!sess) return { sent: false, reason: 'no_session' };
+  const name = String(t.user_name || 'there').trim().split(/\s+/)[0] || 'there';
+  const resolution = String(t.resolution || 'Your request has been resolved.').slice(0, 900);
+
+  const tpl = await approvedTemplate(process.env.SUPPORT_RESOLVED_TEMPLATE || 'qp_ticketresolution_v1');
+  if (tpl) {
+    // template body params, in order: name, ticket no, resolution text
+    await wa.sendTemplate(sess.id, t.mobile_number, tpl.template_name, [name, t.ticket_no, resolution]);
+    return { sent: true, via: 'template' };
+  }
+  try {
+    await wa.sendButtons(sess.id, t.mobile_number,
+      `✅ *Ticket ${t.ticket_no} — resolved*\n\nHi ${name}, here's what we did:\n\n${resolution}\n\n`
+      + `If this didn't solve it, tap below to re-open the ticket.`,
+      [{ id: `reopen_${t.id}`, title: '↩️ Re-open ticket' }]);
+    return { sent: true, via: 'freeform' };
+  } catch (e) { return { sent: false, reason: e.message }; }
+}
+
+/**
+ * Re-open the parent's most recently closed ticket (used when they tap "Re-open"
+ * or say so in chat). Returns the ticket, or null if they have none closed.
+ */
+async function reopenLatestClosed(mobile) {
+  const m = String(mobile || '').replace(/\D/g, '').slice(-10);
+  const { rows: [t] } = await db.query(
+    `UPDATE support_tickets
+        SET status='open', reopened_at=now(), reopen_count=reopen_count+1, modified_at=now()
+      WHERE id = (SELECT id FROM support_tickets
+                   WHERE mobile_number=$1 AND status='closed'
+                   ORDER BY resolved_at DESC NULLS LAST, id DESC LIMIT 1)
+      RETURNING *`, [m]);
+  return t || null;
+}
+
 module.exports = router;
 module.exports.createSupportLink = createSupportLink;
 module.exports.QUERY_TYPES = QUERY_TYPES;
 module.exports.maskMobile = maskMobile;
+module.exports.notifyResolution = notifyResolution;
+module.exports.reopenLatestClosed = reopenLatestClosed;

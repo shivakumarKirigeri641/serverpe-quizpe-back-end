@@ -35,6 +35,13 @@ const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 // still leaves 2h15m of window, which is plenty for a 5-minute quiz. No
 // unsolicited message from QuizPe goes out after this time.
 const MISSED_AT_HHMM = process.env.MISSED_AT_HHMM || '21:30';
+// End-of-day recap for children who did NOT finish today's quiz. Fires just
+// AFTER the day-cutoff has settled today's trackers (see DAY_CUTOFF_HHMM), so
+// "missed" is final rather than "not started yet". Only NON-completers get it:
+// a gentle "you missed it, all the best tomorrow" plus a progress stat. Must be
+// after the cutoff (23:50 by default) — 23:52 leaves the settle to finish.
+const DAYRECAP_TEMPLATE = process.env.DAYRECAP_TEMPLATE || 'qp_daymissed_v1';
+const DAYRECAP_AT_HHMM = process.env.DAYRECAP_AT_HHMM || '23:52';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -135,12 +142,18 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
         -- one per student per kind per day
         AND NOT EXISTS (SELECT 1 FROM notification_log n
                          WHERE n.student_id = st.id AND n.kind = $2 AND n.send_date = CURRENT_DATE)
-        -- never chase someone who already finished today
+        -- never chase someone who already finished today: the quiz is marked
+        -- completed/closed, OR every question in today's tracker is already
+        -- answered (covers the gap between the last answer and finishQuiz
+        -- flipping the tracker to 'completed')
         AND NOT EXISTS (
               SELECT 1 FROM quizpe_tracker t
-                JOIN quizpe_status qs ON qs.id = t.status_id
                WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
-                 AND qs.status_code IN ('completed','closed'))`,
+                 AND ( EXISTS (SELECT 1 FROM quizpe_status qs
+                                WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
+                    OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                         AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
+                                          WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) ))`,
     [nowMin, kind, BASE_SUBJECT, CATCH_UP_MIN, offsetMin]);
   return rows;
 }
@@ -343,6 +356,99 @@ async function runFormNudge() {
   if (sent) console.log(`[scheduler] form_nudge: ${sent} sent`);
 }
 
+/* ------------------------------------------------ end-of-day "missed" recap -- */
+/**
+ * Children who did NOT finish today's quiz, for the post-cutoff recap.
+ *
+ * "Did not finish" = the tracker is NOT 'completed' AND not every question is
+ * answered. This deliberately INCLUDES 'skipped' (never started) and 'closed'
+ * partial attempts — both are "missed / half-done" and both should hear the
+ * gentle "all the best tomorrow" nudge. A quiz must actually have been
+ * scheduled for them today (a tracker exists), so a parent whose slot never
+ * fired is never told they "missed" something that was never offered.
+ *
+ * Also returns the progress stat: distinct days attempted (any answered
+ * question) out of days enrolled so far.
+ */
+async function dayMissedDue() {
+  const { rows } = await db.query(
+    `SELECT st.id  AS student_id, st.student_name,
+            p.id   AS parent_id, p.parent_name, p.parent_mobile_number,
+            (CURRENT_DATE - s.plan_start_date) + 1 AS enrolled_days,
+            (SELECT COUNT(DISTINCT t.quiz_date)::int
+               FROM quizpe_tracker t
+              WHERE t.student_id = st.id
+                AND t.quiz_date BETWEEN s.plan_start_date AND CURRENT_DATE
+                AND EXISTS (SELECT 1 FROM student_quizpe_histories h
+                             WHERE h.tracker_id = t.id AND h.answered_option IS NOT NULL)) AS attempted_days,
+            w.id AS session_id
+       FROM parents_quizpe_subscriptions s
+       JOIN parents  p  ON p.id = s.parent_id AND p.is_active
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       LEFT JOIN LATERAL (SELECT id FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+        -- never on the parent's very first day (setup confusion, not a skip)
+        AND (CURRENT_DATE - s.plan_start_date) + 1 > 1
+        AND NOT p.service_paused
+        -- a quiz was actually scheduled for them today
+        AND EXISTS (SELECT 1 FROM quizpe_tracker t
+                     WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE)
+        -- but they did NOT finish it (completed OR all-answered = finished)
+        AND NOT EXISTS (
+              SELECT 1 FROM quizpe_tracker t
+               WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                 AND ( EXISTS (SELECT 1 FROM quizpe_status qs
+                                WHERE qs.id = t.status_id AND qs.status_code = 'completed')
+                    OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                         AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
+                                          WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) ))
+        -- once per student per day
+        AND NOT EXISTS (SELECT 1 FROM notification_log n
+                         WHERE n.student_id = st.id AND n.kind = 'day_missed' AND n.send_date = CURRENT_DATE)`);
+  return rows;
+}
+
+/**
+ * The post-cutoff recap. Fires once, in the window at DAYRECAP_AT_HHMM, and only
+ * once the recap template is APPROVED (skips silently until then). Params, in
+ * the order the template body expects: parent name, child name, attempted days,
+ * enrolled days.
+ */
+async function runDayMissedRecap() {
+  const [th, tm] = DAYRECAP_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  if (!(await require('../whatsapp/lifecycle').approved(DAYRECAP_TEMPLATE))) return;
+
+  const due = await dayMissedDue();
+  if (!due.length) return;
+  console.log(`[scheduler] day_missed recap @${nowHHMM()}: ${due.length} to send (${DAYRECAP_TEMPLATE})`);
+
+  for (const row of due) {
+    if (!(await claimSend(row, 'day_missed', DAYRECAP_TEMPLATE))) continue;   // already sent today
+    try {
+      const params = [
+        String(row.parent_name || 'there'),
+        String(row.student_name || 'your child'),
+        String(row.attempted_days ?? 0),
+        String(row.enrolled_days ?? 0),
+      ];
+      const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, DAYRECAP_TEMPLATE, params);
+      await finishSend(row, 'day_missed', id, null);
+    } catch (e) {
+      console.error(`[scheduler] day_missed failed for ${row.parent_mobile_number}: ${e.message}`);
+      await finishSend(row, 'day_missed', null, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 250));            // stay under Meta's rate limit
+  }
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -497,6 +603,11 @@ function startScheduler() {
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();
+
+      // A gentle end-of-day recap to children who missed / half-did today's
+      // quiz. Runs AFTER the cutoff has settled the trackers (DAYRECAP_AT_HHMM
+      // is a couple of minutes past CUTOFF_HHMM), so "missed" is final.
+      await runDayMissedRecap();
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {

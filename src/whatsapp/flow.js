@@ -720,6 +720,24 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // "Re-open ticket" — from the resolution message's quick-reply button, or if
+  // the parent types it. Puts their most recently closed ticket back to OPEN so
+  // it resurfaces in the admin Support board.
+  if ((id && id.startsWith('reopen_')) || id === 'REOPEN_TICKET' || /re-?open( (my )?ticket)?/.test(mkt)) {
+    const t = await require('../routers/supportWebRouter').reopenLatestClosed(mobile);
+    if (t) {
+      console.log(`[flow] ticket ${t.ticket_no} re-opened by ${mobile} (re-open #${t.reopen_count})`);
+      await wa.sendText(session.id, mobile,
+`↩️ *Ticket ${t.ticket_no} re-opened.*
+
+Sorry that didn't fully solve it. Our team will take another look and get back to you — you can add any more details by replying here.`);
+    } else {
+      await wa.sendText(session.id, mobile,
+        "We couldn't find a recently closed ticket to re-open. Type *menu*, then *Support*, to raise a new request.");
+    }
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }
@@ -981,6 +999,25 @@ Tap below to enter your child${plan.student_count > 1 ? 'ren\'s' : "'s"} details
   });
 }
 
+/** Send the "raise a request" support form link. */
+async function sendSupportForm(session, mobile, ctx) {
+  const { createSupportLink } = require('../routers/supportWebRouter');
+  const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
+  const b = await M.business();
+  await wa.sendCtaUrl(session.id, mobile, {
+    header: 'Support',
+    body: `💬 *We're here to help!*
+
+Tap below to raise a request — pick what it's about, describe the issue, and you'll get a ticket number straight away.
+
+📧 ${b.support_email}
+🌐 ${b.product_website}`,
+    displayText: '🛠️ Raise a request',
+    url,
+    footer: `${b.company_name}`,
+  });
+}
+
 async function handleMenuChoice(session, mobile, ctx, choice) {
   const students = await getStudents(ctx.parentId);
 
@@ -1001,18 +1038,35 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
         await wa.sendText(session.id, mobile, 'No child enrolled yet. Type *menu* to get started.');
         break;
       }
-      // Multiple children -> let the parent choose whose quiz to take.
-      if (students.length > 1) {
+      // Hide any child who has ALREADY taken today's quiz (completed/closed, or
+      // every question answered) — no point offering to "start" a done quiz.
+      const doneRows = (await db.query(
+        `SELECT DISTINCT t.student_id FROM quizpe_tracker t
+          WHERE t.quiz_date = CURRENT_DATE AND t.student_id = ANY($1::bigint[])
+            AND ( EXISTS (SELECT 1 FROM quizpe_status qs WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
+               OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                    AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) )`,
+        [students.map(s => s.id)])).rows;
+      const done = new Set(doneRows.map(r => Number(r.student_id)));
+      const pending = students.filter(s => !done.has(Number(s.id)));
+
+      if (!pending.length) {
+        await wa.sendText(session.id, mobile,
+          "🎉 All your children have finished today's quiz! A fresh one arrives tomorrow evening.");
+        break;
+      }
+      // Multiple children still pending -> let the parent choose whose quiz to take.
+      if (pending.length > 1) {
         await wa.sendList(session.id, mobile, {
           header: '▶️ Start quiz',
           text: 'Which child is taking the quiz now?',
           buttonText: 'Choose child',
-          rows: students.map(s => ({ id: `child_${s.id}`, title: s.student_name.slice(0, 24),
+          rows: pending.map(s => ({ id: `child_${s.id}`, title: s.student_name.slice(0, 24),
             description: `${s.board_code} · ${s.grade_name}` })),
         });
         break;
       }
-      await beginQuizFor(session, mobile, students[0], 1);
+      await beginQuizFor(session, mobile, pending[0], pending.length);
       break;
     }
 
@@ -1089,25 +1143,28 @@ ${s.link || `Message and send: JOIN ${s.code}`}`);
     }
 
     case 'support': {
-      // A form, so every query arrives categorised and with a ticket number —
-      // far better than "reply with your question" free text in chat.
-      const { createSupportLink } = require('../routers/supportWebRouter');
-      const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
-      const b = await M.business();
-      await wa.sendCtaUrl(session.id, mobile, {
-        header: 'Support',
-        body: `💬 *We're here to help!*
+      // If they have a recently CLOSED ticket, offer to re-open it (this is the
+      // "re-open in the Support option" the resolution message points them to);
+      // otherwise go straight to the new-request form.
+      const m10 = String(mobile).replace(/\D/g, '').slice(-10);
+      const closed = (await db.query(
+        `SELECT id, ticket_no FROM support_tickets
+          WHERE mobile_number=$1 AND status='closed'
+          ORDER BY resolved_at DESC NULLS LAST, id DESC LIMIT 1`, [m10])).rows[0];
+      if (closed) {
+        await wa.sendButtons(session.id, mobile,
+`💬 *Support*
 
-Tap below to raise a request — pick what it's about, describe the issue, and you'll get a ticket number straight away.
-
-📧 ${b.support_email}
-🌐 ${b.product_website}`,
-        displayText: '🛠️ Raise a request',
-        url,
-        footer: `${b.company_name}`,
-      });
+Your last ticket *${closed.ticket_no}* was marked resolved. If that didn't fully solve it, re-open it — otherwise raise a new request.`,
+          [{ id: `reopen_${closed.id}`, title: 'Re-open ticket' }, { id: 'support_new', title: 'New request' }]);
+        break;
+      }
+      await sendSupportForm(session, mobile, ctx);
       break;
     }
+    case 'support_new':
+      await sendSupportForm(session, mobile, ctx);
+      break;
 
     default:
       await showMainMenu(session, mobile, ctx);

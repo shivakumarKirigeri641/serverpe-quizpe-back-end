@@ -586,6 +586,22 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
       });
 
+      // A warm thank-you, sent right AFTER the invoice. Uses an approved template
+      // (branded + reliable); skipped silently until Meta clears it, so nothing
+      // extra goes out until then. Params: {{1}} parent first name, {{2}} plan,
+      // {{3}} the child name(s) — pluralised so a 2- or 3-child plan reads right.
+      try {
+        const tplName = process.env.THANKYOU_TEMPLATE || 'qp_thankyou_v1';
+        if (await require('../whatsapp/lifecycle').approved(tplName)) {
+          const firstName = String(cart.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
+          const kn = students.map((s) => s.name).filter(Boolean);
+          const childLabel = kn.length <= 1 ? (kn[0] || 'your child')
+            : kn.length === 2 ? `${kn[0]} & ${kn[1]}`
+              : `${kn.slice(0, -1).join(', ')} & ${kn[kn.length - 1]}`;
+          await wa.sendTemplate(c.whatsapp_session_id, c.mobile_number, tplName, [firstName, c.plan_name, childLabel]);
+        }
+      } catch (e) { console.error('[pay] thank-you send:', e.message); }
+
       // If they subscribed while the quiz window is open, offer a one-tap start
       // now rather than making them wait for tonight's scheduled nudge.
       const qw = require('../whatsapp/quizWindow');

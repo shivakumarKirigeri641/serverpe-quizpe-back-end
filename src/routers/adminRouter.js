@@ -703,16 +703,27 @@ router.get('/support', requireAdmin, async (req, res) => {
 
 router.patch('/support/:id', requireAdmin, express.json(), async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const status = ['open', 'in_progress', 'resolved', 'closed'].includes(req.body?.status)
+  const status = ['open', 'in_progress', 'closed', 'cancelled'].includes(req.body?.status)
     ? req.body.status : null;
+  const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution.trim().slice(0, 2000) : null;
   if (!id || !status) return fail(res, 400, 'Bad ticket update.');
   try {
     const { rows } = await db.query(
       `UPDATE support_tickets
-          SET status=$2, resolved_at = CASE WHEN $2 IN ('resolved','closed') THEN now() ELSE NULL END,
-              modified_at=now()
-        WHERE id=$1 RETURNING *`, [id, status]);
-    ok(res, { row: rows[0] });
+          SET status=$2,
+              resolution  = COALESCE($3, resolution),
+              resolved_at = CASE WHEN $2 IN ('closed','cancelled') THEN now() ELSE resolved_at END,
+              modified_at = now()
+        WHERE id=$1 RETURNING *`, [id, status, resolution]);
+    const t = rows[0];
+    // On CLOSE with a resolution note, tell the parent (best-effort — never
+    // blocks the admin action) and offer a one-tap re-open.
+    if (t && status === 'closed' && (resolution || t.resolution)) {
+      require('./supportWebRouter').notifyResolution(t)
+        .then((r) => console.log(`[admin] ticket ${t.ticket_no} resolution sent: ${JSON.stringify(r)}`))
+        .catch((e) => console.error('[admin] resolution send:', e.message));
+    }
+    ok(res, { row: t });
   } catch (e) { console.error('[admin] ticket update:', e.message); fail(res, 500, 'Could not update the ticket.'); }
 });
 
@@ -730,6 +741,136 @@ router.get('/system', requireAdmin, async (req, res) => {
          FROM notification_log WHERE send_date = CURRENT_DATE`);
     ok(res, { jobs, database: db1.size, templates, today: notif });
   } catch (e) { console.error('[admin] system:', e.message); fail(res, 500, 'Could not load system status.'); }
+});
+
+/* -------------------------------------------------- whatsapp templates CRUD */
+/**
+ * Manage the whatsapp_templates rows the senders read. Adding a row here does
+ * NOT create the template in Meta — you author + submit that in the WhatsApp
+ * Manager. This is the local registry: name, category, body/header/footer (for
+ * preview), variables, buttons, send_context, and the approval_status the
+ * senders gate on. Flip a row to APPROVED once Meta clears it and every gated
+ * sender (welcome, expiry, support-resolution, thank-you, day-missed recap,
+ * broadcaster) starts using it on the next run — no deploy needed.
+ */
+const TPL_CATEGORIES = ['UTILITY', 'MARKETING', 'AUTHENTICATION'];
+const TPL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'];
+
+let tplColsReady = false;
+async function ensureTemplateCols() {
+  if (tplColsReady) return;
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS header_text text`);
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS footer_text text`);
+  tplColsReady = true;
+}
+
+/** Validate + normalise a full template payload (create). */
+function cleanTemplate(b) {
+  const name = String(b?.template_name || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{1,512}$/.test(name)) {
+    return { error: 'Name must be lowercase letters, numbers and underscores only (e.g. qp_thankyou_v1).' };
+  }
+  if (!TPL_CATEGORIES.includes(b?.category)) return { error: 'Category must be UTILITY, MARKETING or AUTHENTICATION.' };
+  const status = TPL_STATUSES.includes(b?.approval_status) ? b.approval_status : 'PENDING';
+  const body_text = String(b?.body_text || '').trim();
+  if (!body_text) return { error: 'Body text is required.' };
+  return {
+    value: {
+      name, category: b.category, status, body_text,
+      language: (String(b?.language || 'en').trim().slice(0, 12) || 'en'),
+      header_text: b?.header_text ? String(b.header_text).trim().slice(0, 200) : null,
+      footer_text: b?.footer_text ? String(b.footer_text).trim().slice(0, 200) : null,
+      send_context: b?.send_context ? String(b.send_context).trim().slice(0, 120) : null,
+      variables: Array.isArray(b?.variables) ? b.variables.map((v) => String(v).trim()).filter(Boolean) : [],
+      buttons: Array.isArray(b?.buttons) ? b.buttons : [],
+      is_active: b?.is_active !== false,
+    },
+  };
+}
+
+router.get('/templates', requireAdmin, async (req, res) => {
+  try {
+    await ensureTemplateCols();
+    const { rows } = await db.query(
+      `SELECT id, template_name, language, category, approval_status, body_text,
+              header_text, footer_text, variables, buttons, send_context, is_active
+         FROM whatsapp_templates ORDER BY template_name`);
+    ok(res, { rows, categories: TPL_CATEGORIES, statuses: TPL_STATUSES });
+  } catch (e) { console.error('[admin] templates list:', e.message); fail(res, 500, 'Could not load templates.'); }
+});
+
+router.post('/templates', requireAdmin, express.json(), async (req, res) => {
+  const c = cleanTemplate(req.body);
+  if (c.error) return fail(res, 400, c.error);
+  const v = c.value;
+  try {
+    await ensureTemplateCols();
+    const { rows } = await db.query(
+      `INSERT INTO whatsapp_templates
+         (template_name, language, category, approval_status, body_text, header_text, footer_text,
+          variables, buttons, send_context, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)
+       RETURNING id`,
+      [v.name, v.language, v.category, v.status, v.body_text, v.header_text, v.footer_text,
+       JSON.stringify(v.variables), JSON.stringify(v.buttons), v.send_context, v.is_active]);
+    ok(res, { id: rows[0].id, message: `Template ${v.name} added.` });
+  } catch (e) {
+    if (e.code === '23505') return fail(res, 400, 'A template with that name already exists.');
+    console.error('[admin] template create:', e.message); fail(res, 500, 'Could not add the template.');
+  }
+});
+
+router.patch('/templates/:id', requireAdmin, express.json(), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Bad template id.');
+  const b = req.body || {};
+  const sets = []; const vals = []; let i = 1;
+  const push = (col, val) => { sets.push(`${col}=$${i++}`); vals.push(val); };
+  if (b.approval_status !== undefined) {
+    if (!TPL_STATUSES.includes(b.approval_status)) return fail(res, 400, 'Bad status.');
+    push('approval_status', b.approval_status);
+  }
+  if (b.is_active !== undefined) push('is_active', !!b.is_active);
+  if (b.category !== undefined) {
+    if (!TPL_CATEGORIES.includes(b.category)) return fail(res, 400, 'Bad category.');
+    push('category', b.category);
+  }
+  if (b.body_text !== undefined) {
+    const t = String(b.body_text).trim();
+    if (!t) return fail(res, 400, 'Body cannot be empty.');
+    push('body_text', t);
+  }
+  if (b.header_text !== undefined) push('header_text', b.header_text ? String(b.header_text).trim().slice(0, 200) : null);
+  if (b.footer_text !== undefined) push('footer_text', b.footer_text ? String(b.footer_text).trim().slice(0, 200) : null);
+  if (b.send_context !== undefined) push('send_context', b.send_context ? String(b.send_context).trim().slice(0, 120) : null);
+  if (b.language !== undefined) push('language', String(b.language).trim().slice(0, 12) || 'en');
+  if (b.variables !== undefined) {
+    const arr = Array.isArray(b.variables) ? b.variables.map((x) => String(x).trim()).filter(Boolean) : [];
+    sets.push(`variables=$${i++}::jsonb`); vals.push(JSON.stringify(arr));
+  }
+  if (b.buttons !== undefined) {
+    sets.push(`buttons=$${i++}::jsonb`); vals.push(JSON.stringify(Array.isArray(b.buttons) ? b.buttons : []));
+  }
+  if (!sets.length) return fail(res, 400, 'Nothing to update.');
+  try {
+    await ensureTemplateCols();
+    vals.push(id);
+    const { rows } = await db.query(
+      `UPDATE whatsapp_templates SET ${sets.join(', ')} WHERE id=$${i} RETURNING template_name`, vals);
+    if (!rows.length) return fail(res, 404, 'Template not found.');
+    ok(res, { message: `Template ${rows[0].template_name} updated.` });
+  } catch (e) { console.error('[admin] template update:', e.message); fail(res, 500, 'Could not update the template.'); }
+});
+
+router.delete('/templates/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Bad template id.');
+  try {
+    const { rows } = await db.query(
+      `DELETE FROM whatsapp_templates WHERE id=$1 RETURNING template_name`, [id]);
+    if (!rows.length) return fail(res, 404, 'Template not found.');
+    ok(res, { message: `Deleted ${rows[0].template_name}.` });
+  } catch (e) { console.error('[admin] template delete:', e.message); fail(res, 500, 'Could not delete the template.'); }
 });
 
 /* ---------------------------------------------------------- payment mode */
