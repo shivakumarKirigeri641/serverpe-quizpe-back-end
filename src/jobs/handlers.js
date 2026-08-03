@@ -219,7 +219,7 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
       let invite = '';
       try {
         const link = referrals.shareLink(await referrals.codeFor(p.id));
-        if (link) invite = `\n\nInvite a friend and you both get free days: ${link}`;
+        if (link) invite = `\n\nInvite a friend and earn free days when they start: ${link}`;
       } catch { /* a missing code must not stop the card going out */ }
       await wa.sendImage(sessionId, mobile, {
         filePath,

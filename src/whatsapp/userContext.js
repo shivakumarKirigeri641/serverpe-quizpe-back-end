@@ -177,7 +177,7 @@ function buildMainMenu(ctx) {
   // recommend yet, and asking them to would be presumptuous.
   if (ctx.exists) {
     rows.push({ id: 'refer_friend', title: '🎁 Refer a friend',
-                description: 'You both get free days when they subscribe' });
+                description: 'Earn free days when a friend joins & starts' });
   }
   rows.push(
     { id: 'view_plans',      title: '💎 Premium plans',   description: 'Upgrade from just ₹99' },

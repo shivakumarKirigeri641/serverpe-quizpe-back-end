@@ -359,16 +359,21 @@ async function activateTrial(session, mobile, stateCode) {
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
       [session.id, parent]);
 
-    // Record who sent them, if anyone. Nothing is paid out here — the reward
-    // lands on their first payment, so a free trial cannot be farmed for days.
-    // Any failure is swallowed: a referral must never block an enrolment.
+    await c.query('COMMIT');
+
+    // Record who sent them, if anyone — AFTER commit, on the pool (NOT `c`).
+    // Nothing is paid out here; the reward lands on their first payment, so a
+    // free trial cannot be farmed for days. Critically, this must not run inside
+    // the enrolment transaction: any SQL error inside capture() aborts that
+    // transaction, and a swallowed JS error cannot un-abort Postgres — the
+    // COMMIT then fails and the whole enrolment (and the conversation) is lost.
+    // Isolating it on its own connection means a referral can never block an
+    // enrolment, which was the original intent.
     if (session.context?.referral_code) {
       try {
-        await require('../referrals/engine').capture(parent, session.context.referral_code, c);
+        await require('../referrals/engine').capture(parent, session.context.referral_code);
       } catch (e) { console.error('[flow] referral capture skipped:', e.message); }
     }
-
-    await c.query('COMMIT');
 
     // Operator alert, after COMMIT and never awaited: the parent's trial must
     // start whether or not the founder's notification email does.
@@ -686,7 +691,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
         await wa.sendText(session.id, mobile,
           `🎁 *${first} invited you to QuizPe!*\n\n` +
-          `Start your free trial below. When you subscribe, you *both* get free days added.`);
+          `Start your *free 7-day trial* below — no app, no login. Just say hi and today's quiz begins.`);
       } else {
         // Unknown code — remember it anyway so a typo can be looked at later,
         // but say nothing; a stranger typing "JOIN" should not get an error.
@@ -1126,9 +1131,9 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
           : '';
 
       await wa.sendText(session.id, mobile,
-`🎁 *Give ${s.reward_days} days, get ${s.reward_days} days*
+`🎁 *Earn ${s.reward_days} free days*
 
-Share the message below with another parent. When they subscribe, *you both* get *${s.reward_days} free days* added to your plan.
+Share the message below with another parent. When they join and start their quizzes, *you* get *${s.reward_days} free days* added to your plan.
 
 Your code: *${s.code}*${earned}
 
@@ -1137,7 +1142,7 @@ _Forward the next message 👇_`);
       await wa.sendText(session.id, mobile,
 `My child does a 10-question maths quiz every evening on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
 
-Try it free, and we both get ${s.reward_days} bonus days:
+Try it free for 7 days — no app, no login:
 ${s.link || `Message and send: JOIN ${s.code}`}`);
       break;
     }

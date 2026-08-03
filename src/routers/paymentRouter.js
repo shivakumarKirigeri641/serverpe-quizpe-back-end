@@ -525,19 +525,15 @@ async function finalize(c, pay, mailCtx = null) {
       [parentId, c.plan_id, period.startDate, period.endDate,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
-    // Referral days granted on this payment, both funded by the payment itself:
-    //   • releaseBankedOnRenewal — the PAYER as a REFERRER: release one banked
-    //     referral bonus onto the new plan ("+7 per renewal").
-    //   • creditRefereeOnFirstPayment — the PAYER as a FRIEND who was referred:
-    //     a one-time +7 welcome bonus on their first paid plan.
-    // Both idempotent and inside the transaction, so the days cannot survive a
-    // rolled-back payment. A parent can legitimately receive both.
+    // Referral days on this payment — REFERRER-ONLY model. The friend gets NO
+    // bonus days (only their normal trial); only the referrer earns. Here that
+    // means releaseBankedOnRenewal: the PAYER acting as a REFERRER releases one
+    // banked referral bonus onto the new plan ("+7 per renewal"). Idempotent and
+    // inside the transaction, so the days cannot survive a rolled-back payment.
     const engine = require('../referrals/engine');
-    let referral = null, refereeBonus = null;
+    let referral = null;
     try { referral = await engine.releaseBankedOnRenewal(parentId, client); }
     catch (e) { console.error('[pay] referral release skipped:', e.message); }
-    try { refereeBonus = await engine.creditRefereeOnFirstPayment(parentId, client); }
-    catch (e) { console.error('[pay] referee bonus skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -618,14 +614,8 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
       const wa = require('../whatsapp/client');
       const M = require('../whatsapp/messages');
 
-      // As a REFERRED friend: their one-time welcome bonus on this first plan.
-      if (refereeBonus && refereeBonus.refereeNewEnd) {
-        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎁 *Referral welcome bonus — +${refereeBonus.days} free days!*
-
-Because you joined through a friend's invite, we've added *${refereeBonus.days} days* to your plan.
-📅 Now valid till *${M.fmtDate(refereeBonus.refereeNewEnd)}*`);
-      }
+      // (Referrer-only model: a referred friend gets NO welcome bonus — only the
+      // referrer earns, so there is no referee-bonus message here.)
 
       // As a REFERRER: one of their banked bonuses released onto this renewal.
       if (referral && referral.referrerNewEnd) {
