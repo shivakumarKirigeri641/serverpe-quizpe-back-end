@@ -393,6 +393,13 @@ async function dayMissedDue() {
         -- never on the parent's very first day (setup confusion, not a skip)
         AND (CURRENT_DATE - s.plan_start_date) + 1 > 1
         AND NOT p.service_paused
+        -- Only say "all the best for tomorrow" if there actually IS a quiz
+        -- tomorrow — i.e. some active subscription covers CURRENT_DATE + 1. A plan
+        -- expiring today with no renewal has no tomorrow, so the expiry/expired
+        -- lifecycle messages handle them; a "see you tomorrow" would be wrong.
+        AND EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s2
+                     WHERE s2.parent_id = p.id AND s2.is_active
+                       AND (CURRENT_DATE + 1) BETWEEN s2.plan_start_date AND s2.plan_end_date)
         -- a quiz was actually scheduled for them today
         AND EXISTS (SELECT 1 FROM quizpe_tracker t
                      WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE)
