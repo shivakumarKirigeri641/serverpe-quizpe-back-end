@@ -707,14 +707,19 @@ router.patch('/support/:id', requireAdmin, express.json(), async (req, res) => {
     ? req.body.status : null;
   const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution.trim().slice(0, 2000) : null;
   if (!id || !status) return fail(res, 400, 'Bad ticket update.');
+  // Stamp resolved_at here, in JS — the status column may be an enum, and reusing
+  // the status parameter in a text CASE made Postgres deduce two types for it
+  // ("inconsistent types deduced for parameter $2"). A dedicated timestamp param
+  // sidesteps that entirely; null leaves the existing resolved_at untouched.
+  const resolvedAt = (status === 'closed' || status === 'cancelled') ? new Date() : null;
   try {
     const { rows } = await db.query(
       `UPDATE support_tickets
           SET status=$2,
               resolution  = COALESCE($3, resolution),
-              resolved_at = CASE WHEN $2 IN ('closed','cancelled') THEN now() ELSE resolved_at END,
+              resolved_at = COALESCE($4::timestamptz, resolved_at),
               modified_at = now()
-        WHERE id=$1 RETURNING *`, [id, status, resolution]);
+        WHERE id=$1 RETURNING *`, [id, status, resolution, resolvedAt]);
     const t = rows[0];
     // On CLOSE with a resolution note, tell the parent (best-effort — never
     // blocks the admin action) and offer a one-tap re-open.
