@@ -229,6 +229,18 @@ router.get('/parents', requireAdmin, async (req, res) => {
   const limit = clamp(req.query.limit, 25, 200);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
   const q = `%${String(req.query.q || '').trim()}%`;
+  // filter is a fixed keyword (never user text), so it is safe to inline
+  const filter = ['active', 'lapsed', 'expiring'].includes(req.query.filter) ? req.query.filter : 'all';
+  const filterClause = filter === 'lapsed'
+    ? 'AND s.plan_end_date IS NOT NULL AND s.plan_end_date < CURRENT_DATE'          // latest plan ended, not renewed
+    : filter === 'active'
+      ? 'AND s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date'
+      : filter === 'expiring'
+        ? 'AND s.is_active AND s.plan_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7'
+        : '';
+  const orderBy = filter === 'expiring' ? 's.plan_end_date ASC'
+    : filter === 'lapsed' ? 's.plan_end_date DESC'
+      : 'p.id DESC';
   try {
     const { rows } = await db.query(`
       SELECT p.id, p.parent_name, p.parent_mobile_number, p.state_code, p.reminders_enabled,
@@ -246,7 +258,8 @@ router.get('/parents', requireAdmin, async (req, res) => {
                             WHERE x.parent_id=p.id ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
         LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
        WHERE ($1 = '%%' OR p.parent_name ILIKE $1 OR p.parent_mobile_number ILIKE $1)
-       ORDER BY p.id DESC LIMIT $2 OFFSET $3`, [q, limit, offset]);
+         ${filterClause}
+       ORDER BY ${orderBy} LIMIT $2 OFFSET $3`, [q, limit, offset]);
     ok(res, { rows, total: rows[0]?.total || 0 });
   } catch (e) { console.error('[admin] parents:', e.message); fail(res, 500, 'Could not load parents.'); }
 });

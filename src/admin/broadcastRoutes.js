@@ -129,6 +129,8 @@ router.post('/broadcast/preview', requireAdmin, express.json(), async (req, res)
       no_session: all.length - withSession.length,
       skipped_cooldown: skippedCooldown,
       recipients: keep.length,
+      // the actual people who WILL receive it, so the admin can glance before sending
+      list: keep.slice(0, 500).map((r) => ({ name: r.name, mobile: r.mobile_number })),
     });
   } catch (e) { console.error('[admin] broadcast preview:', e.message); fail(res, 500, 'Could not preview.'); }
 });
