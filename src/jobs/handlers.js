@@ -30,7 +30,7 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
       filePath: rep.filePath,
       filename: `${rep.head.student_name}-${rep.head.subject_name}-report.pdf`,
       caption: `📄 *${rep.head.student_name}'s report* — ${rep.head.subject_name}\n` +
-               `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · Grade *${rep.score.grade}* — ${rep.score.label}\n` +
+               `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · *${rep.score.grade}* — ${rep.score.label}\n` +
                `_Includes every question, the correct answer and why._`,
     });
   } catch (e) {
@@ -263,11 +263,58 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
   }
 }
 
+/**
+ * Weekly performance report (rolling 7-day cycle). Delivery is cost-smart:
+ *   • inside the 24h window  -> free-form document (no template cost)
+ *   • outside the window     -> approved DOCUMENT template (the only way to
+ *                               attach a PDF beyond 24h)
+ * If it's outside the window and the template isn't approved yet, we DEFER
+ * (don't generate/record it), so the daily scan retries it once approved.
+ */
+async function weeklyReport({ studentId, weekStart, weekEnd, sessionId, mobile }) {
+  const wa = require('../whatsapp/client');
+  const { generateWeeklyReport } = require('../pdf/weeklyReport');
+  const w = (await db.query(
+    `SELECT (last_inbound_at > now() - interval '24 hours') AS in_window FROM whatsapp_sessions WHERE id=$1`,
+    [sessionId])).rows[0];
+  const inWindow = !!(w && w.in_window);
+  const TPL = process.env.WEEKLY_REPORT_TEMPLATE || 'qp_weeklyreport_v1';
+
+  if (!inWindow && !(await require('../whatsapp/lifecycle').approved(TPL))) {
+    console.warn(`[jobs] weekly report ${mobile}: outside 24h window and ${TPL} not approved — deferring`);
+    return;   // leave it "due"; the daily scan re-tries once the template is live
+  }
+
+  const rep = await generateWeeklyReport(studentId, { weekStart, weekEnd });   // records the report row
+  const s = rep.summary;
+  const trend = s.improvement > 0 ? ` · 📈 +${s.improvement}%` : s.improvement < 0 ? ` · 📉 ${s.improvement}%` : '';
+  const filename = `${rep.head.student_name}-weekly-report.pdf`;
+  const fmtD = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+  const range = `${fmtD(weekStart)} – ${fmtD(weekEnd)} ${new Date(`${weekEnd}T00:00:00`).getFullYear()}`;
+
+  if (inWindow) {
+    await wa.sendDocument(sessionId, mobile, {
+      filePath: rep.filePath, filename,
+      caption: `📊 *${rep.head.student_name}'s weekly report*\n`
+        + `🗓️ ${range}\n`
+        + `${s.days}/7 days active · Avg ${s.avgPct}% · *${s.grade}*${trend}\n`
+        + `_Trends, chapter mastery, strengths and what to revise — all inside._`,
+    });
+  } else {
+    const parent = String(rep.head.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
+    await wa.sendDocumentTemplate(sessionId, mobile, TPL, {
+      params: [parent, rep.head.student_name, range, String(s.days), String(s.avgPct)],   // {{1}}..{{5}}
+      filePath: rep.filePath, filename,
+    });
+  }
+}
+
 function registerAll() {
   jobs.register('daily_report', dailyReport);
+  jobs.register('weekly_report', weeklyReport);
   jobs.register('feedback_ask', feedbackAsk);
   jobs.register('admin_mail', adminMail);
   jobs.register('award_badges', awardBadges);
 }
 
-module.exports = { registerAll, dailyReport, feedbackAsk, adminMail, awardBadges };
+module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges };

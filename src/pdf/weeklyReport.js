@@ -38,7 +38,94 @@ const fmtDateY = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit'
 const dayName = (d) => new Date(d).toLocaleDateString('en-IN', { weekday: 'short' });
 const maskMobile = (m) => (m ? `${'X'.repeat(Math.max(0, m.length - 4))}${m.slice(-4)}` : '');
 
-async function fetchWeekData(studentId, subjectCode, days) {
+/** Add N days to a 'YYYY-MM-DD' string in UTC (no timezone drift). */
+function addDays(iso, n) {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d)); dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Is a weekly report DUE for this student right now (called on quiz completion)?
+ * Cycle = fixed consecutive 7-day windows anchored to the plan start date. We
+ * report the most recently COMPLETED window, but only if: the plan is still
+ * active (not expired), at least one full week has elapsed, that window had ≥1
+ * attempt, and it has not already been sent.
+ */
+async function weeklyDue(studentId, subjectCode = 'MATHS') {
+  const r = (await db.query(`
+    WITH sub AS (
+      SELECT s.plan_start_date::date AS start, s.plan_end_date::date AS pend
+        FROM students st JOIN parents p ON p.id = st.parent_id
+        JOIN LATERAL (SELECT * FROM parents_quizpe_subscriptions x
+                       WHERE x.parent_id = p.id AND x.is_active
+                       ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
+       WHERE st.id = $1)
+    SELECT ((CURRENT_DATE - start) / 7)                       AS weeks,
+           (pend < CURRENT_DATE)                              AS expired,
+           (start + ((CURRENT_DATE - start) / 7 - 1) * 7)::text     AS wstart,
+           (start + ((CURRENT_DATE - start) / 7 - 1) * 7 + 6)::text AS wend
+      FROM sub`, [studentId])).rows[0];
+  if (!r) return { due: false, reason: 'no_active_plan' };
+  if (r.expired) return { due: false, reason: 'plan_expired' };
+  if (Number(r.weeks) < 1) return { due: false, reason: 'first_week' };
+
+  const sent = (await db.query(
+    `SELECT 1 FROM quiz_reports WHERE student_id=$1 AND quiz_date=$2 AND report_type='weekly' LIMIT 1`,
+    [studentId, r.wend])).rows[0];
+  if (sent) return { due: false, reason: 'already_sent' };
+
+  const { n } = (await db.query(
+    `SELECT COUNT(DISTINCT t.quiz_date)::int n FROM quizpe_tracker t
+      WHERE t.student_id=$1 AND t.quiz_date BETWEEN $2 AND $3
+        AND EXISTS (SELECT 1 FROM student_quizpe_histories h
+                     WHERE h.tracker_id=t.id AND h.answered_option IS NOT NULL)`,
+    [studentId, r.wstart, r.wend])).rows[0];
+  if (n === 0) return { due: false, reason: 'no_attempts' };   // never send a fully-empty week
+
+  return { due: true, weekStart: r.wstart, weekEnd: r.wend, subjectCode, attempted: n };
+}
+
+/**
+ * All students whose most-recently-completed 7-day cycle is DUE a weekly report
+ * right now — for the daily scheduler scan. Applies every rule in one query:
+ * plan active (not expired), ≥1 full week elapsed, ≥1 attempt in that window,
+ * and not already sent. Returns the WhatsApp session + whether it's in-window.
+ */
+async function dueWeeklyStudents() {
+  const { rows } = await db.query(`
+    WITH base AS (
+      SELECT st.id AS student_id, st.student_name,
+             p.parent_name, p.parent_mobile_number,
+             ((CURRENT_DATE - s.plan_start_date::date) / 7) AS weeks,
+             s.plan_start_date::date AS start
+        FROM parents_quizpe_subscriptions s
+        JOIN parents  p  ON p.id = s.parent_id AND p.is_active AND NOT p.service_paused
+        JOIN students st ON st.parent_id = p.id AND st.is_active
+       WHERE s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date),
+    win AS (
+      SELECT *, (start + (weeks - 1) * 7)     AS wstart,
+                (start + (weeks - 1) * 7 + 6) AS wend
+        FROM base WHERE weeks >= 1)
+    SELECT w.student_id, w.student_name, w.parent_name, w.parent_mobile_number,
+           w.wstart::text AS week_start, w.wend::text AS week_end,
+           sess.id AS session_id,
+           (sess.last_inbound_at > now() - interval '24 hours') AS in_window
+      FROM win w
+      LEFT JOIN LATERAL (SELECT id, last_inbound_at FROM whatsapp_sessions x
+                          WHERE x.mobile_number = w.parent_mobile_number AND x.is_active
+                          ORDER BY x.id DESC LIMIT 1) sess ON true
+     WHERE sess.id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM quiz_reports qr
+                        WHERE qr.student_id = w.student_id AND qr.quiz_date = w.wend AND qr.report_type = 'weekly')
+       AND EXISTS (SELECT 1 FROM quizpe_tracker t
+                    WHERE t.student_id = w.student_id AND t.quiz_date BETWEEN w.wstart AND w.wend
+                      AND EXISTS (SELECT 1 FROM student_quizpe_histories h
+                                   WHERE h.tracker_id = t.id AND h.answered_option IS NOT NULL))`);
+  return rows;
+}
+
+async function fetchWeekData(studentId, subjectCode, weekStart, weekEnd) {
   const head = (await db.query(
     `SELECT st.id AS student_id, st.student_name, st.school_name,
             p.parent_name, p.parent_mobile_number, su.state_name,
@@ -59,15 +146,15 @@ async function fetchWeekData(studentId, subjectCode, days) {
   if (!head) throw new Error(`student ${studentId} not found`);
 
   const daily = (await db.query(
-    `SELECT t.quiz_date,
+    `SELECT t.quiz_date::text AS quiz_date,
             COUNT(h.*)::int total,
             COUNT(*) FILTER (WHERE h.is_correct)::int correct,
             COUNT(*) FILTER (WHERE h.answered_option IS NOT NULL)::int answered
        FROM quizpe_tracker t
        JOIN student_quizpe_histories h ON h.tracker_id = t.id
       WHERE t.student_id = $1 AND t.subject_id = $2
-        AND t.quiz_date > CURRENT_DATE - ($3::int)
-      GROUP BY t.quiz_date ORDER BY t.quiz_date`, [studentId, head.subject_id, days])).rows;
+        AND t.quiz_date BETWEEN $3 AND $4
+      GROUP BY t.quiz_date ORDER BY t.quiz_date`, [studentId, head.subject_id, weekStart, weekEnd])).rows;
 
   const chapters = (await db.query(
     `SELECT qb.chapter, COUNT(*)::int asked, COUNT(*) FILTER (WHERE h.is_correct)::int correct
@@ -75,20 +162,20 @@ async function fetchWeekData(studentId, subjectCode, days) {
        JOIN quizpe_tracker t ON t.id = h.tracker_id
        JOIN question_bank qb ON qb.id = h.question_id
       WHERE t.student_id = $1 AND t.subject_id = $2
-        AND t.quiz_date > CURRENT_DATE - ($3::int)
-      GROUP BY qb.chapter ORDER BY qb.chapter`, [studentId, head.subject_id, days])).rows;
+        AND t.quiz_date BETWEEN $3 AND $4
+      GROUP BY qb.chapter ORDER BY qb.chapter`, [studentId, head.subject_id, weekStart, weekEnd])).rows;
 
   // every question asked in the week, for the day-by-day answer appendix
   const items = (await db.query(
-    `SELECT t.quiz_date, h.serial_number, h.answered_option, h.is_correct,
+    `SELECT t.quiz_date::text AS quiz_date, h.serial_number, h.answered_option, h.is_correct,
             qb.question_pdf, qb.chapter, qb.answer, qb.explanation,
             qb.option_a, qb.option_b, qb.option_c, qb.option_d
        FROM student_quizpe_histories h
        JOIN quizpe_tracker t ON t.id = h.tracker_id
        JOIN question_bank qb ON qb.id = h.question_id
       WHERE t.student_id = $1 AND t.subject_id = $2
-        AND t.quiz_date > CURRENT_DATE - ($3::int)
-      ORDER BY t.quiz_date, h.serial_number`, [studentId, head.subject_id, days])).rows;
+        AND t.quiz_date BETWEEN $3 AND $4
+      ORDER BY t.quiz_date, h.serial_number`, [studentId, head.subject_id, weekStart, weekEnd])).rows;
 
   const biz = (await db.query(
     `SELECT company_name, company_tagline, product_name, product_tagline,
@@ -176,9 +263,18 @@ function accuracyLine(doc, x, y, w, h, daily) {
   });
 }
 
-async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7 } = {}) {
-  const { head, daily, chapters, items, biz } = await fetchWeekData(studentId, subjectCode, days);
-  if (!daily.length) throw new Error(`no quizzes in the last ${days} days for student ${studentId}`);
+async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', weekStart, weekEnd } = {}) {
+  const days = 7;
+  const { head, daily, chapters, items, biz } = await fetchWeekData(studentId, subjectCode, weekStart, weekEnd);
+  // Never render a fully-empty week (weeklyDue already guards this).
+  if (!daily.length) throw new Error(`no attempts in week ${weekStart}..${weekEnd} for student ${studentId}`);
+  // Full 7-day attendance map: which of the 7 days were attempted vs missed.
+  const week = Array.from({ length: 7 }, (_, i) => {
+    const key = addDays(weekStart, i);
+    const row = daily.find((d) => d.quiz_date === key);
+    return { date: key, attempted: !!row, pct: row && row.total ? Math.round(row.correct * 100 / row.total) : 0 };
+  });
+  const attendedDays = daily.length;
 
   // ---- aggregates ----
   const totalQ = daily.reduce((s, d) => s + d.total, 0);
@@ -192,8 +288,6 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   const improvement = dayPcts.length > 1 ? dayPcts[dayPcts.length - 1] - dayPcts[0] : 0;
   const consistency = daily.length;                 // days attempted
   const g = gradeFor(overallPct);
-  const weekEnd = daily[daily.length - 1].quiz_date;
-  const weekStart = daily[0].quiz_date;
 
   const chByPct = [...chapters].sort((a, b) => (b.correct / b.asked) - (a.correct / a.asked));
   const strongest = chByPct[0], weakest = chByPct[chByPct.length - 1];
@@ -286,6 +380,32 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   });
   y += th + 16;
 
+  /* weekly attendance — all 7 days, attempted or missed (with encouragement) */
+  label(doc, 'Weekly attendance (7 days)', Mg, y, C.brand, 10); y += 14;
+  const aw = (W - 6 * 6) / 7, ah = 54;
+  week.forEach((wd, i) => {
+    const ax = Mg + i * (aw + 6);
+    card(doc, ax, y, aw, ah, { fill: wd.attempted ? C.accentSoft : C.soft, stroke: wd.attempted ? C.accentSoft : C.line });
+    doc.fillColor(C.muted).font(doc._F.bold).fontSize(6.5).text(dayName(wd.date), ax, y + 6, { width: aw, align: 'center' });
+    doc.fillColor(C.faint).font(doc._F.regular).fontSize(6).text(fmtDate(wd.date), ax, y + 15, { width: aw, align: 'center' });
+    if (wd.attempted) {
+      doc.fillColor(C.ok).font(doc._F.bold).fontSize(13).text(`${wd.pct}%`, ax, y + 27, { width: aw, align: 'center' });
+    } else {
+      doc.fillColor(C.faint).font(doc._F.bold).fontSize(9).text('Missed', ax, y + 30, { width: aw, align: 'center' });
+    }
+  });
+  y += ah + 8;
+  const missed = 7 - attendedDays;
+  if (missed > 0) {
+    doc.fillColor(C.brand).font(doc._F.regular).fontSize(8.5).text(
+      `${missed} day${missed > 1 ? 's' : ''} missed this week — that's okay! Every evening is a fresh 5-minute chance, and a steady daily habit is exactly what makes scores climb. Let's aim for a full week next time. 🌱`,
+      Mg, y, { width: W });
+    y = doc.y + 12;
+  } else {
+    doc.fillColor(C.ok).font(doc._F.bold).fontSize(9).text('🔥 Perfect attendance — all 7 days! Fantastic consistency. Keep the streak alive!', Mg, y, { width: W });
+    y = doc.y + 12;
+  }
+
   /* daily score chart */
   label(doc, 'Daily score & trend', Mg, y, C.brand, 10); y += 14;
   card(doc, Mg, y, W, 132, { fill: C.white });
@@ -340,7 +460,7 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
 
   /* ---------- day-by-day answer appendix (all 7 days' questions) ---------- */
   doc.addPage(); y = Mg;
-  label(doc, 'Full answer review — all 7 days', Mg, y, C.brand, 11); y += 8;
+  label(doc, 'Full answer review — attempted quizzes', Mg, y, C.brand, 11); y += 8;
   doc.fillColor(C.muted).font(doc._F.regular).fontSize(8)
      .text('Every question asked this week, your answer, the correct answer and why.', Mg, y + 6); y += 24;
 
@@ -425,4 +545,4 @@ async function generateWeeklyReport(studentId, { subjectCode = 'MATHS', days = 7
   };
 }
 
-module.exports = { generateWeeklyReport };
+module.exports = { generateWeeklyReport, weeklyDue, dueWeeklyStudents };

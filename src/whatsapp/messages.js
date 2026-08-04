@@ -184,7 +184,7 @@ No quizzes completed yet. Your first quiz arrives this evening — see you then!
 ${rows.map(r => {
     const emoji = r.score_pct >= 80 ? '🌟' : r.score_pct >= 50 ? '👍' : '💪';
     return `${emoji} *${fmtDate(r.quiz_date)}* — ${r.subject_name || 'Quiz'}\n` +
-           `   ${r.student_name}: *${r.score_correct}/${r.score_total}* (${r.score_pct}%) · Grade *${r.grade}*`;
+           `   ${r.student_name}: *${r.score_correct}/${r.score_total}* (${r.score_pct}%) · *${r.grade}*`;
   }).join('\n\n')}
 
 📥 Tap below to download the full reports — you'll get a one-time code on WhatsApp to open them.`;

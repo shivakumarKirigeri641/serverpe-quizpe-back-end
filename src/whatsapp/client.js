@@ -324,7 +324,24 @@ function sendTemplateWithButton(sessionId, to, name, { bodyParams = [], buttonPa
   }, `[template:${name}] ${bodyParams.join(' | ')} | btn:${buttonParam}`, 'template');
 }
 
+/**
+ * Approved template that carries a PDF as its DOCUMENT header — the ONLY way to
+ * deliver a document outside the 24h window. The template must be authored in
+ * Meta with a *document* header; the PDF is uploaded and attached here, and
+ * `params` fill the body placeholders.
+ */
+async function sendDocumentTemplate(sessionId, to, name, { params = [], filePath, filename = 'report.pdf' } = {}, lang) {
+  const id = await uploadMedia(filePath, 'application/pdf');
+  const components = [{ type: 'header', parameters: [{ type: 'document', document: { id, filename } }] }];
+  if (params.length) components.push({ type: 'body', parameters: params.map((t) => ({ type: 'text', text: String(t) })) });
+  return send(sessionId, to, {
+    type: 'template',
+    template: { name, language: { code: lang || process.env.WHATSAPP_TEMPLATE_LANG || 'en' }, components },
+  }, `[template:${name}] DOC ${filename} | ${params.join(' | ')}`, 'template');
+}
+
 module.exports = {
-  sendText, sendButtons, sendList, sendTemplate, sendTemplateWithButton, sendFlow, sendDocument, sendImage, sendCtaUrl,
+  sendText, sendButtons, sendList, sendTemplate, sendTemplateWithButton, sendDocumentTemplate,
+  sendFlow, sendDocument, sendImage, sendCtaUrl,
   uploadMedia, cachedMediaId, toWaNumber, DRY_RUN,
 };

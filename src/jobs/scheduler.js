@@ -42,6 +42,10 @@ const MISSED_AT_HHMM = process.env.MISSED_AT_HHMM || '21:30';
 // after the cutoff (23:50 by default) — 23:52 leaves the settle to finish.
 const DAYRECAP_TEMPLATE = process.env.DAYRECAP_TEMPLATE || 'qp_daymissed_v1';
 const DAYRECAP_AT_HHMM = process.env.DAYRECAP_AT_HHMM || '23:52';
+// Weekly report scan — once a day, enqueue reports for students whose rolling
+// 7-day cycle just closed. Delivery (free-form vs document template) is decided
+// per parent inside the job, based on the 24h window.
+const WEEKLY_AT_HHMM = process.env.WEEKLY_REPORT_AT_HHMM || '10:00';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -456,6 +460,30 @@ async function runDayMissedRecap() {
   }
 }
 
+/**
+ * Once-a-day scan (at WEEKLY_AT_HHMM): enqueue a weekly report for every
+ * student whose rolling 7-day cycle has just closed. The job itself decides
+ * delivery — free-form inside the 24h window, document template outside it.
+ */
+async function runWeeklyReports() {
+  const [th, tm] = WEEKLY_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  const jobs = require('./jobQueue');
+  const due = await require('../pdf/weeklyReport').dueWeeklyStudents();
+  if (!due.length) return;
+  console.log(`[scheduler] weekly reports: ${due.length} due`);
+  for (const r of due) {
+    await jobs.push('weekly_report',
+      { studentId: r.student_id, weekStart: r.week_start, weekEnd: r.week_end,
+        sessionId: r.session_id, mobile: r.parent_mobile_number },
+      { dedupeKey: `weekly:${r.student_id}:${r.week_end}` });
+  }
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -615,6 +643,10 @@ function startScheduler() {
       // quiz. Runs AFTER the cutoff has settled the trackers (DAYRECAP_AT_HHMM
       // is a couple of minutes past CUTOFF_HHMM), so "missed" is final.
       await runDayMissedRecap();
+
+      // Weekly performance reports, mid-morning — one per student whose rolling
+      // 7-day cycle just closed (only if they attempted at least once).
+      await runWeeklyReports();
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {
