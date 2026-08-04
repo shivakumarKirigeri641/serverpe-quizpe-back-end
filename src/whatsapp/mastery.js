@@ -22,6 +22,17 @@ const CFG = {
   EXPOSURE_CAP: 25,           // move the frontier forward after this many attempts
                               // even if not mastered, so a child never freezes —
                               // the weak chapter keeps coming back until mastered
+
+  // A chapter must be the frontier for at least this many DAYS before mastery can
+  // promote it — even for a child scoring 100%. Without this, a fast learner
+  // clears a chapter in a quiz or two and the frontier races AHEAD of what the
+  // school has actually taught, so the quiz asks chapters "not yet started"
+  // (real parent feedback). Six days keeps advancement to ~1 chapter/week, in
+  // step with a normal classroom, while leaving the child plenty of fresh, varied
+  // revision on the current chapter meanwhile. The EXPOSURE_CAP escape hatch is
+  // NOT time-gated, so a genuinely stuck child still moves on. Set to 0 to
+  // restore the old instant-on-mastery behaviour.
+  MIN_DAYS_ON_LEVEL: Number(process.env.MASTERY_MIN_DAYS_ON_LEVEL ?? 6),
   REINFORCE_RATIO: 0.4,       // daily share for weak (unmastered) earlier chapters
   FRONTIER_RATIO: 0.4,        // daily share for the current/newest chapter
   // remaining ~0.2 = spaced revision of already-mastered chapters
@@ -33,7 +44,10 @@ const CFG = {
   // reads it as failure. One or two questions is curiosity; five is a wall.
   PREVIEW_ACCURACY: 0.85,     // must be doing better than "mastered" to earn it
   PREVIEW_MIN_ANSWERED: 8,    // and have answered enough for that to mean anything
-  PREVIEW_MAX: 2,             // never more than this many, whatever the quiz length
+  // Next-chapter "stretch" questions. Turned OFF by default: they deliberately
+  // showed material the school may not have taught, which is exactly the "not yet
+  // started" complaint. Set MASTERY_PREVIEW_MAX=2 to bring the taste back.
+  PREVIEW_MAX: Number(process.env.MASTERY_PREVIEW_MAX ?? 0),
 
   MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
   MAX_PER_CONCEPT: 3,         // most questions testing one SKILL in a single quiz
@@ -102,8 +116,11 @@ async function getProgress(studentId, subjectId, exec = db) {
 
   if (!p) {
     p = (await exec.query(
-      `INSERT INTO student_subject_progress (student_id, subject_id, frontier_seq, frontier_chapter, total_chapters)
-       VALUES ($1,$2,1,$3,$4)
+      // last_promoted_at seeds the MIN_DAYS_ON_LEVEL clock from enrollment, so the
+      // very first chapter is time-gated too (it is NULL otherwise, only ever set
+      // on a later promotion).
+      `INSERT INTO student_subject_progress (student_id, subject_id, frontier_seq, frontier_chapter, total_chapters, last_promoted_at)
+       VALUES ($1,$2,1,$3,$4,now())
        ON CONFLICT (student_id, subject_id) DO UPDATE SET total_chapters=EXCLUDED.total_chapters, modified_at=now()
        RETURNING *`,
       [studentId, subjectId, chapters[0]?.chapter || null, total])).rows[0];
@@ -358,8 +375,10 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
 
 /**
  * After a quiz, move the frontier forward when the current chapter is either
- * MASTERED (≥80% over ≥12) OR sufficiently EXPOSED (≥ EXPOSURE_CAP attempts) —
- * so no child freezes. Unmastered chapters stay in the reinforcement pool.
+ * MASTERED (≥80% over ≥12) AND has been the frontier ≥ MIN_DAYS_ON_LEVEL days,
+ * OR sufficiently EXPOSED (≥ EXPOSURE_CAP attempts) — so a fast learner does not
+ * outrun the school, yet no child freezes. Unmastered chapters stay in the
+ * reinforcement pool.
  */
 async function evaluateAndPromote(studentId, subjectId, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
@@ -380,6 +399,20 @@ async function evaluateAndPromote(studentId, subjectId, exec = db) {
   const exposed = answered >= CFG.EXPOSURE_CAP;
   if (!masteredNow && !exposed) {
     return { promoted: false, chapter: frontierChapter, accuracy, answered, status: 'learning' };
+  }
+
+  // Time-gate the MASTERY path so a fast learner cannot outrun the school. A
+  // chapter must have been the frontier for at least MIN_DAYS_ON_LEVEL days
+  // before mastery may advance it; until then the child keeps getting fresh,
+  // varied revision of the current chapter. EXPOSURE (a stuck child) bypasses
+  // the gate so no one freezes. A legacy row with no timestamp is left alone —
+  // we cannot know how long they have been here, so we do not hold them back.
+  const daysOnLevel = progress.last_promoted_at
+    ? (Date.now() - new Date(progress.last_promoted_at).getTime()) / 86400000
+    : Infinity;
+  if (masteredNow && !exposed && daysOnLevel < CFG.MIN_DAYS_ON_LEVEL) {
+    return { promoted: false, chapter: frontierChapter, accuracy, answered,
+             status: 'learning', heldForPacing: true, daysOnLevel: Math.floor(daysOnLevel) };
   }
 
   if (frontierSeq >= maxSeq) {
