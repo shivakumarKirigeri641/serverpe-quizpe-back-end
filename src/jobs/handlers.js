@@ -309,12 +309,26 @@ async function weeklyReport({ studentId, weekStart, weekEnd, sessionId, mobile }
   }
 }
 
+/**
+ * The founder's nightly analytics digest. Gathers every dashboard figure and
+ * mails it to the operator inbox. Goes through the queue (like adminMail) so a
+ * slow or down SMTP retries with backoff instead of being lost. A configuration
+ * gap is not worth retrying; a transient SMTP error is.
+ */
+async function dailyDigest() {
+  const { sendAdminMail } = require('../mail/mailer');
+  const { buildDigest } = require('../mail/digest');
+  const res = await sendAdminMail(await buildDigest());
+  if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'digest mail failed');
+}
+
 function registerAll() {
   jobs.register('daily_report', dailyReport);
   jobs.register('weekly_report', weeklyReport);
   jobs.register('feedback_ask', feedbackAsk);
   jobs.register('admin_mail', adminMail);
   jobs.register('award_badges', awardBadges);
+  jobs.register('daily_digest', dailyDigest);
 }
 
-module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges };
+module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges, dailyDigest };

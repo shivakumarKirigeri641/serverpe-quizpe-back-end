@@ -46,6 +46,11 @@ const DAYRECAP_AT_HHMM = process.env.DAYRECAP_AT_HHMM || '23:52';
 // 7-day cycle just closed. Delivery (free-form vs document template) is decided
 // per parent inside the job, based on the 24h window.
 const WEEKLY_AT_HHMM = process.env.WEEKLY_REPORT_AT_HHMM || '10:00';
+// Founder's nightly analytics digest to the operator inbox. Fires just AFTER the
+// day-cutoff (23:50) and the missed recap (23:52) have settled today's trackers,
+// so the numbers are final rather than mid-flight. Default 23:55 ("around
+// 11:50pm"). One email per day, deduped by date via the job queue.
+const DIGEST_AT_HHMM = process.env.DIGEST_AT_HHMM || '23:55';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -484,6 +489,30 @@ async function runWeeklyReports() {
   }
 }
 
+/**
+ * Enqueue the founder's nightly analytics digest, once, in the window at
+ * DIGEST_AT_HHMM. The job builds the email and sends it to the operator inbox;
+ * the per-day dedupeKey means a restart or an overlapping tick never sends two.
+ */
+async function runDailyDigest() {
+  const [th, tm] = DIGEST_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  // Today's date IST, for the once-per-day dedupe key.
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date()); // YYYY-MM-DD
+  const key = `digest:${today}`;
+  // The queue's dedupe only guards a job that is still pending/running; once the
+  // digest has SENT and gone 'done', a later tick inside the catch-up window
+  // could enqueue a second. So skip if today's digest exists in ANY status.
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM job_queue WHERE kind='daily_digest' AND dedupe_key=$1 LIMIT 1`, [key]);
+  if (rowCount) return;
+  await require('./jobQueue').push('daily_digest', {}, { dedupeKey: key });
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -647,6 +676,9 @@ function startScheduler() {
       // Weekly performance reports, mid-morning — one per student whose rolling
       // 7-day cycle just closed (only if they attempted at least once).
       await runWeeklyReports();
+
+      // The founder's nightly analytics digest, just after the day settles.
+      await runDailyDigest();
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {
