@@ -225,4 +225,41 @@ function supportRaised({ ticket, parent, subjectLine, message, category, ctx }) 
   };
 }
 
-module.exports = { trialStarted, paymentReceived, feedbackReceived, supportRaised, ist };
+/* --------------------------------------------- 5. quiz finished (temporary) */
+/**
+ * A child just finished a daily quiz. A "watch it happen" alert while the base
+ * is small — every completion lands in the founder's inbox with the score and
+ * a chapter breakdown. Meant to be switched OFF once volume makes it noise
+ * (QUIZ_DONE_ALERT=0), so it stays deliberately light.
+ */
+function quizCompleted({ student, parent, mobile, board, grade, subject,
+                         correct, total, pct, gradeWord, gradeLabel, status,
+                         chapters = [], streak = 0, quizDate }) {
+  const color = pct >= 75 ? '#2e7d32' : pct >= 50 ? '#0277bd' : '#ef6c00';
+  return {
+    // Subject is built to be read WITHOUT opening: who took it (child, then
+    // parent), and the headline result. The body carries the rest.
+    subject: `QuizPe · ${student || 'A child'}${grade ? ` (${grade})` : ''} scored ${correct}/${total} (${pct}%)`
+      + `${parent ? ` · parent ${parent}` : ''}`,
+    html: shell({
+      badge: 'Quiz completed', badgeColor: color,
+      title: `${student || 'A child'} scored ${correct}/${total} (${pct}%)`,
+      lead: [board, grade, subject].filter(Boolean).join(' · '),
+      body:
+        section('Result', [
+          ['Score', `${correct}/${total} (${pct}%)`],
+          ['Performance', `${gradeWord}${gradeLabel ? ` — ${gradeLabel}` : ''}`],
+          ['Status', status === 'completed' ? 'Completed' : 'Partial attempt'],
+          streak > 1 ? ['Streak', `${streak} days`] : null,
+          ['Quiz date', quizDate],
+        ]) +
+        section('Child & parent', [
+          ['Child', student], ['Board / grade', [board, grade].filter(Boolean).join(' · ')],
+          ['Subject', subject], ['Parent', parent], ['Mobile', mobile],
+        ]) +
+        (chapters.length ? section('Chapter-wise', chapters.map((c) => [c.chapter, `${c.correct}/${c.asked}`])) : ''),
+    }),
+  };
+}
+
+module.exports = { trialStarted, paymentReceived, feedbackReceived, supportRaised, quizCompleted, ist };

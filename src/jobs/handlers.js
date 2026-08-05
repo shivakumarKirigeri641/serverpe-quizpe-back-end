@@ -322,6 +322,59 @@ async function dailyDigest() {
   if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'digest mail failed');
 }
 
+/**
+ * TEMPORARY operator alert: a child just finished a quiz. Gathers the score,
+ * chapter breakdown and streak for one tracker and mails it to the founder.
+ * Enqueued from finishQuiz only while QUIZ_DONE_ALERT is on (see the flag
+ * there). Best-effort: a config gap is dropped, a transient SMTP error retries.
+ */
+async function quizDoneAlert({ trackerId }) {
+  const { sendAdminMail } = require('../mail/mailer');
+  const templates = require('../mail/templates');
+  const db = require('../database/connectDB');
+  const { gradeFor } = require('../pdf/dailyReport');
+  const mastery = require('../whatsapp/mastery');
+
+  const head = (await db.query(
+    `SELECT t.student_id, t.quiz_date::text AS quiz_date,
+            st.student_name, b.board_code, g.grade_name,
+            sub.subject_name, p.parent_name, p.parent_mobile_number,
+            qs.status_code
+       FROM quizpe_tracker t
+       JOIN students st ON st.id = t.student_id
+       JOIN parents  p  ON p.id  = st.parent_id
+       JOIN boards   b  ON b.id  = st.board_id
+       JOIN grades   g  ON g.id  = st.grade_id
+       JOIN subjects sub ON sub.id = t.subject_id
+       JOIN quizpe_status qs ON qs.id = t.status_id
+      WHERE t.id = $1`, [trackerId])).rows[0];
+  if (!head) return;                                    // tracker gone: nothing to alert
+
+  const { rows: [sc] } = await db.query(
+    `SELECT COUNT(*)::int total, COUNT(*) FILTER (WHERE is_correct)::int correct
+       FROM student_quizpe_histories WHERE tracker_id=$1`, [trackerId]);
+  if (!sc.total) return;                                // empty quiz: not a real completion
+  const pct = Math.round((sc.correct * 100) / sc.total);
+
+  const chapters = (await db.query(
+    `SELECT qb.chapter, COUNT(*)::int asked, COUNT(*) FILTER (WHERE h.is_correct)::int correct
+       FROM student_quizpe_histories h JOIN question_bank qb ON qb.id=h.question_id
+      WHERE h.tracker_id=$1 GROUP BY qb.chapter ORDER BY 1`, [trackerId])).rows;
+
+  let streak = 0;
+  try { streak = await mastery.currentStreak(head.student_id); } catch { /* non-fatal */ }
+
+  const g = gradeFor(pct);
+  const res = await sendAdminMail(templates.quizCompleted({
+    student: head.student_name, parent: head.parent_name, mobile: head.parent_mobile_number,
+    board: head.board_code, grade: head.grade_name, subject: head.subject_name,
+    correct: sc.correct, total: sc.total, pct,
+    gradeWord: g.grade, gradeLabel: g.label, status: head.status_code,
+    chapters, streak, quizDate: head.quiz_date,
+  }));
+  if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'quiz alert mail failed');
+}
+
 function registerAll() {
   jobs.register('daily_report', dailyReport);
   jobs.register('weekly_report', weeklyReport);
@@ -329,6 +382,7 @@ function registerAll() {
   jobs.register('admin_mail', adminMail);
   jobs.register('award_badges', awardBadges);
   jobs.register('daily_digest', dailyDigest);
+  jobs.register('quiz_done_alert', quizDoneAlert);
 }
 
-module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges, dailyDigest };
+module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges, dailyDigest, quizDoneAlert };

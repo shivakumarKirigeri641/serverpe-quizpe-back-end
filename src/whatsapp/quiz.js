@@ -374,6 +374,15 @@ _Full answers & explanations are in the report below._ 📄`);
   await jobs.push('award_badges', { trackerId, sessionId, mobile },
     { dedupeKey: `badges:${trackerId}` });
 
+  // TEMPORARY operator alert: email the founder that a child finished a quiz.
+  // On by default while the base is small; set QUIZ_DONE_ALERT=0 to switch off
+  // (no redeploy). Best-effort — an alert must never break the child's flow.
+  if (process.env.QUIZ_DONE_ALERT !== '0') {
+    try {
+      await jobs.push('quiz_done_alert', { trackerId }, { dedupeKey: `quizdone:${trackerId}` });
+    } catch (e) { console.error('[quiz] could not queue quiz-done alert:', e.message); }
+  }
+
   return { total, correct, pct };
 }
 
