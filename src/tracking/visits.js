@@ -76,6 +76,39 @@ function stateName(region, country) {
   return region;
 }
 
+/**
+ * Where a visit came from, as a clean named source rather than a raw URL.
+ *
+ * Order matters — a UTM tag you put on YOUR OWN link is the most reliable
+ * signal (in-app browsers on Instagram/YouTube often STRIP the referrer, so
+ * those would otherwise look like "Direct"). So we read ?utm_source= from the
+ * landing path FIRST, then fall back to classifying the browser referrer.
+ *
+ * TIP for accurate Instagram/YouTube numbers: tag the links you post —
+ *   Instagram bio  -> https://quizpe.in/?utm_source=instagram
+ *   YouTube desc    -> https://quizpe.in/?utm_source=youtube
+ * Google organic already sends a google.com referrer, so it needs no tag.
+ */
+function classifySource(referrer, path) {
+  const utm = String(path || '').toLowerCase().match(/[?&]utm_source=([^&]+)/);
+  const s = utm ? decodeURIComponent(utm[1]).toLowerCase() : '';
+  const r = String(referrer || '').toLowerCase();
+  const hit = (...needles) => needles.some((n) => s === n || s.includes(n) || r.includes(n));
+
+  if (hit('instagram', 'l.instagram', 'ig.me')) return 'Instagram';
+  if (hit('youtube', 'youtu.be')) return 'YouTube';
+  if (hit('google', 'googleadservices', 'gclid', 'doubleclick')) return 'Google';
+  if (hit('facebook', 'l.facebook', 'fb.com', 'fb.me')) return 'Facebook';
+  if (hit('whatsapp', 'wa.me', 'chat.whatsapp')) return 'WhatsApp';
+  if (hit('twitter', 't.co', 'x.com')) return 'X (Twitter)';
+  if (hit('telegram', 't.me')) return 'Telegram';
+  if (hit('linkedin', 'lnkd.in')) return 'LinkedIn';
+  if (hit('bing')) return 'Bing';
+  if (s) return s.charAt(0).toUpperCase() + s.slice(1);   // any other tagged source
+  if (!r) return 'Direct';                                 // typed URL / no referrer
+  try { return 'Other · ' + new URL(r).hostname.replace(/^www\./, ''); } catch { return 'Other'; }
+}
+
 /** Floor every analytics query at the real launch date (IST midnight). */
 const LAUNCH_FLOOR = `(TIMESTAMP '${LAUNCH_DATE} 00:00:00' AT TIME ZONE '${TZ}')`;
 const IST_TS = (c) => `to_char(${c} AT TIME ZONE '${TZ}', 'DD Mon, HH24:MI')`;
@@ -197,7 +230,7 @@ async function notifyWaClick(row) {
 /** Full visitor analytics, windowed from the launch date, in IST. */
 async function analytics() {
   await ensureSchema();
-  const [summary, series, refs] = await Promise.all([
+  const [summary, series, refs, srcRows] = await Promise.all([
     db.query(`
       WITH v AS (
         SELECT kind, session_id, country,
@@ -231,7 +264,27 @@ async function analytics() {
         FROM site_visits
        WHERE NOT is_bot AND kind='view' AND created_at >= ${LAUNCH_FLOOR}
        GROUP BY source ORDER BY n DESC LIMIT 8`),
+    // raw referrer + path per visit, classified into named sources in JS below
+    db.query(`
+      SELECT referrer, path, kind,
+             ((created_at AT TIME ZONE '${TZ}')::date = (now() AT TIME ZONE '${TZ}')::date) AS is_today
+        FROM site_visits
+       WHERE NOT is_bot AND created_at >= ${LAUNCH_FLOOR}
+       LIMIT 50000`),
   ]);
+
+  // Roll the raw rows up into clean, ranked traffic sources (most-visited first).
+  const srcAgg = {};
+  for (const v of srcRows.rows) {
+    const name = classifySource(v.referrer, v.path);
+    const a = (srcAgg[name] ||= { source: name, views: 0, wa_clicks: 0, today: 0 });
+    if (v.kind === 'wa_click') a.wa_clicks++; else a.views++;
+    if (v.is_today) a.today++;
+  }
+  const srcTotalViews = Object.values(srcAgg).reduce((t, a) => t + a.views, 0) || 1;
+  const sources = Object.values(srcAgg)
+    .map((a) => ({ ...a, pct: Math.round((a.views / srcTotalViews) * 100) }))
+    .sort((a, b) => (b.views + b.wa_clicks) - (a.views + a.wa_clicks));
 
   const s = summary.rows[0] || {};
   const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : (cur > 0 ? 100 : 0));
@@ -259,6 +312,7 @@ async function analytics() {
     },
     daily: series.rows,
     referrers: refs.rows,
+    sources,                 // ranked, classified traffic sources (most-visited first)
   };
 }
 
@@ -388,4 +442,4 @@ async function geo() {
   return { visitors: topN(vmap, 100), families, visitors_india: india, visitors_other: other };
 }
 
-module.exports = { ensureSchema, record, analytics, recent, grouped, geo, inboxOn, setInboxOn, clientIp };
+module.exports = { ensureSchema, record, analytics, recent, grouped, geo, inboxOn, setInboxOn, clientIp, classifySource };
