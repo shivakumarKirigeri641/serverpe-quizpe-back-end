@@ -375,6 +375,37 @@ async function quizDoneAlert({ trackerId }) {
   if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'quiz alert mail failed');
 }
 
+/**
+ * TEMPORARY operator alert: a child just STARTED a quiz. The real-time ping —
+ * fires the moment the quiz opens, before any answers (so, unlike quizDoneAlert,
+ * there is no score yet). Enqueued from startQuiz only on a fresh start and only
+ * while QUIZ_START_ALERT is on. Best-effort, same retry rules as the others.
+ */
+async function quizStartAlert({ trackerId }) {
+  const { sendAdminMail } = require('../mail/mailer');
+  const templates = require('../mail/templates');
+  const db = require('../database/connectDB');
+
+  const head = (await db.query(
+    `SELECT st.student_name, b.board_code, g.grade_name, sub.subject_name,
+            p.parent_name, p.parent_mobile_number, t.question_count
+       FROM quizpe_tracker t
+       JOIN students st ON st.id = t.student_id
+       JOIN parents  p  ON p.id  = st.parent_id
+       JOIN boards   b  ON b.id  = st.board_id
+       JOIN grades   g  ON g.id  = st.grade_id
+       JOIN subjects sub ON sub.id = t.subject_id
+      WHERE t.id = $1`, [trackerId])).rows[0];
+  if (!head) return;
+
+  const res = await sendAdminMail(templates.quizStarted({
+    student: head.student_name, parent: head.parent_name, mobile: head.parent_mobile_number,
+    board: head.board_code, grade: head.grade_name, subject: head.subject_name,
+    questions: head.question_count,
+  }));
+  if (!res.sent && res.reason !== 'not_configured') throw new Error(res.reason || 'quiz start mail failed');
+}
+
 function registerAll() {
   jobs.register('daily_report', dailyReport);
   jobs.register('weekly_report', weeklyReport);
@@ -383,6 +414,7 @@ function registerAll() {
   jobs.register('award_badges', awardBadges);
   jobs.register('daily_digest', dailyDigest);
   jobs.register('quiz_done_alert', quizDoneAlert);
+  jobs.register('quiz_start_alert', quizStartAlert);
 }
 
-module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges, dailyDigest, quizDoneAlert };
+module.exports = { registerAll, dailyReport, weeklyReport, feedbackAsk, adminMail, awardBadges, dailyDigest, quizDoneAlert, quizStartAlert };

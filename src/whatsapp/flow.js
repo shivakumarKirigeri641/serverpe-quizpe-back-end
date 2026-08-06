@@ -509,6 +509,16 @@ async function processInbound(msg, contactName) {
 
   const text = extractText(msg);
   const id = extractId(msg);
+
+  // DEMO number: intercept ONLY the demo's own taps and the word "demo", so it
+  // can run an anytime 5-question demo (no records) — while EVERYTHING else
+  // (hi/menu, subscribe, the payment link, support …) still works for this
+  // number exactly like any other parent. Unset DEMO_MOBILE to disable.
+  const demo = require('./demo');
+  if (demo.isDemo(mobile) && demo.owns(text, id)) {
+    await demo.handle(session, mobile, msg, text, id); return;
+  }
+
   const ctx = await getUserContext(mobile);
   if (contactName && !session.context.parent_name) {
     await mergeContext(session, { parent_name: contactName });

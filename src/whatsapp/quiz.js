@@ -136,6 +136,17 @@ async function startQuiz(trackerId) {
         WHERE id=$1`, [trackerId]);
 
     await c.query('COMMIT');
+
+    // TEMPORARY operator alert: email the founder that a child STARTED a quiz.
+    // Only on a FRESH start (existing === 0), never on a resume, so a reopened
+    // quiz does not re-ping. On by default; set QUIZ_START_ALERT=0 to switch off.
+    // Best-effort — a child's quiz must never depend on the alert queuing.
+    if (existing === 0 && process.env.QUIZ_START_ALERT !== '0') {
+      try {
+        await jobs.push('quiz_start_alert', { trackerId }, { dedupeKey: `quizstart:${trackerId}` });
+      } catch (e) { console.error('[quiz] could not queue quiz-start alert:', e.message); }
+    }
+
     return { trackerId, resumed: existing > 0 };
   } catch (e) {
     await c.query('ROLLBACK');
