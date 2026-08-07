@@ -310,7 +310,31 @@ Please *guide ${who}, but let ${who} answer* — never give the answer yourself.
 After every quiz we send a *full explanation for each question, a summary and a report* — so learning happens even from the ones ${who} gets wrong. 💡`;
 }
 
+/**
+ * Our social channels. Kept here (env-overridable) rather than in the DB
+ * because they change about once a year, not per deploy. Growth lives on these
+ * two — YouTube (subscribe) and Instagram (follow) — so any invite copy pulls
+ * from one place and can never drift between messages.
+ */
+const SOCIAL = {
+  youtube: process.env.YOUTUBE_URL || 'https://www.youtube.com/@QuizPeIndia',
+  instagram: process.env.INSTAGRAM_URL || 'https://www.instagram.com/quizpeindia',
+};
+
+/**
+ * A short "follow us" block appended to the end-of-quiz thank-you. Plain text
+ * with bare URLs, which WhatsApp auto-links — deliberately NOT buttons: a CTA
+ * message allows only one, and that slot is the rating. Kept to two lines so it
+ * never overshadows the quiz result above it.
+ */
+function socialInvite() {
+  return `\n\n📣 *Enjoying QuizPe? Help us reach more kids:*\n`
+    + `▶️ Subscribe on YouTube → ${SOCIAL.youtube}\n`
+    + `📸 Follow on Instagram → ${SOCIAL.instagram}`;
+}
+
 module.exports = {
   welcome, trialTerms, plansList, subscriptionDetails,
   quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, parentGuidance, business, fmtDate, fmtTime,
+  SOCIAL, socialInvite,
 };

@@ -379,6 +379,28 @@ _Full answers & explanations are in the report below._ 📄`);
   await jobs.push('daily_report', { trackerId, sessionId, mobile },
     { dedupeKey: `report:${trackerId}` });
 
+  // ---- weekly report: send it NOW, while we're in-window ------------------
+  // The child just answered, so the parent's session is inside the 24h window
+  // this very moment — the cheapest, most reliable time to deliver the weekly
+  // report, free-form and with NO template. If this quiz closes the child's
+  // rolling 7-day cycle, enqueue it here rather than leaning on the 10 AM scan,
+  // which often lands out-of-window and has to fall back to the paid document
+  // template. The daily scan stays as a safety net for cycles that close on a
+  // day the child didn't play. The dedupeKey (student + week-end) is identical
+  // to the scan's, so the two paths can never double-send.
+  try {
+    const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+    if (t) {
+      const { weeklyDue } = require('../pdf/weeklyReport');
+      const wk = await weeklyDue(t.student_id);      // MATHS weekly — matches the scan
+      if (wk.due) {
+        await jobs.push('weekly_report',
+          { studentId: t.student_id, weekStart: wk.weekStart, weekEnd: wk.weekEnd, sessionId, mobile },
+          { dedupeKey: `weekly:${t.student_id}:${wk.weekEnd}` });
+      }
+    }
+  } catch (e) { console.error('[quiz] weekly-report check failed:', e.message); }
+
   // Badges are worked out after the score is safely stored, and queued rather
   // than awaited: a child's result must never depend on the rewards code
   // running. Deduped per quiz so a retried finish cannot announce twice.

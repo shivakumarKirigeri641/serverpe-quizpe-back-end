@@ -61,13 +61,23 @@ async function feedbackAsk({ trackerId, sessionId, mobile }) {
 
   const due = await fb.feedbackDue(info.parent_id);
   const t = (await db.query(
-    `SELECT quiz_time FROM parents_quizpe_subscriptions
-      WHERE parent_id=$1 AND is_active ORDER BY id DESC LIMIT 1`, [info.parent_id])).rows[0];
+    `SELECT s.quiz_time, pl.is_trial
+       FROM parents_quizpe_subscriptions s
+       JOIN quizpe_plans pl ON pl.id = s.plan_id
+      WHERE s.parent_id=$1 AND s.is_active ORDER BY s.id DESC LIMIT 1`, [info.parent_id])).rows[0];
   const nextAt = t ? ` at *${M.fmtTime(t.quiz_time)}*` : '';
+
+  // Social "follow us" invite — sent DAILY, but ONLY to trial families. The
+  // trial is a 7-day window where we most want to build community, and it's too
+  // short to ever trigger a weekly report (which carries the invite for PAID
+  // families), so daily here is how a trial parent ever sees our channels. Paid
+  // parents are deliberately NOT nagged daily — that's what protects our
+  // WhatsApp quality rating. SOCIAL_INVITE=0 turns it off everywhere.
+  const social = (process.env.SOCIAL_INVITE !== '0' && t?.is_trial) ? M.socialInvite() : '';
 
   if (!due.due) {
     await wa.sendText(sessionId, mobile,
-      `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀`);
+      `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀${social}`);
     return;
   }
 
@@ -85,7 +95,7 @@ async function feedbackAsk({ trackerId, sessionId, mobile }) {
   });
   await wa.sendCtaUrl(sessionId, mobile, {
     header: 'How was the quiz?',
-    body: `🙏 *Thank you!*\n\nThat's today's quiz done. ${fb.askText(due.type, info.student_name)}\n\n_Takes 10 seconds._`,
+    body: `🙏 *Thank you!*\n\nThat's today's quiz done. ${fb.askText(due.type, info.student_name)}\n\n_Takes 10 seconds._${social}`,
     displayText: '⭐ Rate the quiz',
     url,
     footer: 'QuizPe by ServerPe App Solutions',
@@ -292,13 +302,19 @@ async function weeklyReport({ studentId, weekStart, weekEnd, sessionId, mobile }
   const fmtD = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
   const range = `${fmtD(weekStart)} – ${fmtD(weekEnd)} ${new Date(`${weekEnd}T00:00:00`).getFullYear()}`;
 
+  // The weekly report is the natural, ~once-a-week moment to ask for a follow —
+  // a positive touchpoint (the child's progress), not the daily thank-you. Only
+  // on the free-form (in-window) send: the document template's copy is fixed by
+  // Meta, so the links can't ride along there. SOCIAL_INVITE=0 turns it off.
+  const social = process.env.SOCIAL_INVITE === '0' ? '' : require('../whatsapp/messages').socialInvite();
+
   if (inWindow) {
     await wa.sendDocument(sessionId, mobile, {
       filePath: rep.filePath, filename,
       caption: `📊 *${rep.head.student_name}'s weekly report*\n`
         + `🗓️ ${range}\n`
         + `${s.days}/7 days active · Avg ${s.avgPct}% · *${s.grade}*${trend}\n`
-        + `_Trends, chapter mastery, strengths and what to revise — all inside._`,
+        + `_Trends, chapter mastery, strengths and what to revise — all inside._${social}`,
     });
   } else {
     const parent = String(rep.head.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
