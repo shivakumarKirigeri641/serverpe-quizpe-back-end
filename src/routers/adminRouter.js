@@ -546,6 +546,32 @@ router.get('/finance/invoices', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] invoices:', e.message); fail(res, 500, 'Could not load invoices.'); }
 });
 
+/** Open a specific invoice PDF inline (already authenticated — no token). */
+router.get('/finance/invoices/:id/view', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const r = (await db.query(`SELECT invoice_path, invoice_id FROM invoices WHERE id=$1 AND is_active`, [id])).rows[0];
+    if (!r) return fail(res, 404, 'Invoice not found.');
+    const abs = path.join(__dirname, '..', 'uploads', r.invoice_path);
+    if (!fs.existsSync(abs)) return fail(res, 410, 'The invoice PDF is no longer on disk.');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="QuizPe-Invoice-${r.invoice_id}.pdf"`);
+    fs.createReadStream(abs).pipe(res);
+  } catch (e) { console.error('[admin] invoice view:', e.message); fail(res, 500, 'Could not open the invoice.'); }
+});
+
+/** Download a specific invoice PDF — for GST filing / records. */
+router.get('/finance/invoices/:id/download', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const r = (await db.query(`SELECT invoice_path, invoice_id FROM invoices WHERE id=$1 AND is_active`, [id])).rows[0];
+    if (!r) return fail(res, 404, 'Invoice not found.');
+    const abs = path.join(__dirname, '..', 'uploads', r.invoice_path);
+    if (!fs.existsSync(abs)) return fail(res, 410, 'The invoice PDF is no longer on disk.');
+    res.download(abs, `QuizPe-Invoice-${r.invoice_id}.pdf`);
+  } catch (e) { console.error('[admin] invoice download:', e.message); fail(res, 500, 'Could not download the invoice.'); }
+});
+
 /** GSTR-1 ready summary for a filing period (YYYY-MM). */
 router.get('/finance/gstr1', requireAdmin, async (req, res) => {
   const period = /^\d{4}-\d{2}$/.test(req.query.period || '')
