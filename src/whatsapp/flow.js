@@ -320,7 +320,12 @@ async function activateTrial(session, mobile, stateCode) {
       `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
        VALUES ($1,$2,$3)
        ON CONFLICT (parent_mobile_number) DO UPDATE
-         SET state_code = EXCLUDED.state_code, modified_at = now()
+         -- Starting a trial (re)activates the family: clear any paused/deactivated
+         -- state so the scheduler resumes evening quizzes. This is what lets the
+         -- deactivated demo number come alive again for a live school pitch.
+         SET state_code = EXCLUDED.state_code,
+             is_active = true, service_paused = false,
+             reminders_enabled = true, paused_at = NULL, modified_at = now()
        RETURNING id`,
       [session.context.parent_name || 'Parent', mobile, stateCode])).rows[0].id;
 
@@ -331,7 +336,7 @@ async function activateTrial(session, mobile, stateCode) {
                   (SELECT id FROM mediums WHERE medium_code=$4),$5)
        ON CONFLICT (parent_id, student_name) DO UPDATE
          SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
-             medium_id=EXCLUDED.medium_id, modified_at=now()
+             medium_id=EXCLUDED.medium_id, is_active=true, modified_at=now()
        RETURNING id`,
       [parent, board_code, grade_code,
        session.context.medium_code || 'ENGLISH', student_name])).rows[0].id;
@@ -1232,18 +1237,21 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
 
       if (where === 'before') {
         const at = await quizTimeOf(st.id);
+        const allDay = W.isAllDayOpen();
+        const occ = W.occasionFor();
         await wa.sendText(session.id, mobile,
-          `⏰ Tonight's quiz opens at *${M.fmtTime(W.OPEN_HHMM)}*.\n\n` +
+          `⏰ ${allDay ? `Today's ${occ} quiz` : "Tonight's quiz"} opens at *${M.fmtTime(W.openHHMM())}*.\n\n` +
           `${st.student_name} can take it any time after that, right up to *${M.fmtTime(W.CLOSE_HHMM)}*` +
-          `${at ? ` — we'll nudge you at *${M.fmtTime(at)}*` : ''}. See you this evening! 🌙`);
+          `${at ? ` — we'll nudge you at *${M.fmtTime(at)}*` : ''}. ${allDay ? 'See you soon! ☀️' : 'See you this evening! 🌙'}`);
         return;
       }
 
       if (where === 'closed') {
         const at = await quizTimeOf(st.id);
+        const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);   // tomorrow may be a weekend → opens earlier
         await wa.sendText(session.id, mobile,
-          `🌙 Tonight's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
-          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.OPEN_HHMM)}*` +
+          `🌙 Today's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
+          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.openHHMM(tomorrow))}*` +
           `${at ? `, and we'll remind you around *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
         return;
       }

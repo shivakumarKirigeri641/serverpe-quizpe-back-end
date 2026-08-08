@@ -51,6 +51,13 @@ const WEEKLY_AT_HHMM = process.env.WEEKLY_REPORT_AT_HHMM || '10:00';
 // so the numbers are final rather than mid-flight. Default 23:55 ("around
 // 11:50pm"). One email per day, deduped by date via the job queue.
 const DIGEST_AT_HHMM = process.env.DIGEST_AT_HHMM || '23:55';
+// "Open all day" nudge — weekends AND holidays, mid-morning. Tells families the
+// quiz can be taken any time today, not just the evening. In-window parents get
+// a free-form button; the rest need the approved template, which stays dormant
+// (deferred) until Meta clears it. One template serves both occasions via an
+// occasion variable ({{2}} = "weekend"/"holiday").
+const WEEKEND_NUDGE_AT_HHMM = process.env.WEEKEND_NUDGE_AT_HHMM || '09:00';
+const OPENALLDAY_TEMPLATE = process.env.OPENALLDAY_TEMPLATE || 'qp_openallday_v1';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -365,6 +372,93 @@ async function runFormNudge() {
   if (sent) console.log(`[scheduler] form_nudge: ${sent} sent`);
 }
 
+/* ------------------------------------------------ weekend "open all day" ---- */
+/**
+ * Active families due the Saturday/Sunday "quiz is open all day" nudge. ONE ROW
+ * PER PARENT (a family gets one message, not one per child), with a
+ * representative student so the existing UNIQUE (student_id, kind, send_date)
+ * dedupes per parent for free. Skips a child who already finished today's quiz,
+ * and anyone paused. `in_window` decides free-form vs template downstream.
+ */
+async function weekendNudgeDue() {
+  const { rows } = await db.query(
+    `SELECT DISTINCT ON (p.id)
+            p.id AS parent_id, p.parent_name, p.parent_mobile_number,
+            st.id AS student_id, st.student_name,
+            w.id AS session_id,
+            (w.last_inbound_at > now() - interval '24 hours') AS in_window
+       FROM parents_quizpe_subscriptions s
+       JOIN parents  p  ON p.id = s.parent_id AND p.is_active AND NOT p.service_paused
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       LEFT JOIN LATERAL (SELECT id, last_inbound_at FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+        AND NOT EXISTS (SELECT 1 FROM notification_log n
+                         WHERE n.student_id = st.id AND n.kind = 'weekend_open' AND n.send_date = CURRENT_DATE)
+        -- don't nudge a child who already finished today's quiz
+        AND NOT EXISTS (
+              SELECT 1 FROM quizpe_tracker t
+               WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                 AND EXISTS (SELECT 1 FROM quizpe_status qs
+                              WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed')))
+      ORDER BY p.id, st.id`);
+  return rows;
+}
+
+/**
+ * The weekend nudge. Saturday/Sunday only, once mid-morning. In-window parents
+ * get a free-form message with a one-tap start button (no template, no cost);
+ * everyone else needs the approved document-less template, and if it isn't
+ * cleared by Meta yet they're simply left for next weekend (never spammed with
+ * a non-compliant send). Deduped once-per-parent-per-day by notification_log.
+ */
+async function runWeekendNudge() {
+  const qw = require('../whatsapp/quizWindow');
+  if (!qw.isAllDayOpen()) return;                    // weekends & curated holidays only
+  const [th, tm] = WEEKEND_NUDGE_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm, now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  const occasion = qw.occasionFor() || 'weekend';    // 'holiday' | 'weekend'
+  const tmpl = await approvedTemplate(OPENALLDAY_TEMPLATE);   // null until Meta approves
+  const due = await weekendNudgeDue();
+  const kind = 'weekend_open';
+  let sent = 0;
+  for (const row of due) {
+    if (!row.session_id) continue;                   // no WhatsApp session → can't reach them
+    if (!row.in_window && !tmpl) continue;           // out of window and no approved template yet
+    if (!(await claimSend(row, kind, row.in_window ? null : tmpl.template_name))) continue;
+    try {
+      if (row.in_window) {
+        await wa.sendButtons(row.session_id, row.parent_mobile_number,
+          `☀️ *Happy ${occasion}!*\n\n${row.student_name}'s quiz is open *all day today* — no need to wait for the evening. `
+          + `Take it any time before *${M_fmt(qw.CLOSE_HHMM)}*, whenever suits your family. About 5 minutes. 🎉`,
+          [{ id: 'start_quiz', title: '▶️ Start quiz now' }]);
+        await finishSend(row, kind, null, null);
+      } else {
+        const first = String(row.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
+        const res = await wa.sendTemplate(row.session_id, row.parent_mobile_number, tmpl.template_name,
+          [first, occasion, row.student_name]);
+        await finishSend(row, kind, null, res && res.sent === false ? (res.reason || 'send failed') : null);
+      }
+      sent++;
+    } catch (e) {
+      await finishSend(row, kind, null, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 250));    // stay under Meta's rate limit
+  }
+  if (sent) console.log(`[scheduler] open_all_day (${occasion}): ${sent} sent`);
+}
+
+/** '23:45' -> '11:45 PM' for weekend-nudge copy (kept local; messages.fmtTime needs no db). */
+function M_fmt(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
 /* ------------------------------------------------ end-of-day "missed" recap -- */
 /**
  * Children who did NOT finish today's quiz, for the post-cutoff recap.
@@ -664,6 +758,9 @@ function startScheduler() {
 
       // chase parents who agreed but never opened the child-details form
       await runFormNudge();
+
+      // Weekend "quiz is open all day" nudge — Saturday & Sunday mid-morning.
+      await runWeekendNudge();
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();

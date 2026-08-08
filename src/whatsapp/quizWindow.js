@@ -24,6 +24,48 @@ const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 
 const OPEN_MIN  = toMin(process.env.QUIZ_WINDOW_OPEN  || '19:00');
 const CLOSE_MIN = toMin(process.env.QUIZ_WINDOW_CLOSE || '23:45');
+// OPEN ALL DAY on weekends AND holidays: on those days a child has free
+// daytime, so the window opens in the morning instead of the evening — same
+// 23:45 close. This is the "take it any time" offer. Weekday behaviour is
+// unchanged. Tune with QUIZ_WEEKEND_OPEN; set it to 19:00 to disable the perk.
+const WEEKEND_OPEN_MIN = toMin(process.env.QUIZ_WEEKEND_OPEN || '06:00');
+// HOLIDAYS: dates (YYYY-MM-DD, IST) that behave like a weekend — window open all
+// day, and the nudge greets "holiday" not "weekend". The founder RESERVES these
+// from the admin calendar (quiz_holidays table); India's holidays are regional
+// and change yearly, so they are curated, not auto-detected. QUIZ_HOLIDAYS (a
+// comma-separated env list) is still honoured as an extra seed/fallback.
+//
+// The set is cached in memory because state() is synchronous and called on the
+// hot path. A background refresh (every HOLIDAY_TTL_MS) reloads it from the DB,
+// so reserving a date in the panel takes effect within minutes, no restart.
+const HOLIDAY_ENV = new Set(String(process.env.QUIZ_HOLIDAYS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean));
+const HOLIDAY_TTL_MS = Number(process.env.HOLIDAY_TTL_MS) || 10 * 60 * 1000;   // 10 min
+let holidaySet = new Set(HOLIDAY_ENV);
+let holidayLoadedAt = 0;
+let holidayLoading = null;
+
+/** Reload reserved holidays from quiz_holidays into the in-memory set. */
+async function refreshHolidays() {
+  if (holidayLoading) return holidayLoading;
+  holidayLoading = (async () => {
+    try {
+      const db = require('../database/connectDB');
+      const { rows } = await db.query(
+        `SELECT to_char(holiday_date,'YYYY-MM-DD') AS d FROM quiz_holidays WHERE is_active`);
+      holidaySet = new Set([...HOLIDAY_ENV, ...rows.map((r) => r.d)]);
+      holidayLoadedAt = Date.now();
+    } catch (e) {
+      // table may not exist yet, or DB blip — keep whatever we had, try again later
+      holidayLoadedAt = Date.now();
+    } finally {
+      holidayLoading = null;
+    }
+  })();
+  return holidayLoading;
+}
+// Warm the cache once at startup (fire-and-forget; env seed covers the gap).
+refreshHolidays();
 
 function toMin(hhmm) {
   const [h, m] = String(hhmm).split(':').map(Number);
@@ -38,13 +80,53 @@ function nowHHMM() {
   }).format(new Date());
 }
 
+/** Day of week in the quiz timezone: 0=Sun … 6=Sat. */
+function nowDow(d = new Date()) {
+  const wd = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(d);
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[wd];
+}
+/** Today's date as 'YYYY-MM-DD' in the quiz timezone (for holiday matching). */
+function todayISO(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
+}
+/** Is today Saturday or Sunday (in the quiz timezone)? */
+function isWeekend(d = new Date()) {
+  const dow = nowDow(d);
+  return dow === 0 || dow === 6;
+}
+/** Is today a reserved holiday? Reads the cached set; refreshes it in the
+ *  background when stale (non-blocking, so the check stays synchronous). */
+function isHoliday(d = new Date()) {
+  if (Date.now() - holidayLoadedAt > HOLIDAY_TTL_MS) refreshHolidays();
+  return holidaySet.has(todayISO(d));
+}
+/** Days the quiz is open all day: weekends and holidays alike. */
+function isAllDayOpen(d = new Date()) {
+  return isWeekend(d) || isHoliday(d);
+}
+/** The greeting word for an all-day day: 'holiday' | 'weekend' | null. */
+function occasionFor(d = new Date()) {
+  return isHoliday(d) ? 'holiday' : (isWeekend(d) ? 'weekend' : null);
+}
+/** Today's open minute — earlier on weekends/holidays, the usual evening slot otherwise. */
+function openMinFor(d = new Date()) {
+  return isAllDayOpen(d) ? WEEKEND_OPEN_MIN : OPEN_MIN;
+}
+/** Today's open time as 'HH:MM' — use in copy so the "opens at" line is correct. */
+function openHHMM(d = new Date()) {
+  return fromMin(openMinFor(d));
+}
+
 /**
- * Where we are in the evening.
+ * Where we are in the day's quiz window.
+ * Opens earlier on weekends (see openMinFor); closes at CLOSE_MIN every day.
  * @returns {'before'|'open'|'closed'}
  */
-function state(at = nowHHMM()) {
+function state(at = nowHHMM(), d = new Date()) {
   const m = toMin(at);
-  if (m < OPEN_MIN) return 'before';
+  if (m < openMinFor(d)) return 'before';
   if (m > CLOSE_MIN) return 'closed';
   return 'open';
 }
@@ -54,10 +136,12 @@ function minutesLeft(at = nowHHMM()) {
   return Math.max(0, CLOSE_MIN - toMin(at));
 }
 
-const OPEN_HHMM = fromMin(OPEN_MIN);
+const OPEN_HHMM = fromMin(OPEN_MIN);           // weekday open, for static copy
 const CLOSE_HHMM = fromMin(CLOSE_MIN);
+const WEEKEND_OPEN_HHMM = fromMin(WEEKEND_OPEN_MIN);
 
 module.exports = {
-  state, minutesLeft, nowHHMM,
-  OPEN_HHMM, CLOSE_HHMM, OPEN_MIN, CLOSE_MIN, toMin, fromMin,
+  state, minutesLeft, nowHHMM, nowDow, todayISO,
+  isWeekend, isHoliday, isAllDayOpen, occasionFor, openMinFor, openHHMM, refreshHolidays,
+  OPEN_HHMM, CLOSE_HHMM, WEEKEND_OPEN_HHMM, OPEN_MIN, CLOSE_MIN, WEEKEND_OPEN_MIN, toMin, fromMin,
 };
