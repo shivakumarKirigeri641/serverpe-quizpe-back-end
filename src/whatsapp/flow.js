@@ -1074,7 +1074,7 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
 
       if (!pending.length) {
         await wa.sendText(session.id, mobile,
-          "🎉 All your children have finished today's quiz! A fresh one arrives tomorrow evening.");
+          "✅ Today's quiz is already complete. Your next quiz will be ready tomorrow evening — see you then! 🌙");
         break;
       }
       // Multiple children still pending -> let the parent choose whose quiz to take.

@@ -615,6 +615,44 @@ router.get('/finance/gstr1/download', requireAdmin, async (req, res) => {
   }
 });
 
+/* ------------------------------------------------ full DB export (super) -- */
+/**
+ * Stream a complete, gzipped pg_dump of the database as a download — so the
+ * founder can pull production data down to a LOCAL DB for testing.
+ *
+ * SUPER-ADMIN ONLY. This file contains every parent's phone number, payments
+ * and GST records, so it must never be reachable by a normal admin — and it is
+ * a high-value exfiltration target. Kill it entirely with DB_EXPORT_ENABLED=0.
+ *
+ * pg_dump inherits the same PG* env vars the app connects with, so no
+ * credentials are handled here. --clean/--if-exists let the dump re-load over an
+ * existing local DB; --no-owner/--no-privileges let it restore under any role.
+ */
+router.get('/db/export', requireSuperAdmin, async (req, res) => {
+  if (process.env.DB_EXPORT_ENABLED === '0') return fail(res, 403, 'Database export is disabled.');
+  const { spawn } = require('child_process');
+  const zlib = require('zlib');
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '');
+  const fname = `quizpe-db-${stamp}.sql.gz`;
+  console.log(`[db-export] super-admin ${req.admin?.sub} started a full DB export`);
+
+  const dump = spawn('pg_dump', ['--no-owner', '--no-privileges', '--clean', '--if-exists'], { env: process.env });
+  dump.on('error', (e) => {
+    console.error('[db-export] pg_dump failed to start:', e.message);
+    if (!res.headersSent) fail(res, 500, 'pg_dump is not available on the server.');
+  });
+  dump.stderr.on('data', (d) => console.error('[db-export] pg_dump:', String(d).trim()));
+
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+  dump.stdout.pipe(zlib.createGzip()).pipe(res);
+
+  dump.on('close', (code) => {
+    if (code && !res.headersSent) fail(res, 500, `pg_dump exited with code ${code}.`);
+  });
+  req.on('close', () => { try { dump.kill(); } catch { /* already gone */ } });
+});
+
 /* ---------------------------------------------------------------- lookups */
 // CRUD is limited to the reference tables an admin genuinely edits. Parents,
 // students and question_bank are deliberately read-only here: editing them by

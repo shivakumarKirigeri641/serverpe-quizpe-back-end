@@ -183,4 +183,76 @@ router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) =>
   } catch (e) { console.error('[admin] broadcast send:', e.message); fail(res, 500, 'Broadcast failed.'); }
 });
 
+/**
+ * Send an approved template to a SPECIFIC list of mobile numbers (one-off), not
+ * a whole segment. Numbers are resolved to a parent name + session where known;
+ * unknown numbers still receive it (templates can open a conversation), with a
+ * generic greeting. STOP/paused parents are always skipped. `dryRun` returns the
+ * resolved recipient list for the preview without sending.
+ */
+const normMobile = (m) => String(m || '').replace(/\D/g, '').slice(-10);
+
+router.post('/broadcast/direct', requireAdmin, express.json(), async (req, res) => {
+  const { template, params = [], mobiles, dryRun } = req.body || {};
+  if (!template) return fail(res, 400, 'Pick a template.');
+  const uniq = [...new Set(String(mobiles || '').split(/[\s,;]+/).map(normMobile).filter((m) => m.length === 10))];
+  if (!uniq.length) return fail(res, 400, 'Enter at least one valid 10-digit mobile number.');
+
+  try {
+    await ensureSchema();
+    // template must be APPROVED; validate the free-text fill (same rules as /send)
+    const { rows: [t] } = await db.query(
+      `SELECT variables FROM whatsapp_templates WHERE template_name=$1 AND is_active AND approval_status='APPROVED'`, [template]);
+    if (!t) return fail(res, 400, 'That template is not approved.');
+    const vars = Array.isArray(t.variables) ? t.variables
+      : (() => { try { return JSON.parse(t.variables || '[]'); } catch { return []; } })();
+    const extra = Array.isArray(params) ? params.map((x) => String(x ?? '').trim()) : [];
+    const need = Math.max(0, vars.length - 1);
+    if (!dryRun) {   // the preview only resolves recipients; text is enforced on the real send
+      if (extra.length !== need) return fail(res, 400, `This template needs ${need} text value(s) after the name.`);
+      if (extra.some((v) => !v)) return fail(res, 400, 'Please fill every text field before sending.');
+    }
+
+    // resolve name / session / STOP flag for the numbers that are known parents
+    const { rows: known } = await db.query(
+      `SELECT p.parent_mobile_number AS mobile,
+              COALESCE(NULLIF(split_part(p.parent_name,' ',1),''),'there') AS name,
+              p.service_paused,
+              (SELECT id FROM whatsapp_sessions w WHERE w.mobile_number=p.parent_mobile_number AND w.is_active
+                ORDER BY id DESC LIMIT 1) AS session_id
+         FROM parents p WHERE p.parent_mobile_number = ANY($1::text[])`, [uniq]);
+    const byMobile = Object.fromEntries(known.map((k) => [k.mobile, k]));
+    const recips = uniq.map((m) => byMobile[m]
+      || { mobile: m, name: 'there', service_paused: false, session_id: null, unknown: true });
+
+    if (dryRun) {
+      return ok(res, {
+        total: recips.length,
+        paused: recips.filter((r) => r.service_paused).length,
+        recipients: recips.map((r) => ({ mobile: r.mobile, name: r.name, paused: !!r.service_paused, known: !r.unknown })),
+      });
+    }
+
+    let sent = 0, failed = 0, skipped = 0;
+    for (const r of recips) {
+      if (r.service_paused) { skipped++; continue; }     // never message someone who sent STOP
+      try {
+        const id = await wa.sendTemplate(r.session_id, r.mobile, template, [r.name, ...extra]);
+        await db.query(
+          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
+           VALUES ($1,$2,'direct','sent',$3)`, [r.mobile, template, id || null]);
+        sent++;
+      } catch (e) {
+        await db.query(
+          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, error_message)
+           VALUES ($1,$2,'direct','failed',$3)`, [r.mobile, template, e.message]);
+        failed++;
+      }
+      await new Promise((r2) => setTimeout(r2, 250));      // stay under Meta's rate limit
+    }
+    console.log(`[broadcast] ${template} -> direct(${recips.length}): ${sent} sent, ${failed} failed, ${skipped} skipped(STOP)`);
+    ok(res, { sent, failed, skipped });
+  } catch (e) { console.error('[admin] broadcast direct:', e.message); fail(res, 500, 'Direct send failed.'); }
+});
+
 module.exports = router;

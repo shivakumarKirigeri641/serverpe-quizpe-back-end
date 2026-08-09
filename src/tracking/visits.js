@@ -247,6 +247,8 @@ async function analytics() {
         COUNT(DISTINCT session_id) FILTER (WHERE kind='view' AND d=(SELECT today FROM t))::int AS uniques_today,
         COUNT(*) FILTER (WHERE kind='wa_click' AND d=(SELECT today FROM t))::int          AS wa_today,
         COUNT(*) FILTER (WHERE kind='view' AND d=(SELECT today FROM t)-1)::int            AS views_yday,
+        COUNT(DISTINCT session_id) FILTER (WHERE kind='view' AND d=(SELECT today FROM t)-1)::int AS uniques_yday,
+        COUNT(*) FILTER (WHERE kind='wa_click' AND d=(SELECT today FROM t)-1)::int        AS wa_yday,
         COUNT(*) FILTER (WHERE kind='view' AND d > (SELECT today FROM t)-7)::int          AS views_7d,
         COUNT(*) FILTER (WHERE kind='view' AND d <= (SELECT today FROM t)-7
                                           AND d > (SELECT today FROM t)-14)::int          AS views_prev7
@@ -267,27 +269,34 @@ async function analytics() {
     // raw referrer + path per visit, classified into named sources in JS below
     db.query(`
       SELECT referrer, path, kind,
-             ((created_at AT TIME ZONE '${TZ}')::date = (now() AT TIME ZONE '${TZ}')::date) AS is_today
+             ((created_at AT TIME ZONE '${TZ}')::date = (now() AT TIME ZONE '${TZ}')::date)     AS is_today,
+             ((created_at AT TIME ZONE '${TZ}')::date = (now() AT TIME ZONE '${TZ}')::date - 1) AS is_yesterday
         FROM site_visits
        WHERE NOT is_bot AND created_at >= ${LAUNCH_FLOOR}
        LIMIT 50000`),
   ]);
 
-  // Roll the raw rows up into clean, ranked traffic sources (most-visited first).
+  // % change vs a prior period: +N up, -N down, null when there's no baseline
+  // (so the UI can hide the arrow rather than show a misleading +100%).
+  const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : (cur > 0 ? null : 0));
+
+  // Roll the raw rows up into clean, ranked traffic sources (most-visited first),
+  // counting today and yesterday per source for the vs-yesterday delta.
   const srcAgg = {};
   for (const v of srcRows.rows) {
     const name = classifySource(v.referrer, v.path);
-    const a = (srcAgg[name] ||= { source: name, views: 0, wa_clicks: 0, today: 0 });
+    const a = (srcAgg[name] ||= { source: name, views: 0, wa_clicks: 0, today: 0, yesterday: 0 });
     if (v.kind === 'wa_click') a.wa_clicks++; else a.views++;
     if (v.is_today) a.today++;
+    if (v.is_yesterday) a.yesterday++;
   }
   const srcTotalViews = Object.values(srcAgg).reduce((t, a) => t + a.views, 0) || 1;
   const sources = Object.values(srcAgg)
-    .map((a) => ({ ...a, pct: Math.round((a.views / srcTotalViews) * 100) }))
+    .map((a) => ({ ...a, pct: Math.round((a.views / srcTotalViews) * 100),
+                   today_vs_yesterday_pct: pct(a.today, a.yesterday) }))
     .sort((a, b) => (b.views + b.wa_clicks) - (a.views + a.wa_clicks));
 
   const s = summary.rows[0] || {};
-  const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : (cur > 0 ? 100 : 0));
   return {
     launch_date: LAUNCH_DATE,
     today: s.today,
@@ -304,6 +313,8 @@ async function analytics() {
       uniques: s.uniques_today || 0,
       wa_clicks: s.wa_today || 0,
       vs_yesterday_pct: pct(s.views_today || 0, s.views_yday || 0),
+      uniques_vs_yesterday_pct: pct(s.uniques_today || 0, s.uniques_yday || 0),
+      wa_vs_yesterday_pct: pct(s.wa_today || 0, s.wa_yday || 0),
     },
     week: {
       views: s.views_7d || 0,
@@ -417,20 +428,37 @@ async function grouped(kind = 'all') {
  */
 async function geo() {
   await ensureSchema();
+
+  // Roll a set of {region,country,n} rows into a state→count map (India only),
+  // counting non-India visits separately. Shared by the all-time and today views.
+  const bucketByState = (rows) => {
+    const map = {};
+    let india = 0, other = 0;
+    for (const r of rows) {
+      if (r.country === 'IN') {
+        const nm = stateName(r.region, 'IN') || 'Unknown';
+        map[nm] = (map[nm] || 0) + r.n;
+        india += r.n;
+      } else other += r.n;
+    }
+    return { map, india, other };
+  };
+
   const { rows: vraw } = await db.query(`
     SELECT region, country, COUNT(*)::int AS n
       FROM site_visits
      WHERE NOT is_bot AND kind='view' AND created_at >= ${LAUNCH_FLOOR}
      GROUP BY region, country`);
-  const vmap = {};
-  let india = 0, other = 0;
-  for (const r of vraw) {
-    if (r.country === 'IN') {
-      const nm = stateName(r.region, 'IN') || 'Unknown';
-      vmap[nm] = (vmap[nm] || 0) + r.n;
-      india += r.n;
-    } else other += r.n;
-  }
+  const all = bucketByState(vraw);
+
+  // Same breakdown, but only today (in the app's timezone).
+  const { rows: traw } = await db.query(`
+    SELECT region, country, COUNT(*)::int AS n
+      FROM site_visits
+     WHERE NOT is_bot AND kind='view'
+       AND (created_at AT TIME ZONE '${TZ}')::date = (now() AT TIME ZONE '${TZ}')::date
+     GROUP BY region, country`);
+  const today = bucketByState(traw);
 
   const { rows: families } = await db.query(`
     SELECT COALESCE(su.state_name, NULLIF(p.state_code,''), 'Unknown') AS name, COUNT(*)::int AS n
@@ -439,7 +467,11 @@ async function geo() {
      WHERE p.is_active
      GROUP BY 1 ORDER BY n DESC`);
 
-  return { visitors: topN(vmap, 100), families, visitors_india: india, visitors_other: other };
+  return {
+    visitors: topN(all.map, 100), visitors_india: all.india, visitors_other: all.other,
+    visitors_today: topN(today.map, 100), visitors_today_india: today.india, visitors_today_other: today.other,
+    families,
+  };
 }
 
 module.exports = { ensureSchema, record, analytics, recent, grouped, geo, inboxOn, setInboxOn, clientIp, classifySource };
