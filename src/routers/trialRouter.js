@@ -18,6 +18,13 @@ const db = require('../database/connectDB');
 const router = express.Router();
 const TOKEN_TTL_MINUTES = 60;
 
+// The pitch/demo number may re-run the real trial signup any time — the
+// one-trial-per-number policy is waived for it alone (kept in sync with
+// userContext.js / demo.js). This is the WEB path's copy of that waiver.
+const { normaliseMobile } = require('../whatsapp/userContext');
+const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '9886122415';
+const isDemoMobile = (m) => !!DEMO_MOBILE && normaliseMobile(m) === DEMO_MOBILE;
+
 /** Mint a signup link for a WhatsApp session. */
 async function createSignupLink(sessionId, mobile, parentName) {
   const token = crypto.randomBytes(24).toString('base64url');
@@ -123,14 +130,16 @@ router.post('/api/submit', async (req, res) => {
     const bad = labels.filter((_, i) => checks[i].rowCount === 0);
     if (bad.length) return res.status(400).json({ success: false, error: `Invalid ${bad.join(', ')}.` });
 
-    // one trial per mobile number
-    const used = await db.query(
-      `SELECT 1 FROM parents p
-         JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
-         JOIN quizpe_plans pl ON pl.id = s.plan_id
-        WHERE p.parent_mobile_number = $1 AND pl.is_trial`, [link.mobile_number]);
-    if (used.rowCount) {
-      return res.status(409).json({ success: false, error: 'A free trial has already been used on this number.' });
+    // one trial per mobile number — waived for the demo number (school pitch)
+    if (!isDemoMobile(link.mobile_number)) {
+      const used = await db.query(
+        `SELECT 1 FROM parents p
+           JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
+           JOIN quizpe_plans pl ON pl.id = s.plan_id
+          WHERE p.parent_mobile_number = $1 AND pl.is_trial`, [link.mobile_number]);
+      if (used.rowCount) {
+        return res.status(409).json({ success: false, error: 'A free trial has already been used on this number.' });
+      }
     }
 
     const c = await db.getClient();
@@ -140,7 +149,10 @@ router.post('/api/submit', async (req, res) => {
         `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
          VALUES ($1,$2,$3)
          ON CONFLICT (parent_mobile_number) DO UPDATE
-           SET state_code=EXCLUDED.state_code, modified_at=now()
+           -- starting a trial (re)activates the family so the scheduler resumes;
+           -- this is also what lets the deactivated demo number come alive again
+           SET state_code=EXCLUDED.state_code, is_active=true, service_paused=false,
+               reminders_enabled=true, paused_at=NULL, modified_at=now()
          RETURNING id`,
         [link.parent_name || 'Parent', link.mobile_number, state])).rows[0].id;
 
@@ -149,7 +161,7 @@ router.post('/api/submit', async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (parent_id, student_name) DO UPDATE
            SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
-               medium_id=EXCLUDED.medium_id,
+               medium_id=EXCLUDED.medium_id, is_active=true,
                -- optional field: never wipe a stored school with a blank
                school_name=COALESCE(EXCLUDED.school_name, students.school_name),
                modified_at=now()`,
