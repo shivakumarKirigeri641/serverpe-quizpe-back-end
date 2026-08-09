@@ -49,10 +49,8 @@ India's simplest daily learning habit for school kids, right here on WhatsApp. N
 ✅ Instant answers with kid-friendly explanations
 📊 Weekly progress reports for parents
 
-By continuing you agree to our *Terms of Service* and *Privacy Policy*.
-${publicUrl(terms.url)}
-
-_${terms.summary}_`,
+By continuing, you accept our *Terms & Privacy Policy* of QuizPe. 😊
+${publicUrl(terms.url)}`,
     footer: `${b.company_name}`,
     policyId: terms.id,
   };
