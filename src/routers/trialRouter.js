@@ -228,6 +228,32 @@ router.post('/api/submit', async (req, res) => {
         console.error('[trial] confirmation message failed:', e.message);
       }
 
+      // Founder alert — a trial was activated via the web form. Best-effort and
+      // after COMMIT, so a mail hiccup can never undo the signup. (The WhatsApp-
+      // native flow already sends this; the web form previously did not.)
+      try {
+        const notify = require('../mail/notify');
+        const { fromWhatsApp } = require('../mail/context');
+        const M = require('../whatsapp/messages');
+        const meta = (await db.query(
+          `SELECT b.board_code, g.grade_name, m.medium_name, su.state_name
+             FROM boards b, grades g, mediums m
+             LEFT JOIN states_unions su ON su.state_code = $4
+            WHERE b.board_code=$1 AND g.grade_code=$2 AND m.medium_code=$3 LIMIT 1`,
+          [board, grade, medium, state])).rows[0] || {};
+        notify.trial({
+          parent: { name: link.parent_name || 'Parent', mobile: link.mobile_number, state: meta.state_name || state },
+          children: [{ name, board: meta.board_code || board, grade: meta.grade_name || grade,
+                       medium: meta.medium_name || medium, school: school_name || null }],
+          plan: {
+            name: 'Free trial', duration: trial.duration,
+            start: M.fmtDate(new Date()), end: M.fmtDate(sub.plan_end_date),
+            quizTime: M.fmtTime(sub.quiz_time), reminderTime: M.fmtTime(slot.reminder_time),
+          },
+          ctx: fromWhatsApp({ sessionId: link.session_id, mobile: link.mobile_number }),
+        });
+      } catch (e) { console.error('[trial] founder alert skipped:', e.message); }
+
       res.json({
         success: true,
         student_name: name,

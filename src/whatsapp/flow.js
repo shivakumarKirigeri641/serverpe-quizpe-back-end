@@ -949,7 +949,7 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
 
     case 'active':
     default:
-      await showMainMenu(session, mobile, ctx);
+      await sendUnrecognized(session, mobile, ctx);
   }
 }
 
@@ -1038,6 +1038,30 @@ Tap below to raise a request — pick what it's about, describe the issue, and y
     url,
     footer: `${b.company_name}`,
   });
+}
+
+/**
+ * Unrecognized free text (e.g. "I want Hindi", "add Biology", a long sentence).
+ * Instead of silently re-showing the menu, we acknowledge it and invite the user
+ * to send the query/suggestion through the contact form — so their message is
+ * actually captured — while reminding them the menu is a *menu* away.
+ */
+async function sendUnrecognized(session, mobile, ctx) {
+  try {
+    const { createSupportLink } = require('../routers/supportWebRouter');
+    const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
+    await wa.sendCtaUrl(session.id, mobile, {
+      body: `🙂 I didn't quite catch that.\n\n`
+        + `If you have any question or suggestion about QuizPe, tap below and tell us — we read every message.\n\n`
+        + `_Or type *menu* for options._`,
+      displayText: '💬 Ask / suggest',
+      url,
+      footer: 'QuizPe · ServerPe App Solutions',
+    });
+  } catch (e) {
+    console.error('[flow] unrecognized-input reply failed:', e.message);
+    await showMainMenu(session, mobile, ctx);   // if the link can't be minted, fall back to the menu
+  }
 }
 
 async function handleMenuChoice(session, mobile, ctx, choice) {
