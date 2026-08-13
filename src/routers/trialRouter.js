@@ -22,7 +22,7 @@ const TOKEN_TTL_MINUTES = 60;
 // one-trial-per-number policy is waived for it alone (kept in sync with
 // userContext.js / demo.js). This is the WEB path's copy of that waiver.
 const { normaliseMobile } = require('../whatsapp/userContext');
-const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '9886122415';
+const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '';
 const isDemoMobile = (m) => !!DEMO_MOBILE && normaliseMobile(m) === DEMO_MOBILE;
 
 /** Mint a signup link for a WhatsApp session. */

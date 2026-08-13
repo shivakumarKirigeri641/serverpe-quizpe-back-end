@@ -36,7 +36,7 @@ function normaliseMobile(raw) {
 // number policy is waived for it alone, so a school demo can walk the real
 // signup end-to-end as often as needed. Kept in sync with demo.js's DEMO_MOBILE;
 // inlined here rather than requiring demo.js (which requires us → circular).
-const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '9886122415';
+const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '';
 const isDemoMobile = (m) => !!DEMO_MOBILE && m === DEMO_MOBILE;
 
 /**

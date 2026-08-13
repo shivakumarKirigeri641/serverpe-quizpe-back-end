@@ -26,7 +26,10 @@ const wa = require('./client');
 const Q = require('./quiz');
 const { normaliseMobile } = require('./userContext');
 
-const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '9886122415';
+// No demo number by default — demo mode is OFF unless DEMO_MOBILE is explicitly
+// set. (Previously defaulted to the founder's personal number; now that number
+// is a regular parent.)
+const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '';
 const SUBJECT_CODE = process.env.DEMO_SUBJECT_CODE || 'MATHS';
 const N_QUESTIONS = 5;
 const LETTERS = ['A', 'B', 'C', 'D'];

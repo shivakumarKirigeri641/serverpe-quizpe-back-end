@@ -70,7 +70,25 @@ function toWaNumber(mobile) {
   return d.length === 10 ? `${process.env.WA_COUNTRY_CODE || '91'}${d}` : d;
 }
 
+// SAFETY ALLOWLIST for local testing against a copy of LIVE data. When
+// WA_SEND_ALLOWLIST is set (comma-separated 10-digit numbers), NO message can
+// reach any other number — every non-listed recipient is blocked before it hits
+// Meta, so a real parent is never messaged. MUST stay UNSET in production
+// (empty = no restriction, normal behaviour).
+const SEND_ALLOWLIST = new Set(
+  String(process.env.WA_SEND_ALLOWLIST || '')
+    .split(',').map((m) => m.replace(/\D/g, '').slice(-10)).filter((m) => m.length === 10),
+);
+if (SEND_ALLOWLIST.size) {
+  console.warn(`[wa] ⚠️  TEST MODE — outbound restricted to: ${[...SEND_ALLOWLIST].join(', ')}. All other numbers are BLOCKED.`);
+}
+
 async function send(sessionId, to, payload, bodyForLog, type) {
+  // Hard block: in test mode, only allowlisted numbers may receive anything.
+  if (SEND_ALLOWLIST.size && !SEND_ALLOWLIST.has(toLocalNumber(to))) {
+    console.warn(`[wa] BLOCKED send to ${toLocalNumber(to)} — not in WA_SEND_ALLOWLIST (test mode)`);
+    return null;   // nothing goes to Meta; treated as a no-op
+  }
   to = toWaNumber(to);
   try {
     const res = await post({ messaging_product: 'whatsapp', to, ...payload });

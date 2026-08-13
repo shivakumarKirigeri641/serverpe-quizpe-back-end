@@ -584,7 +584,7 @@ async function processInbound(msg, contactName) {
     if (rows.length) {
       await wa.sendText(session.id, mobile,
         `🔔 *Welcome back!* Everything is switched on again.\n\n` +
-        `Your child's next quiz arrives at its usual time this evening.`);
+        `Your child's quiz is open all day — take it any time before 11:45 PM.`);
       // Show the menu rather than asking them to type "menu". START also reads
       // as a greeting, so whichever way the parent meant it, they get both the
       // resume and the options — and the session lands in a known state.
@@ -604,7 +604,7 @@ async function processInbound(msg, contactName) {
 • *stop* — pause all messages
 • *start* — turn everything back on
 
-Your child's quiz link arrives automatically each evening — just tap the button in that message.
+You'll get a *Start Quiz* reminder each morning — the quiz is open all day, so take it any time before 11:45 PM.
 
 Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
@@ -827,9 +827,9 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
         await setState(session, 'awaiting_form', 'agreed_trial');
         await wa.sendCtaUrl(session.id, mobile, {
           header: '🎉 One last step!',
-          body: `Your child's *7-day FREE trial* is ready — tonight's quiz can go out in just a few hours. 🌟\n\n`
+          body: `Your child's *7-day FREE trial* is ready — the first quiz can start today. 🌟\n\n`
             + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
-            + `👇 Tap below and you're done — the first quiz lands on this chat tonight.`,
+            + `👇 Tap below and you're done — the first quiz is ready right after.`,
           displayText: '✅ Fill child form',
           url,
           footer: 'Free for 7 days · no card · ~30 seconds',
@@ -1181,7 +1181,7 @@ Your code: *${s.code}*${earned}
 _Forward the next message 👇_`);
 
       await wa.sendText(session.id, mobile,
-`My child does a 10-question maths quiz every evening on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
+`My child does a 10-question maths quiz every day on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
 
 Try it free for 7 days — no app, no login:
 ${s.link || `Message and send: JOIN ${s.code}`}`);
@@ -1251,36 +1251,27 @@ async function quizNotYetOpen(studentId) {
 /** Schedule + start today's quiz for one specific child. */
 async function beginQuizFor(session, mobile, st, siblingCount) {
   try {
-      // The quiz is available anywhere inside the evening window, not only at
-      // this parent's notification slot. Their slot decides when we MESSAGE
-      // them; the window decides when the child may ANSWER. Nothing is created
-      // before the window opens — an early tap would consume today's questions
-      // and the evening message would then announce a quiz already taken.
+      // The quiz is open ALL DAY (06:00–23:45); a child may answer any time in
+      // that window. Nothing is created before it opens — an early tap would
+      // consume today's questions before the day begins.
       const W = require('./quizWindow');
       const where = W.state();
 
-      if (where === 'before') {
-        const at = await quizTimeOf(st.id);
-        const allDay = W.isAllDayOpen();
-        const occ = W.occasionFor();
+      if (where === 'before') {   // only before 06:00 — rare
         await wa.sendText(session.id, mobile,
-          `⏰ ${allDay ? `Today's ${occ} quiz` : "Tonight's quiz"} opens at *${M.fmtTime(W.openHHMM())}*.\n\n` +
-          `${st.student_name} can take it any time after that, right up to *${M.fmtTime(W.CLOSE_HHMM)}*` +
-          `${at ? ` — we'll nudge you at *${M.fmtTime(at)}*` : ''}. ${allDay ? 'See you soon! ☀️' : 'See you this evening! 🌙'}`);
+          `⏰ Today's quiz opens at *${M.fmtTime(W.OPEN_HHMM)}*.\n\n` +
+          `${st.student_name} can then take it any time until *${M.fmtTime(W.CLOSE_HHMM)}* — whenever suits you. See you soon! ☀️`);
         return;
       }
 
-      if (where === 'closed') {
-        const at = await quizTimeOf(st.id);
-        const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);   // tomorrow may be a weekend → opens earlier
+      if (where === 'closed') {   // after 23:45
         await wa.sendText(session.id, mobile,
           `🌙 Today's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
-          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.openHHMM(tomorrow))}*` +
-          `${at ? `, and we'll remind you around *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
+          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.OPEN_HHMM)}* — take it any time during the day. Sleep well! 😴`);
         return;
       }
 
-      // The 8 PM job already creates today's trackers; this is the safety net
+      // The morning job already creates today's trackers; this is the safety net
       // for anyone starting a quiz outside that path (menu, or a first quiz on
       // signup day). Idempotent, so calling it twice costs nothing.
       await Q.scheduleDailyQuizzes(st.id);

@@ -22,13 +22,12 @@
 
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
 
-const OPEN_MIN  = toMin(process.env.QUIZ_WINDOW_OPEN  || '19:00');
+// OPEN ALL DAY, EVERY DAY: opens 06:00, closes 23:45. A child may take the quiz
+// any time of day (still once per day). This replaced the old evening-only
+// (19:00) window. Tune with QUIZ_WINDOW_OPEN.
+const OPEN_MIN  = toMin(process.env.QUIZ_WINDOW_OPEN  || '06:00');
 const CLOSE_MIN = toMin(process.env.QUIZ_WINDOW_CLOSE || '23:45');
-// OPEN ALL DAY on weekends AND holidays: on those days a child has free
-// daytime, so the window opens in the morning instead of the evening — same
-// 23:45 close. This is the "take it any time" offer. Weekday behaviour is
-// unchanged. Tune with QUIZ_WEEKEND_OPEN; set it to 19:00 to disable the perk.
-const WEEKEND_OPEN_MIN = toMin(process.env.QUIZ_WEEKEND_OPEN || '06:00');
+const WEEKEND_OPEN_MIN = toMin(process.env.QUIZ_WEEKEND_OPEN || '06:00');   // same as every day now
 // HOLIDAYS: dates (YYYY-MM-DD, IST) that behave like a weekend — window open all
 // day, and the nudge greets "holiday" not "weekend". The founder RESERVES these
 // from the admin calendar (quiz_holidays table); India's holidays are regional
