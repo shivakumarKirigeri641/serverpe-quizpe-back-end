@@ -18,8 +18,11 @@ const esc = (s) => String(s == null || s === '' ? '—' : s)
 
 const C = { brand: '#075e54', accent: '#00a884', ink: '#111b21', muted: '#667781', line: '#e2e6e9', soft: '#f6f8f9' };
 
-const ist = (d = new Date()) =>
-  new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+const ist = (d = new Date()) => {
+  const dt = new Date(d ?? Date.now());
+  if (Number.isNaN(dt.getTime())) return '—';
+  return dt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+};
 
 /** label/value rows; falsy values render as an em dash rather than vanishing. */
 const rows = (pairs) => pairs.filter(Boolean).map(([k, v]) => `
