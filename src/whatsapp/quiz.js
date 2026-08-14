@@ -136,6 +136,17 @@ async function startQuiz(trackerId) {
         WHERE id=$1`, [trackerId]);
 
     await c.query('COMMIT');
+
+    // TEMPORARY operator alert: email the founder that a child STARTED a quiz.
+    // Only on a FRESH start (existing === 0), never on a resume, so a reopened
+    // quiz does not re-ping. On by default; set QUIZ_START_ALERT=0 to switch off.
+    // Best-effort — a child's quiz must never depend on the alert queuing.
+    if (existing === 0 && process.env.QUIZ_START_ALERT !== '0') {
+      try {
+        await jobs.push('quiz_start_alert', { trackerId }, { dedupeKey: `quizstart:${trackerId}` });
+      } catch (e) { console.error('[quiz] could not queue quiz-start alert:', e.message); }
+    }
+
     return { trackerId, resumed: existing > 0 };
   } catch (e) {
     await c.query('ROLLBACK');
@@ -368,11 +379,42 @@ _Full answers & explanations are in the report below._ 📄`);
   await jobs.push('daily_report', { trackerId, sessionId, mobile },
     { dedupeKey: `report:${trackerId}` });
 
+  // ---- weekly report: send it NOW, while we're in-window ------------------
+  // The child just answered, so the parent's session is inside the 24h window
+  // this very moment — the cheapest, most reliable time to deliver the weekly
+  // report, free-form and with NO template. If this quiz closes the child's
+  // rolling 7-day cycle, enqueue it here rather than leaning on the 10 AM scan,
+  // which often lands out-of-window and has to fall back to the paid document
+  // template. The daily scan stays as a safety net for cycles that close on a
+  // day the child didn't play. The dedupeKey (student + week-end) is identical
+  // to the scan's, so the two paths can never double-send.
+  try {
+    const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+    if (t) {
+      const { weeklyDue } = require('../pdf/weeklyReport');
+      const wk = await weeklyDue(t.student_id);      // MATHS weekly — matches the scan
+      if (wk.due) {
+        await jobs.push('weekly_report',
+          { studentId: t.student_id, weekStart: wk.weekStart, weekEnd: wk.weekEnd, sessionId, mobile },
+          { dedupeKey: `weekly:${t.student_id}:${wk.weekEnd}` });
+      }
+    }
+  } catch (e) { console.error('[quiz] weekly-report check failed:', e.message); }
+
   // Badges are worked out after the score is safely stored, and queued rather
   // than awaited: a child's result must never depend on the rewards code
   // running. Deduped per quiz so a retried finish cannot announce twice.
   await jobs.push('award_badges', { trackerId, sessionId, mobile },
     { dedupeKey: `badges:${trackerId}` });
+
+  // TEMPORARY operator alert: email the founder that a child finished a quiz.
+  // On by default while the base is small; set QUIZ_DONE_ALERT=0 to switch off
+  // (no redeploy). Best-effort — an alert must never break the child's flow.
+  if (process.env.QUIZ_DONE_ALERT !== '0') {
+    try {
+      await jobs.push('quiz_done_alert', { trackerId }, { dedupeKey: `quizdone:${trackerId}` });
+    } catch (e) { console.error('[quiz] could not queue quiz-done alert:', e.message); }
+  }
 
   return { total, correct, pct };
 }

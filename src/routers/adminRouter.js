@@ -33,6 +33,8 @@ router.use(require('../admin/inboxRoutes'));
 // first-party site-visitor analytics + inbox toggle
 router.use(require('../admin/visitorRoutes'));
 router.use(require('../admin/broadcastRoutes'));
+// reserve holidays (quiz open all day + scheduler nudge) from a calendar
+router.use(require('../admin/holidayRoutes'));
 
 const clamp = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 const ok = (res, data) => res.json({ success: true, ...data });
@@ -229,6 +231,18 @@ router.get('/parents', requireAdmin, async (req, res) => {
   const limit = clamp(req.query.limit, 25, 200);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
   const q = `%${String(req.query.q || '').trim()}%`;
+  // filter is a fixed keyword (never user text), so it is safe to inline
+  const filter = ['active', 'lapsed', 'expiring'].includes(req.query.filter) ? req.query.filter : 'all';
+  const filterClause = filter === 'lapsed'
+    ? 'AND s.plan_end_date IS NOT NULL AND s.plan_end_date < CURRENT_DATE'          // latest plan ended, not renewed
+    : filter === 'active'
+      ? 'AND s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date'
+      : filter === 'expiring'
+        ? 'AND s.is_active AND s.plan_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7'
+        : '';
+  const orderBy = filter === 'expiring' ? 's.plan_end_date ASC'
+    : filter === 'lapsed' ? 's.plan_end_date DESC'
+      : 'p.id DESC';
   try {
     const { rows } = await db.query(`
       SELECT p.id, p.parent_name, p.parent_mobile_number, p.state_code, p.reminders_enabled,
@@ -246,7 +260,8 @@ router.get('/parents', requireAdmin, async (req, res) => {
                             WHERE x.parent_id=p.id ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
         LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
        WHERE ($1 = '%%' OR p.parent_name ILIKE $1 OR p.parent_mobile_number ILIKE $1)
-       ORDER BY p.id DESC LIMIT $2 OFFSET $3`, [q, limit, offset]);
+         ${filterClause}
+       ORDER BY ${orderBy} LIMIT $2 OFFSET $3`, [q, limit, offset]);
     ok(res, { rows, total: rows[0]?.total || 0 });
   } catch (e) { console.error('[admin] parents:', e.message); fail(res, 500, 'Could not load parents.'); }
 });
@@ -533,6 +548,32 @@ router.get('/finance/invoices', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] invoices:', e.message); fail(res, 500, 'Could not load invoices.'); }
 });
 
+/** Open a specific invoice PDF inline (already authenticated — no token). */
+router.get('/finance/invoices/:id/view', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const r = (await db.query(`SELECT invoice_path, invoice_id FROM invoices WHERE id=$1 AND is_active`, [id])).rows[0];
+    if (!r) return fail(res, 404, 'Invoice not found.');
+    const abs = path.join(__dirname, '..', 'uploads', r.invoice_path);
+    if (!fs.existsSync(abs)) return fail(res, 410, 'The invoice PDF is no longer on disk.');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="QuizPe-Invoice-${r.invoice_id}.pdf"`);
+    fs.createReadStream(abs).pipe(res);
+  } catch (e) { console.error('[admin] invoice view:', e.message); fail(res, 500, 'Could not open the invoice.'); }
+});
+
+/** Download a specific invoice PDF — for GST filing / records. */
+router.get('/finance/invoices/:id/download', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  try {
+    const r = (await db.query(`SELECT invoice_path, invoice_id FROM invoices WHERE id=$1 AND is_active`, [id])).rows[0];
+    if (!r) return fail(res, 404, 'Invoice not found.');
+    const abs = path.join(__dirname, '..', 'uploads', r.invoice_path);
+    if (!fs.existsSync(abs)) return fail(res, 410, 'The invoice PDF is no longer on disk.');
+    res.download(abs, `QuizPe-Invoice-${r.invoice_id}.pdf`);
+  } catch (e) { console.error('[admin] invoice download:', e.message); fail(res, 500, 'Could not download the invoice.'); }
+});
+
 /** GSTR-1 ready summary for a filing period (YYYY-MM). */
 router.get('/finance/gstr1', requireAdmin, async (req, res) => {
   const period = /^\d{4}-\d{2}$/.test(req.query.period || '')
@@ -572,6 +613,44 @@ router.get('/finance/gstr1/download', requireAdmin, async (req, res) => {
     console.error('[admin] gstr1 pdf:', e.message);
     if (!res.headersSent) fail(res, 500, 'Could not generate the GSTR-1 PDF.');
   }
+});
+
+/* ------------------------------------------------ full DB export (super) -- */
+/**
+ * Stream a complete, gzipped pg_dump of the database as a download — so the
+ * founder can pull production data down to a LOCAL DB for testing.
+ *
+ * SUPER-ADMIN ONLY. This file contains every parent's phone number, payments
+ * and GST records, so it must never be reachable by a normal admin — and it is
+ * a high-value exfiltration target. Kill it entirely with DB_EXPORT_ENABLED=0.
+ *
+ * pg_dump inherits the same PG* env vars the app connects with, so no
+ * credentials are handled here. --clean/--if-exists let the dump re-load over an
+ * existing local DB; --no-owner/--no-privileges let it restore under any role.
+ */
+router.get('/db/export', requireSuperAdmin, async (req, res) => {
+  if (process.env.DB_EXPORT_ENABLED === '0') return fail(res, 403, 'Database export is disabled.');
+  const { spawn } = require('child_process');
+  const zlib = require('zlib');
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '');
+  const fname = `quizpe-db-${stamp}.sql.gz`;
+  console.log(`[db-export] super-admin ${req.admin?.sub} started a full DB export`);
+
+  const dump = spawn('pg_dump', ['--no-owner', '--no-privileges', '--clean', '--if-exists'], { env: process.env });
+  dump.on('error', (e) => {
+    console.error('[db-export] pg_dump failed to start:', e.message);
+    if (!res.headersSent) fail(res, 500, 'pg_dump is not available on the server.');
+  });
+  dump.stderr.on('data', (d) => console.error('[db-export] pg_dump:', String(d).trim()));
+
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+  dump.stdout.pipe(zlib.createGzip()).pipe(res);
+
+  dump.on('close', (code) => {
+    if (code && !res.headersSent) fail(res, 500, `pg_dump exited with code ${code}.`);
+  });
+  req.on('close', () => { try { dump.kill(); } catch { /* already gone */ } });
 });
 
 /* ---------------------------------------------------------------- lookups */
@@ -703,16 +782,32 @@ router.get('/support', requireAdmin, async (req, res) => {
 
 router.patch('/support/:id', requireAdmin, express.json(), async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const status = ['open', 'in_progress', 'resolved', 'closed'].includes(req.body?.status)
+  const status = ['open', 'in_progress', 'closed', 'cancelled'].includes(req.body?.status)
     ? req.body.status : null;
+  const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution.trim().slice(0, 2000) : null;
   if (!id || !status) return fail(res, 400, 'Bad ticket update.');
+  // Stamp resolved_at here, in JS — the status column may be an enum, and reusing
+  // the status parameter in a text CASE made Postgres deduce two types for it
+  // ("inconsistent types deduced for parameter $2"). A dedicated timestamp param
+  // sidesteps that entirely; null leaves the existing resolved_at untouched.
+  const resolvedAt = (status === 'closed' || status === 'cancelled') ? new Date() : null;
   try {
     const { rows } = await db.query(
       `UPDATE support_tickets
-          SET status=$2, resolved_at = CASE WHEN $2 IN ('resolved','closed') THEN now() ELSE NULL END,
-              modified_at=now()
-        WHERE id=$1 RETURNING *`, [id, status]);
-    ok(res, { row: rows[0] });
+          SET status=$2,
+              resolution  = COALESCE($3, resolution),
+              resolved_at = COALESCE($4::timestamptz, resolved_at),
+              modified_at = now()
+        WHERE id=$1 RETURNING *`, [id, status, resolution, resolvedAt]);
+    const t = rows[0];
+    // On CLOSE with a resolution note, tell the parent (best-effort — never
+    // blocks the admin action) and offer a one-tap re-open.
+    if (t && status === 'closed' && (resolution || t.resolution)) {
+      require('./supportWebRouter').notifyResolution(t)
+        .then((r) => console.log(`[admin] ticket ${t.ticket_no} resolution sent: ${JSON.stringify(r)}`))
+        .catch((e) => console.error('[admin] resolution send:', e.message));
+    }
+    ok(res, { row: t });
   } catch (e) { console.error('[admin] ticket update:', e.message); fail(res, 500, 'Could not update the ticket.'); }
 });
 
@@ -730,6 +825,136 @@ router.get('/system', requireAdmin, async (req, res) => {
          FROM notification_log WHERE send_date = CURRENT_DATE`);
     ok(res, { jobs, database: db1.size, templates, today: notif });
   } catch (e) { console.error('[admin] system:', e.message); fail(res, 500, 'Could not load system status.'); }
+});
+
+/* -------------------------------------------------- whatsapp templates CRUD */
+/**
+ * Manage the whatsapp_templates rows the senders read. Adding a row here does
+ * NOT create the template in Meta — you author + submit that in the WhatsApp
+ * Manager. This is the local registry: name, category, body/header/footer (for
+ * preview), variables, buttons, send_context, and the approval_status the
+ * senders gate on. Flip a row to APPROVED once Meta clears it and every gated
+ * sender (welcome, expiry, support-resolution, thank-you, day-missed recap,
+ * broadcaster) starts using it on the next run — no deploy needed.
+ */
+const TPL_CATEGORIES = ['UTILITY', 'MARKETING', 'AUTHENTICATION'];
+const TPL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'];
+
+let tplColsReady = false;
+async function ensureTemplateCols() {
+  if (tplColsReady) return;
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS header_text text`);
+  await db.query(`ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS footer_text text`);
+  tplColsReady = true;
+}
+
+/** Validate + normalise a full template payload (create). */
+function cleanTemplate(b) {
+  const name = String(b?.template_name || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{1,512}$/.test(name)) {
+    return { error: 'Name must be lowercase letters, numbers and underscores only (e.g. qp_thankyou_v1).' };
+  }
+  if (!TPL_CATEGORIES.includes(b?.category)) return { error: 'Category must be UTILITY, MARKETING or AUTHENTICATION.' };
+  const status = TPL_STATUSES.includes(b?.approval_status) ? b.approval_status : 'PENDING';
+  const body_text = String(b?.body_text || '').trim();
+  if (!body_text) return { error: 'Body text is required.' };
+  return {
+    value: {
+      name, category: b.category, status, body_text,
+      language: (String(b?.language || 'en').trim().slice(0, 12) || 'en'),
+      header_text: b?.header_text ? String(b.header_text).trim().slice(0, 200) : null,
+      footer_text: b?.footer_text ? String(b.footer_text).trim().slice(0, 200) : null,
+      send_context: b?.send_context ? String(b.send_context).trim().slice(0, 120) : null,
+      variables: Array.isArray(b?.variables) ? b.variables.map((v) => String(v).trim()).filter(Boolean) : [],
+      buttons: Array.isArray(b?.buttons) ? b.buttons : [],
+      is_active: b?.is_active !== false,
+    },
+  };
+}
+
+router.get('/templates', requireAdmin, async (req, res) => {
+  try {
+    await ensureTemplateCols();
+    const { rows } = await db.query(
+      `SELECT id, template_name, language, category, approval_status, body_text,
+              header_text, footer_text, variables, buttons, send_context, is_active
+         FROM whatsapp_templates ORDER BY template_name`);
+    ok(res, { rows, categories: TPL_CATEGORIES, statuses: TPL_STATUSES });
+  } catch (e) { console.error('[admin] templates list:', e.message); fail(res, 500, 'Could not load templates.'); }
+});
+
+router.post('/templates', requireAdmin, express.json(), async (req, res) => {
+  const c = cleanTemplate(req.body);
+  if (c.error) return fail(res, 400, c.error);
+  const v = c.value;
+  try {
+    await ensureTemplateCols();
+    const { rows } = await db.query(
+      `INSERT INTO whatsapp_templates
+         (template_name, language, category, approval_status, body_text, header_text, footer_text,
+          variables, buttons, send_context, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)
+       RETURNING id`,
+      [v.name, v.language, v.category, v.status, v.body_text, v.header_text, v.footer_text,
+       JSON.stringify(v.variables), JSON.stringify(v.buttons), v.send_context, v.is_active]);
+    ok(res, { id: rows[0].id, message: `Template ${v.name} added.` });
+  } catch (e) {
+    if (e.code === '23505') return fail(res, 400, 'A template with that name already exists.');
+    console.error('[admin] template create:', e.message); fail(res, 500, 'Could not add the template.');
+  }
+});
+
+router.patch('/templates/:id', requireAdmin, express.json(), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Bad template id.');
+  const b = req.body || {};
+  const sets = []; const vals = []; let i = 1;
+  const push = (col, val) => { sets.push(`${col}=$${i++}`); vals.push(val); };
+  if (b.approval_status !== undefined) {
+    if (!TPL_STATUSES.includes(b.approval_status)) return fail(res, 400, 'Bad status.');
+    push('approval_status', b.approval_status);
+  }
+  if (b.is_active !== undefined) push('is_active', !!b.is_active);
+  if (b.category !== undefined) {
+    if (!TPL_CATEGORIES.includes(b.category)) return fail(res, 400, 'Bad category.');
+    push('category', b.category);
+  }
+  if (b.body_text !== undefined) {
+    const t = String(b.body_text).trim();
+    if (!t) return fail(res, 400, 'Body cannot be empty.');
+    push('body_text', t);
+  }
+  if (b.header_text !== undefined) push('header_text', b.header_text ? String(b.header_text).trim().slice(0, 200) : null);
+  if (b.footer_text !== undefined) push('footer_text', b.footer_text ? String(b.footer_text).trim().slice(0, 200) : null);
+  if (b.send_context !== undefined) push('send_context', b.send_context ? String(b.send_context).trim().slice(0, 120) : null);
+  if (b.language !== undefined) push('language', String(b.language).trim().slice(0, 12) || 'en');
+  if (b.variables !== undefined) {
+    const arr = Array.isArray(b.variables) ? b.variables.map((x) => String(x).trim()).filter(Boolean) : [];
+    sets.push(`variables=$${i++}::jsonb`); vals.push(JSON.stringify(arr));
+  }
+  if (b.buttons !== undefined) {
+    sets.push(`buttons=$${i++}::jsonb`); vals.push(JSON.stringify(Array.isArray(b.buttons) ? b.buttons : []));
+  }
+  if (!sets.length) return fail(res, 400, 'Nothing to update.');
+  try {
+    await ensureTemplateCols();
+    vals.push(id);
+    const { rows } = await db.query(
+      `UPDATE whatsapp_templates SET ${sets.join(', ')} WHERE id=$${i} RETURNING template_name`, vals);
+    if (!rows.length) return fail(res, 404, 'Template not found.');
+    ok(res, { message: `Template ${rows[0].template_name} updated.` });
+  } catch (e) { console.error('[admin] template update:', e.message); fail(res, 500, 'Could not update the template.'); }
+});
+
+router.delete('/templates/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Bad template id.');
+  try {
+    const { rows } = await db.query(
+      `DELETE FROM whatsapp_templates WHERE id=$1 RETURNING template_name`, [id]);
+    if (!rows.length) return fail(res, 404, 'Template not found.');
+    ok(res, { message: `Deleted ${rows[0].template_name}.` });
+  } catch (e) { console.error('[admin] template delete:', e.message); fail(res, 500, 'Could not delete the template.'); }
 });
 
 /* ---------------------------------------------------------- payment mode */

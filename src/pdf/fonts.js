@@ -24,8 +24,12 @@ const path = require('path');
 const DIR = path.join(__dirname, '..', 'assets', 'fonts');
 
 // medium_code -> bundled font basename (null = Latin, use built-in Helvetica)
+// ENGLISH uses DejaVu Sans (not built-in Helvetica) because Helvetica is
+// WinAnsi-only and cannot draw maths symbols — set/logic operators like ∩ ∪ ⇒ →
+// ∈ − printed as garbage in the answer review. DejaVu Sans covers them all and
+// is freely embeddable (Bitstream Vera license).
 const FAMILIES = {
-  ENGLISH: null,
+  ENGLISH: 'DejaVuSans',
   KANNADA: 'NotoSansKannada',
   HINDI:   'NotoSansDevanagari',
   MARATHI: 'NotoSansDevanagari',
@@ -57,8 +61,10 @@ function useFontsFor(doc, mediumCode) {
 
   doc.registerFont('body', reg);
   doc.registerFont('bodyBold', fs.existsSync(bold) ? bold : reg);
-  // no true italic in Noto Sans — reuse regular rather than silently dropping text
-  doc.registerFont('bodyOblique', reg);
+  // Use a real oblique when the family ships one (DejaVu does); Noto has none, so
+  // reuse regular there rather than silently dropping text.
+  const oblique = path.join(DIR, `${base}-Oblique.ttf`);
+  doc.registerFont('bodyOblique', fs.existsSync(oblique) ? oblique : reg);
   return { regular: 'body', bold: 'bodyBold', oblique: 'bodyOblique', unicode: true };
 }
 

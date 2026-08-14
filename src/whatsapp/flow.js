@@ -320,7 +320,12 @@ async function activateTrial(session, mobile, stateCode) {
       `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
        VALUES ($1,$2,$3)
        ON CONFLICT (parent_mobile_number) DO UPDATE
-         SET state_code = EXCLUDED.state_code, modified_at = now()
+         -- Starting a trial (re)activates the family: clear any paused/deactivated
+         -- state so the scheduler resumes evening quizzes. This is what lets the
+         -- deactivated demo number come alive again for a live school pitch.
+         SET state_code = EXCLUDED.state_code,
+             is_active = true, service_paused = false,
+             reminders_enabled = true, paused_at = NULL, modified_at = now()
        RETURNING id`,
       [session.context.parent_name || 'Parent', mobile, stateCode])).rows[0].id;
 
@@ -331,7 +336,7 @@ async function activateTrial(session, mobile, stateCode) {
                   (SELECT id FROM mediums WHERE medium_code=$4),$5)
        ON CONFLICT (parent_id, student_name) DO UPDATE
          SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id,
-             medium_id=EXCLUDED.medium_id, modified_at=now()
+             medium_id=EXCLUDED.medium_id, is_active=true, modified_at=now()
        RETURNING id`,
       [parent, board_code, grade_code,
        session.context.medium_code || 'ENGLISH', student_name])).rows[0].id;
@@ -359,16 +364,21 @@ async function activateTrial(session, mobile, stateCode) {
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
       [session.id, parent]);
 
-    // Record who sent them, if anyone. Nothing is paid out here — the reward
-    // lands on their first payment, so a free trial cannot be farmed for days.
-    // Any failure is swallowed: a referral must never block an enrolment.
+    await c.query('COMMIT');
+
+    // Record who sent them, if anyone — AFTER commit, on the pool (NOT `c`).
+    // Nothing is paid out here; the reward lands on their first payment, so a
+    // free trial cannot be farmed for days. Critically, this must not run inside
+    // the enrolment transaction: any SQL error inside capture() aborts that
+    // transaction, and a swallowed JS error cannot un-abort Postgres — the
+    // COMMIT then fails and the whole enrolment (and the conversation) is lost.
+    // Isolating it on its own connection means a referral can never block an
+    // enrolment, which was the original intent.
     if (session.context?.referral_code) {
       try {
-        await require('../referrals/engine').capture(parent, session.context.referral_code, c);
+        await require('../referrals/engine').capture(parent, session.context.referral_code);
       } catch (e) { console.error('[flow] referral capture skipped:', e.message); }
     }
-
-    await c.query('COMMIT');
 
     // Operator alert, after COMMIT and never awaited: the parent's trial must
     // start whether or not the founder's notification email does.
@@ -504,6 +514,18 @@ async function processInbound(msg, contactName) {
 
   const text = extractText(msg);
   const id = extractId(msg);
+
+  // DEMO number: run the demo's own taps and the word "demo"; force a GREETING
+  // to start from the WELCOME message (a school pitch wants the fresh first-time
+  // journey, not the returning-user menu — the number keeps a deactivated parent
+  // record). EVERYTHING ELSE (subscribe, the payment link, support …) still
+  // works exactly like any other parent. Unset DEMO_MOBILE to disable.
+  const demo = require('./demo');
+  if (demo.isDemo(mobile)) {
+    if (demo.owns(text, id)) { await demo.handle(session, mobile, msg, text, id); return; }
+    if (isGreeting(text)) { await showWelcome(session, mobile); return; }
+  }
+
   const ctx = await getUserContext(mobile);
   if (contactName && !session.context.parent_name) {
     await mergeContext(session, { parent_name: contactName });
@@ -562,7 +584,7 @@ async function processInbound(msg, contactName) {
     if (rows.length) {
       await wa.sendText(session.id, mobile,
         `🔔 *Welcome back!* Everything is switched on again.\n\n` +
-        `Your child's next quiz arrives at its usual time this evening.`);
+        `Your child's quiz is open all day — take it any time before 11:45 PM.`);
       // Show the menu rather than asking them to type "menu". START also reads
       // as a greeting, so whichever way the parent meant it, they get both the
       // resume and the options — and the session lands in a known state.
@@ -582,7 +604,7 @@ async function processInbound(msg, contactName) {
 • *stop* — pause all messages
 • *start* — turn everything back on
 
-Your child's quiz link arrives automatically each evening — just tap the button in that message.
+You'll get a *Start Quiz* reminder each morning — the quiz is open all day, so take it any time before 11:45 PM.
 
 Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
@@ -686,7 +708,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
         await wa.sendText(session.id, mobile,
           `🎁 *${first} invited you to QuizPe!*\n\n` +
-          `Start your free trial below. When you subscribe, you *both* get free days added.`);
+          `Start your *free 7-day trial* below — no app, no login. Just say hi and today's quiz begins.`);
       } else {
         // Unknown code — remember it anyway so a typo can be looked at later,
         // but say nothing; a stranger typing "JOIN" should not get an error.
@@ -717,6 +739,24 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
   }
   if (id === 'MKT_INVITE' || /(get my invite|invite link|refer a friend)/.test(mkt)) {
     await handleMenuChoice(session, mobile, ctx, 'refer_friend');
+    return;
+  }
+
+  // "Re-open ticket" — from the resolution message's quick-reply button, or if
+  // the parent types it. Puts their most recently closed ticket back to OPEN so
+  // it resurfaces in the admin Support board.
+  if ((id && id.startsWith('reopen_')) || id === 'REOPEN_TICKET' || /re-?open( (my )?ticket)?/.test(mkt)) {
+    const t = await require('../routers/supportWebRouter').reopenLatestClosed(mobile);
+    if (t) {
+      console.log(`[flow] ticket ${t.ticket_no} re-opened by ${mobile} (re-open #${t.reopen_count})`);
+      await wa.sendText(session.id, mobile,
+`↩️ *Ticket ${t.ticket_no} re-opened.*
+
+Sorry that didn't fully solve it. Our team will take another look and get back to you — you can add any more details by replying here.`);
+    } else {
+      await wa.sendText(session.id, mobile,
+        "We couldn't find a recently closed ticket to re-open. Type *menu*, then *Support*, to raise a new request.");
+    }
     return;
   }
 
@@ -787,9 +827,9 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         await setState(session, 'awaiting_form', 'agreed_trial');
         await wa.sendCtaUrl(session.id, mobile, {
           header: '🎉 One last step!',
-          body: `Your child's *7-day FREE trial* is ready — tonight's quiz can go out in just a few hours. 🌟\n\n`
+          body: `Your child's *7-day FREE trial* is ready — the first quiz can start today. 🌟\n\n`
             + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
-            + `👇 Tap below and you're done — the first quiz lands on this chat tonight.`,
+            + `👇 Tap below and you're done — the first quiz is ready right after.`,
           displayText: '✅ Fill child form',
           url,
           footer: 'Free for 7 days · no card · ~30 seconds',
@@ -909,7 +949,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
 
     case 'active':
     default:
-      await showMainMenu(session, mobile, ctx);
+      await sendUnrecognized(session, mobile, ctx);
   }
 }
 
@@ -981,6 +1021,49 @@ Tap below to enter your child${plan.student_count > 1 ? 'ren\'s' : "'s"} details
   });
 }
 
+/** Send the "raise a request" support form link. */
+async function sendSupportForm(session, mobile, ctx) {
+  const { createSupportLink } = require('../routers/supportWebRouter');
+  const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
+  const b = await M.business();
+  await wa.sendCtaUrl(session.id, mobile, {
+    header: 'Support',
+    body: `💬 *We're here to help!*
+
+Tap below to raise a request — pick what it's about, describe the issue, and you'll get a ticket number straight away.
+
+📧 ${b.support_email}
+🌐 ${b.product_website}`,
+    displayText: '🛠️ Raise a request',
+    url,
+    footer: `${b.company_name}`,
+  });
+}
+
+/**
+ * Unrecognized free text (e.g. "I want Hindi", "add Biology", a long sentence).
+ * Instead of silently re-showing the menu, we acknowledge it and invite the user
+ * to send the query/suggestion through the contact form — so their message is
+ * actually captured — while reminding them the menu is a *menu* away.
+ */
+async function sendUnrecognized(session, mobile, ctx) {
+  try {
+    const { createSupportLink } = require('../routers/supportWebRouter');
+    const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
+    await wa.sendCtaUrl(session.id, mobile, {
+      body: `🙂 I didn't quite catch that.\n\n`
+        + `If you have any question or suggestion about QuizPe, tap below and tell us — we read every message.\n\n`
+        + `_Or type *menu* for options._`,
+      displayText: '💬 Ask / suggest',
+      url,
+      footer: 'QuizPe · ServerPe App Solutions',
+    });
+  } catch (e) {
+    console.error('[flow] unrecognized-input reply failed:', e.message);
+    await showMainMenu(session, mobile, ctx);   // if the link can't be minted, fall back to the menu
+  }
+}
+
 async function handleMenuChoice(session, mobile, ctx, choice) {
   const students = await getStudents(ctx.parentId);
 
@@ -1001,18 +1084,35 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
         await wa.sendText(session.id, mobile, 'No child enrolled yet. Type *menu* to get started.');
         break;
       }
-      // Multiple children -> let the parent choose whose quiz to take.
-      if (students.length > 1) {
+      // Hide any child who has ALREADY taken today's quiz (completed/closed, or
+      // every question answered) — no point offering to "start" a done quiz.
+      const doneRows = (await db.query(
+        `SELECT DISTINCT t.student_id FROM quizpe_tracker t
+          WHERE t.quiz_date = CURRENT_DATE AND t.student_id = ANY($1::bigint[])
+            AND ( EXISTS (SELECT 1 FROM quizpe_status qs WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
+               OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                    AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) )`,
+        [students.map(s => s.id)])).rows;
+      const done = new Set(doneRows.map(r => Number(r.student_id)));
+      const pending = students.filter(s => !done.has(Number(s.id)));
+
+      if (!pending.length) {
+        await wa.sendText(session.id, mobile,
+          "✅ Today's quiz is already complete. Your next quiz will be ready tomorrow evening — see you then! 🌙");
+        break;
+      }
+      // Multiple children still pending -> let the parent choose whose quiz to take.
+      if (pending.length > 1) {
         await wa.sendList(session.id, mobile, {
           header: '▶️ Start quiz',
           text: 'Which child is taking the quiz now?',
           buttonText: 'Choose child',
-          rows: students.map(s => ({ id: `child_${s.id}`, title: s.student_name.slice(0, 24),
+          rows: pending.map(s => ({ id: `child_${s.id}`, title: s.student_name.slice(0, 24),
             description: `${s.board_code} · ${s.grade_name}` })),
         });
         break;
       }
-      await beginQuizFor(session, mobile, students[0], 1);
+      await beginQuizFor(session, mobile, pending[0], pending.length);
       break;
     }
 
@@ -1072,42 +1172,45 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
           : '';
 
       await wa.sendText(session.id, mobile,
-`🎁 *Give ${s.reward_days} days, get ${s.reward_days} days*
+`🎁 *Earn ${s.reward_days} free days*
 
-Share the message below with another parent. When they subscribe, *you both* get *${s.reward_days} free days* added to your plan.
+Share the message below with another parent. When they join and start their quizzes, *you* get *${s.reward_days} free days* added to your plan.
 
 Your code: *${s.code}*${earned}
 
 _Forward the next message 👇_`);
 
       await wa.sendText(session.id, mobile,
-`My child does a 10-question maths quiz every evening on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
+`My child does a 10-question maths quiz every day on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
 
-Try it free, and we both get ${s.reward_days} bonus days:
+Try it free for 7 days — no app, no login:
 ${s.link || `Message and send: JOIN ${s.code}`}`);
       break;
     }
 
     case 'support': {
-      // A form, so every query arrives categorised and with a ticket number —
-      // far better than "reply with your question" free text in chat.
-      const { createSupportLink } = require('../routers/supportWebRouter');
-      const { url } = await createSupportLink(session.id, mobile, ctx.parentId);
-      const b = await M.business();
-      await wa.sendCtaUrl(session.id, mobile, {
-        header: 'Support',
-        body: `💬 *We're here to help!*
+      // If they have a recently CLOSED ticket, offer to re-open it (this is the
+      // "re-open in the Support option" the resolution message points them to);
+      // otherwise go straight to the new-request form.
+      const m10 = String(mobile).replace(/\D/g, '').slice(-10);
+      const closed = (await db.query(
+        `SELECT id, ticket_no FROM support_tickets
+          WHERE mobile_number=$1 AND status='closed'
+          ORDER BY resolved_at DESC NULLS LAST, id DESC LIMIT 1`, [m10])).rows[0];
+      if (closed) {
+        await wa.sendButtons(session.id, mobile,
+`💬 *Support*
 
-Tap below to raise a request — pick what it's about, describe the issue, and you'll get a ticket number straight away.
-
-📧 ${b.support_email}
-🌐 ${b.product_website}`,
-        displayText: '🛠️ Raise a request',
-        url,
-        footer: `${b.company_name}`,
-      });
+Your last ticket *${closed.ticket_no}* was marked resolved. If that didn't fully solve it, re-open it — otherwise raise a new request.`,
+          [{ id: `reopen_${closed.id}`, title: 'Re-open ticket' }, { id: 'support_new', title: 'New request' }]);
+        break;
+      }
+      await sendSupportForm(session, mobile, ctx);
       break;
     }
+    case 'support_new':
+      await sendSupportForm(session, mobile, ctx);
+      break;
 
     default:
       await showMainMenu(session, mobile, ctx);
@@ -1148,33 +1251,27 @@ async function quizNotYetOpen(studentId) {
 /** Schedule + start today's quiz for one specific child. */
 async function beginQuizFor(session, mobile, st, siblingCount) {
   try {
-      // The quiz is available anywhere inside the evening window, not only at
-      // this parent's notification slot. Their slot decides when we MESSAGE
-      // them; the window decides when the child may ANSWER. Nothing is created
-      // before the window opens — an early tap would consume today's questions
-      // and the evening message would then announce a quiz already taken.
+      // The quiz is open ALL DAY (06:00–23:45); a child may answer any time in
+      // that window. Nothing is created before it opens — an early tap would
+      // consume today's questions before the day begins.
       const W = require('./quizWindow');
       const where = W.state();
 
-      if (where === 'before') {
-        const at = await quizTimeOf(st.id);
+      if (where === 'before') {   // only before 06:00 — rare
         await wa.sendText(session.id, mobile,
-          `⏰ Tonight's quiz opens at *${M.fmtTime(W.OPEN_HHMM)}*.\n\n` +
-          `${st.student_name} can take it any time after that, right up to *${M.fmtTime(W.CLOSE_HHMM)}*` +
-          `${at ? ` — we'll nudge you at *${M.fmtTime(at)}*` : ''}. See you this evening! 🌙`);
+          `⏰ Today's quiz opens at *${M.fmtTime(W.OPEN_HHMM)}*.\n\n` +
+          `${st.student_name} can then take it any time until *${M.fmtTime(W.CLOSE_HHMM)}* — whenever suits you. See you soon! ☀️`);
         return;
       }
 
-      if (where === 'closed') {
-        const at = await quizTimeOf(st.id);
+      if (where === 'closed') {   // after 23:45
         await wa.sendText(session.id, mobile,
-          `🌙 Tonight's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
-          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.OPEN_HHMM)}*` +
-          `${at ? `, and we'll remind you around *${M.fmtTime(at)}*` : ''}. Sleep well! 😴`);
+          `🌙 Today's quiz has closed (it stays open until *${M.fmtTime(W.CLOSE_HHMM)}*).\n\n` +
+          `${st.student_name}'s next one opens tomorrow at *${M.fmtTime(W.OPEN_HHMM)}* — take it any time during the day. Sleep well! 😴`);
         return;
       }
 
-      // The 8 PM job already creates today's trackers; this is the safety net
+      // The morning job already creates today's trackers; this is the safety net
       // for anyone starting a quiz outside that path (menu, or a first quiz on
       // signup day). Idempotent, so calling it twice costs nothing.
       await Q.scheduleDailyQuizzes(st.id);

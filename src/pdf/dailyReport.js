@@ -33,12 +33,15 @@ const C = {
   warn: '#b8860b', line: '#e2e6e9', soft: '#f6f8f9', white: '#ffffff', gold: '#c99700',
 };
 
+// Warm, growth-oriented performance bands — no A/B/C/D letters. Parents read a
+// low letter grade as a report-card verdict on their child; an encouraging word
+// keeps the daily quiz feeling like practice, not an exam result.
 function gradeFor(pct) {
-  if (pct >= 90) return { grade: 'A+', label: 'Outstanding', color: C.ok };
-  if (pct >= 75) return { grade: 'A',  label: 'Very good',   color: C.ok };
-  if (pct >= 60) return { grade: 'B',  label: 'Good',        color: C.accent };
-  if (pct >= 40) return { grade: 'C',  label: 'Fair',        color: C.warn };
-  return { grade: 'D', label: 'Needs practice', color: C.bad };
+  if (pct >= 90) return { grade: 'Star',    label: 'Outstanding',     color: C.ok };
+  if (pct >= 75) return { grade: 'Great',   label: 'Very good',       color: C.ok };
+  if (pct >= 60) return { grade: 'Good',    label: 'Well done',       color: C.accent };
+  if (pct >= 40) return { grade: 'Growing', label: 'Getting there',   color: C.warn };
+  return { grade: 'Practice', label: 'Keep practising', color: C.bad };
 }
 
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -276,7 +279,7 @@ async function generateDailyReport(trackerId) {
   const q = (W - 36) / 4, ph = 78;
   const cards = [
     { t: 'Score', big: `${correct}/${total}`, sub: `${pct}%`, color: C.ink },
-    { t: 'Grade', big: g.grade, sub: g.label, color: g.color },
+    { t: 'Performance', big: g.grade, sub: g.label, color: g.color },
     { t: 'Accuracy', big: `${accuracy}%`, sub: `of ${answered} answered`, color: C.accent },
   ];
   cards.forEach((cc, i) => {
@@ -313,7 +316,7 @@ async function generateDailyReport(trackerId) {
       { t: 'Score', now: `${pct}%`, was: `${prev.score_pct}%`, d: dPct, unit: '%', better: dPct > 0 },
       { t: 'Correct answers', now: `${correct}/${total}`, was: `${prev.score_correct}/${prev.score_total}`,
         d: dCorrect, unit: '', better: dCorrect > 0 },
-      { t: 'Grade', now: g.grade, was: prev.grade || '—', d: null, unit: '', better: null },
+      { t: 'Performance', now: g.grade, was: prev.grade || '—', d: null, unit: '', better: null },
     ];
     if (dSpeed != null) {
       band.push({ t: 'Avg time / question', now: `${speed.avg_s}s`, was: `${prevSpeed.avg_s}s`,

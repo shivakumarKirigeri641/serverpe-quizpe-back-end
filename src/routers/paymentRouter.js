@@ -517,41 +517,23 @@ async function finalize(c, pay, mailCtx = null) {
     const { computePeriod } = require('../utils/subscriptionPeriod');
     const period = await computePeriod(client, parentId, c.duration);
 
-    // Launch offer — a parent's VERY FIRST paid plan (any tier: 99 / 169 / 249)
-    // gets +7 free days and a tree planted in their child's name. Checked BEFORE
-    // the new row is inserted; any prior non-trial subscription means this is a
-    // renewal, not a first, so the bonus never repeats.
-    const firstPremium = (await client.query(
-      `SELECT NOT EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s
-         JOIN quizpe_plans p ON p.id = s.plan_id
-        WHERE s.parent_id = $1 AND COALESCE(p.is_trial, false) = false) AS first`, [parentId])).rows[0].first;
-    let planEnd = period.endDate;
-    if (firstPremium) {
-      const d = new Date(`${period.endDate}T00:00:00`); d.setDate(d.getDate() + 7);
-      planEnd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    }
-
     const subId = (await client.query(
       `INSERT INTO parents_quizpe_subscriptions
          (parent_id, plan_id, plan_start_date, plan_end_date, quiz_time, reminder_time)
        VALUES ($1,$2,$3::date,$4::date,$5::time,$6::time)
        RETURNING id, plan_start_date, plan_end_date, quiz_time`,
-      [parentId, c.plan_id, period.startDate, planEnd,
+      [parentId, c.plan_id, period.startDate, period.endDate,
        slot.quiz_time, slot.reminder_time])).rows[0];
 
-    // Referral days granted on this payment, both funded by the payment itself:
-    //   • releaseBankedOnRenewal — the PAYER as a REFERRER: release one banked
-    //     referral bonus onto the new plan ("+7 per renewal").
-    //   • creditRefereeOnFirstPayment — the PAYER as a FRIEND who was referred:
-    //     a one-time +7 welcome bonus on their first paid plan.
-    // Both idempotent and inside the transaction, so the days cannot survive a
-    // rolled-back payment. A parent can legitimately receive both.
+    // Referral days on this payment — REFERRER-ONLY model. The friend gets NO
+    // bonus days (only their normal trial); only the referrer earns. Here that
+    // means releaseBankedOnRenewal: the PAYER acting as a REFERRER releases one
+    // banked referral bonus onto the new plan ("+7 per renewal"). Idempotent and
+    // inside the transaction, so the days cannot survive a rolled-back payment.
     const engine = require('../referrals/engine');
-    let referral = null, refereeBonus = null;
+    let referral = null;
     try { referral = await engine.releaseBankedOnRenewal(parentId, client); }
     catch (e) { console.error('[pay] referral release skipped:', e.message); }
-    try { refereeBonus = await engine.creditRefereeOnFirstPayment(parentId, client); }
-    catch (e) { console.error('[pay] referee bonus skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
     const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
@@ -593,12 +575,28 @@ async function finalize(c, pay, mailCtx = null) {
 📅 *Valid till:* ${M.fmtDate(subId.plan_end_date)}
 ⏰ *Quiz time:* ${M.fmtTime(subId.quiz_time)} daily
 🧾 *Invoice:* ${inv.invoiceNo}
-${firstPremium ? `\n🎁 *Launch bonus:* we've added *7 free days*, and we'll plant a real tree in ${students.length > 1 ? "your children's" : `${students[0].name}'s`} name! 🌱\n` : ''}${carried ? `\n${carried}\n` : ''}
+${carried ? `\n${carried}\n` : ''}
 Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀${period.stacked ? '' : `\n\n${M.parentGuidance(names)}`}`);
       await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
       });
+
+      // A warm thank-you, sent right AFTER the invoice. Uses an approved template
+      // (branded + reliable); skipped silently until Meta clears it, so nothing
+      // extra goes out until then. Params: {{1}} parent first name, {{2}} plan,
+      // {{3}} the child name(s) — pluralised so a 2- or 3-child plan reads right.
+      try {
+        const tplName = process.env.THANKYOU_TEMPLATE || 'qp_thankyou_v1';
+        if (await require('../whatsapp/lifecycle').approved(tplName)) {
+          const firstName = String(cart.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
+          const kn = students.map((s) => s.name).filter(Boolean);
+          const childLabel = kn.length <= 1 ? (kn[0] || 'your child')
+            : kn.length === 2 ? `${kn[0]} & ${kn[1]}`
+              : `${kn.slice(0, -1).join(', ')} & ${kn[kn.length - 1]}`;
+          await wa.sendTemplate(c.whatsapp_session_id, c.mobile_number, tplName, [firstName, c.plan_name, childLabel]);
+        }
+      } catch (e) { console.error('[pay] thank-you send:', e.message); }
 
       // If they subscribed while the quiz window is open, offer a one-tap start
       // now rather than making them wait for tonight's scheduled nudge.
@@ -616,14 +614,8 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
       const wa = require('../whatsapp/client');
       const M = require('../whatsapp/messages');
 
-      // As a REFERRED friend: their one-time welcome bonus on this first plan.
-      if (refereeBonus && refereeBonus.refereeNewEnd) {
-        await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-`🎁 *Referral welcome bonus — +${refereeBonus.days} free days!*
-
-Because you joined through a friend's invite, we've added *${refereeBonus.days} days* to your plan.
-📅 Now valid till *${M.fmtDate(refereeBonus.refereeNewEnd)}*`);
-      }
+      // (Referrer-only model: a referred friend gets NO welcome bonus — only the
+      // referrer earns, so there is no referee-bonus message here.)
 
       // As a REFERRER: one of their banked bonuses released onto this renewal.
       if (referral && referral.referrerNewEnd) {
@@ -668,21 +660,6 @@ A friend you invited earlier means we've added *${referral.days} days* to this r
         ctx: mailCtx || { channel: 'Checkout page', at: new Date(), sessionId: c.whatsapp_session_id },
       });
     } catch (e) { console.error('[pay] admin alert skipped:', e.message); }
-
-    // Record the launch tree pledge so the operator can plant it and showcase it
-    // on YouTube. Post-commit and best-effort — a missing table or error here can
-    // never unwind a payment the parent has already made.
-    if (firstPremium) {
-      try {
-        await db.query(`CREATE TABLE IF NOT EXISTS tree_pledges (
-          id bigserial PRIMARY KEY, parent_id bigint, mobile_number text, child_names text,
-          plan_name text, planted boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`);
-        await db.query(
-          `INSERT INTO tree_pledges (parent_id, mobile_number, child_names, plan_name) VALUES ($1,$2,$3,$4)`,
-          [parentId, c.mobile_number, students.map((s) => s.name).join(', '), c.plan_name]);
-        console.log(`[pay] 🌱 tree pledge for ${c.mobile_number} — ${students.map((s) => s.name).join(', ')}`);
-      } catch (e) { console.error('[pay] tree pledge skipped:', e.message); }
-    }
 
     return { invoice: inv.invoiceNo, end_date: subId.plan_end_date };
   } catch (e) {

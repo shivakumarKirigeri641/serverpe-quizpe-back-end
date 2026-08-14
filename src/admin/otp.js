@@ -40,10 +40,20 @@ const RESEND_SEC = process.env.ADMIN_OTP_RESEND_SEC != null
   ? Number(process.env.ADMIN_OTP_RESEND_SEC) : 10;
 const IS_PROD   = process.env.NODE_ENV === 'production';
 
+// TEMPORARY, cost-saving: a FIXED admin OTP so sign-in never spends an SMS
+// credit (~₹0.25 each) during the small-scale phase. When set, no SMS is sent —
+// the same code always works for an allowed admin number.
+//   ⚠️ SECURITY: a fixed code means anyone who learns it can sign in as an
+//   allowed admin. Revert before wider rollout by setting ADMIN_OTP_FIXED=''
+//   (empty) in the environment, which restores random codes sent over SMS.
+// Defaults to '6146' as requested; override or clear via ADMIN_OTP_FIXED.
+const FIXED_OTP = process.env.ADMIN_OTP_FIXED != null ? process.env.ADMIN_OTP_FIXED : '6146';
+
 const hash = (code) => crypto.createHash('sha256').update(String(code)).digest('hex');
 
-/** 4 digits, drawn from a CSPRNG rather than Math.random. */
+/** 4 digits, drawn from a CSPRNG — unless a fixed code is configured. */
 function generate() {
+  if (FIXED_OTP) return FIXED_OTP;
   return String(crypto.randomInt(0, 10000)).padStart(4, '0');
 }
 
@@ -52,6 +62,11 @@ function generate() {
  * running without a key in development.
  */
 async function deliver(mobile, code) {
+  // Fixed-code mode: skip the SMS entirely (this is the whole point — no cost).
+  if (FIXED_OTP) {
+    console.warn(`[admin-otp] FIXED code active — no SMS sent for ${mobile}. Clear ADMIN_OTP_FIXED before scaling.`);
+    return null;
+  }
   if (!API_KEY) {
     if (IS_PROD) throw new Error('FAST2SMSAPIKEY is not set — cannot send admin OTP.');
     console.warn(`[admin-otp] no FAST2SMS_API_KEY — dev fallback, code for ${mobile} is ${code}`);

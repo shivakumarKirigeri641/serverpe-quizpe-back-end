@@ -107,7 +107,7 @@ router.get('/broadcast/options', requireAdmin, async (req, res) => {
   try {
     await ensureSchema();
     const { rows: templates } = await db.query(
-      `SELECT template_name, send_context, header_text, body_text, footer_text, buttons FROM whatsapp_templates
+      `SELECT template_name, send_context, header_text, body_text, footer_text, buttons, variables FROM whatsapp_templates
         WHERE is_active AND approval_status='APPROVED' ORDER BY template_name`);
     const segCounts = {};
     for (const key of Object.keys(SEGMENTS)) segCounts[key] = (await recipients(key)).length;
@@ -129,21 +129,33 @@ router.post('/broadcast/preview', requireAdmin, express.json(), async (req, res)
       no_session: all.length - withSession.length,
       skipped_cooldown: skippedCooldown,
       recipients: keep.length,
+      // the actual people who WILL receive it, so the admin can glance before sending
+      list: keep.slice(0, 500).map((r) => ({ name: r.name, mobile: r.mobile_number })),
     });
   } catch (e) { console.error('[admin] broadcast preview:', e.message); fail(res, 500, 'Could not preview.'); }
 });
 
 /** Send the template to the segment, respecting the guardrails. */
 router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) => {
-  const { template, segment, cooldownDays = 7 } = req.body || {};
+  const { template, segment, cooldownDays = 7, params = [] } = req.body || {};
   if (!SEGMENTS[segment]) return fail(res, 400, 'Pick a valid segment.');
   if (!template) return fail(res, 400, 'Pick a template.');
   try {
     await ensureSchema();
-    // template must be APPROVED
+    // template must be APPROVED — also read its variables to validate the fill
     const { rows: [t] } = await db.query(
-      `SELECT 1 FROM whatsapp_templates WHERE template_name=$1 AND is_active AND approval_status='APPROVED'`, [template]);
+      `SELECT variables FROM whatsapp_templates WHERE template_name=$1 AND is_active AND approval_status='APPROVED'`, [template]);
     if (!t) return fail(res, 400, 'That template is not approved.');
+
+    // {{1}} is ALWAYS the recipient's first name (filled per-parent below); the
+    // admin supplies the remaining variables ({{2}}..{{n}}) as free text. Validate
+    // the count so Meta never rejects the whole batch for a missing parameter.
+    const vars = Array.isArray(t.variables) ? t.variables
+      : (() => { try { return JSON.parse(t.variables || '[]'); } catch { return []; } })();
+    const extra = Array.isArray(params) ? params.map((x) => String(x ?? '').trim()) : [];
+    const need = Math.max(0, vars.length - 1);
+    if (extra.length !== need) return fail(res, 400, `This template needs ${need} text value(s) after the name.`);
+    if (extra.some((v) => !v)) return fail(res, 400, 'Please fill every text field before sending.');
 
     const all = await recipients(segment);
     const withSession = all.filter((r) => r.session_id);
@@ -153,7 +165,7 @@ router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) =>
     let sent = 0, failed = 0;
     for (const r of keep) {
       try {
-        const id = await wa.sendTemplate(r.session_id, r.mobile_number, template, [r.name]);
+        const id = await wa.sendTemplate(r.session_id, r.mobile_number, template, [r.name, ...extra]);
         await db.query(
           `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
            VALUES ($1,$2,$3,'sent',$4)`, [r.mobile_number, template, segment, id || null]);
@@ -169,6 +181,78 @@ router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) =>
     console.log(`[broadcast] ${template} -> ${segment}: ${sent} sent, ${failed} failed`);
     ok(res, { sent, failed });
   } catch (e) { console.error('[admin] broadcast send:', e.message); fail(res, 500, 'Broadcast failed.'); }
+});
+
+/**
+ * Send an approved template to a SPECIFIC list of mobile numbers (one-off), not
+ * a whole segment. Numbers are resolved to a parent name + session where known;
+ * unknown numbers still receive it (templates can open a conversation), with a
+ * generic greeting. STOP/paused parents are always skipped. `dryRun` returns the
+ * resolved recipient list for the preview without sending.
+ */
+const normMobile = (m) => String(m || '').replace(/\D/g, '').slice(-10);
+
+router.post('/broadcast/direct', requireAdmin, express.json(), async (req, res) => {
+  const { template, params = [], mobiles, dryRun } = req.body || {};
+  if (!template) return fail(res, 400, 'Pick a template.');
+  const uniq = [...new Set(String(mobiles || '').split(/[\s,;]+/).map(normMobile).filter((m) => m.length === 10))];
+  if (!uniq.length) return fail(res, 400, 'Enter at least one valid 10-digit mobile number.');
+
+  try {
+    await ensureSchema();
+    // template must be APPROVED; validate the free-text fill (same rules as /send)
+    const { rows: [t] } = await db.query(
+      `SELECT variables FROM whatsapp_templates WHERE template_name=$1 AND is_active AND approval_status='APPROVED'`, [template]);
+    if (!t) return fail(res, 400, 'That template is not approved.');
+    const vars = Array.isArray(t.variables) ? t.variables
+      : (() => { try { return JSON.parse(t.variables || '[]'); } catch { return []; } })();
+    const extra = Array.isArray(params) ? params.map((x) => String(x ?? '').trim()) : [];
+    const need = Math.max(0, vars.length - 1);
+    if (!dryRun) {   // the preview only resolves recipients; text is enforced on the real send
+      if (extra.length !== need) return fail(res, 400, `This template needs ${need} text value(s) after the name.`);
+      if (extra.some((v) => !v)) return fail(res, 400, 'Please fill every text field before sending.');
+    }
+
+    // resolve name / session / STOP flag for the numbers that are known parents
+    const { rows: known } = await db.query(
+      `SELECT p.parent_mobile_number AS mobile,
+              COALESCE(NULLIF(split_part(p.parent_name,' ',1),''),'there') AS name,
+              p.service_paused,
+              (SELECT id FROM whatsapp_sessions w WHERE w.mobile_number=p.parent_mobile_number AND w.is_active
+                ORDER BY id DESC LIMIT 1) AS session_id
+         FROM parents p WHERE p.parent_mobile_number = ANY($1::text[])`, [uniq]);
+    const byMobile = Object.fromEntries(known.map((k) => [k.mobile, k]));
+    const recips = uniq.map((m) => byMobile[m]
+      || { mobile: m, name: 'there', service_paused: false, session_id: null, unknown: true });
+
+    if (dryRun) {
+      return ok(res, {
+        total: recips.length,
+        paused: recips.filter((r) => r.service_paused).length,
+        recipients: recips.map((r) => ({ mobile: r.mobile, name: r.name, paused: !!r.service_paused, known: !r.unknown })),
+      });
+    }
+
+    let sent = 0, failed = 0, skipped = 0;
+    for (const r of recips) {
+      if (r.service_paused) { skipped++; continue; }     // never message someone who sent STOP
+      try {
+        const id = await wa.sendTemplate(r.session_id, r.mobile, template, [r.name, ...extra]);
+        await db.query(
+          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
+           VALUES ($1,$2,'direct','sent',$3)`, [r.mobile, template, id || null]);
+        sent++;
+      } catch (e) {
+        await db.query(
+          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, error_message)
+           VALUES ($1,$2,'direct','failed',$3)`, [r.mobile, template, e.message]);
+        failed++;
+      }
+      await new Promise((r2) => setTimeout(r2, 250));      // stay under Meta's rate limit
+    }
+    console.log(`[broadcast] ${template} -> direct(${recips.length}): ${sent} sent, ${failed} failed, ${skipped} skipped(STOP)`);
+    ok(res, { sent, failed, skipped });
+  } catch (e) { console.error('[admin] broadcast direct:', e.message); fail(res, 500, 'Direct send failed.'); }
 });
 
 module.exports = router;

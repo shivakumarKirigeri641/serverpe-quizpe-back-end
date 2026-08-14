@@ -49,10 +49,8 @@ India's simplest daily learning habit for school kids, right here on WhatsApp. N
 ✅ Instant answers with kid-friendly explanations
 📊 Weekly progress reports for parents
 
-By continuing you agree to our *Terms of Service* and *Privacy Policy*.
-${publicUrl(terms.url)}
-
-_${terms.summary}_`,
+By continuing, you accept our *Terms & Privacy Policy* of QuizPe. 😊
+${publicUrl(terms.url)}`,
     footer: `${b.company_name}`,
     policyId: terms.id,
   };
@@ -131,7 +129,7 @@ Type *menu* to see your options.`;
 *Plan:* ${ctx.planName}${ctx.isTrial ? ' _(free trial)_' : ''}
 *Valid till:* ${fmtDate(ctx.endDate)}
 *Days remaining:* ${ctx.daysLeft}
-*Quiz time:* ${fmtTime(ctx.quizTime)} daily
+*Quiz:* open all day — take it any time (6 AM–11:45 PM)
 
 *Children enrolled* (${students.length}/${ctx.seatLimit}):
 ${students.map(s => `👦 *${s.student_name}* — ${s.board_code} · ${s.grade_name}` +
@@ -144,12 +142,12 @@ function quizSchedule(ctx, students) {
   if (!ctx.isSubscribed) return `📅 No active subscription — no quizzes scheduled.\n\nType *menu* to get started.`;
   return `📅 *Upcoming Quiz Schedule*
 
-⏰ *Every day at ${fmtTime(ctx.quizTime)}*
+⏰ *Open all day, every day* — 6 AM to 11:45 PM
 📆 Until *${fmtDate(ctx.endDate)}* (${ctx.daysLeft} days left)
 
 ${students.map(s => `👦 *${s.student_name}* — Mathematics · ${s.board_code} ${s.grade_name}`).join('\n')}
 
-You'll get a message with a *Start Quiz* button each evening. 15 questions, under 10 minutes. 🚀`;
+You'll get a *Start Quiz* reminder each morning — take it any time before 11:45 PM. 15 questions, under 10 minutes. 🚀`;
 }
 
 /**
@@ -174,7 +172,7 @@ async function quizReport(students) {
   if (!rows.length) {
     return `📊 *Quiz Report*
 
-No quizzes completed yet. Your first quiz arrives this evening — see you then! 🌱`;
+No quizzes completed yet. Your first quiz is ready — take it any time today! 🌱`;
   }
 
   // Show the scores in chat, but gate the actual PDFs behind an OTP portal so
@@ -184,7 +182,7 @@ No quizzes completed yet. Your first quiz arrives this evening — see you then!
 ${rows.map(r => {
     const emoji = r.score_pct >= 80 ? '🌟' : r.score_pct >= 50 ? '👍' : '💪';
     return `${emoji} *${fmtDate(r.quiz_date)}* — ${r.subject_name || 'Quiz'}\n` +
-           `   ${r.student_name}: *${r.score_correct}/${r.score_total}* (${r.score_pct}%) · Grade *${r.grade}*`;
+           `   ${r.student_name}: *${r.score_correct}/${r.score_total}* (${r.score_pct}%) · *${r.grade}*`;
   }).join('\n\n')}
 
 📥 Tap below to download the full reports — you'll get a one-time code on WhatsApp to open them.`;
@@ -228,43 +226,28 @@ _Reply with your question and we'll get back to you within 24–48 hours._`;
  *
  * @returns {{ first: string, signOff: string }}
  */
-function firstQuizLines({ studentName, quizTime, boardCode, gradeName }) {
+function firstQuizLines({ studentName, boardCode, gradeName }) {
   const qw = require('./quizWindow');
-  const nowMin = qw.toMin(qw.nowHHMM());
-  const slotMin = qw.toMin(String(quizTime).slice(0, 5));
   const detail = `15 fun questions right here on WhatsApp — matched to the ${boardCode} ${gradeName} `
     + `syllabus for this month. Every answer comes with a simple explanation, so learning happens `
     + `even from mistakes. 💡`;
 
-  // The slot is still ahead of us today — the original promise holds.
-  if (slotMin > nowMin) {
-    return {
-      first: `Tonight at ${fmtTime(quizTime)}, ${studentName} gets ${detail}`,
-      signOff: `_See you at ${fmtTime(quizTime)}!_ 🚀`,
-    };
-  }
-
-  // Slot gone, but the window is still open: the quiz can be taken now. A
-  // "Start quiz now" BUTTON is sent straight after this message (see the
-  // enrolment handlers), so the parent taps rather than hunts through a menu.
+  // The quiz is open ALL DAY (6 AM–11:45 PM). If we're inside that window it can
+  // be taken right now — a "Start quiz now" button follows this message.
   if (qw.state() === 'open') {
     return {
-      first: `${studentName}'s daily quiz time is *${fmtTime(quizTime)}*, starting tomorrow.\n\n`
-        + `*Tonight's quiz is ready right now* — ${detail}\n\n`
-        + `It stays open until ${fmtTime(qw.CLOSE_HHMM)} tonight.`,
-      // No "tap the button below" here — the button is a separate interactive
-      // message (see offerStartQuizIfOpen), which carries its own prompt. A
-      // "tap below" in this plain-text bubble pointed at a button that isn't in
-      // it, which read as broken.
+      first: `*${studentName}'s first quiz is ready right now* — ${detail}\n\n`
+        + `Take it any time before ${fmtTime(qw.CLOSE_HHMM)} today.`,
       signOff: `_Ready whenever ${studentName} is._ 🚀`,
       windowOpen: true,
     };
   }
 
-  // Too late in the evening for today — tomorrow it is.
+  // Before it opens (very early morning) — available shortly, any time of day.
   return {
-    first: `${studentName}'s first quiz arrives *tomorrow at ${fmtTime(quizTime)}* — ${detail}`,
-    signOff: `_See you tomorrow at ${fmtTime(quizTime)}!_ 🚀`,
+    first: `${studentName}'s daily quiz — ${detail}\n\n`
+      + `It's open every day from ${fmtTime(qw.OPEN_HHMM)} to ${fmtTime(qw.CLOSE_HHMM)} — take it any time.`,
+    signOff: `_Any time that suits you._ 🚀`,
   };
 }
 
@@ -276,7 +259,7 @@ function trialActivated({ parentName, studentName, boardCode, gradeName, endDate
 📚 *Board / Grade:* ${boardCode} · ${gradeName}
 📖 *Subject:* Mathematics
 📅 *Valid till:* ${fmtDate(endDate)}
-⏰ *Quiz time:* ${fmtTime(quizTime)}, every single day
+⏰ *Take it any time:* 6 AM–11:45 PM, every day
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 *What happens now?*
@@ -310,7 +293,31 @@ Please *guide ${who}, but let ${who} answer* — never give the answer yourself.
 After every quiz we send a *full explanation for each question, a summary and a report* — so learning happens even from the ones ${who} gets wrong. 💡`;
 }
 
+/**
+ * Our social channels. Kept here (env-overridable) rather than in the DB
+ * because they change about once a year, not per deploy. Growth lives on these
+ * two — YouTube (subscribe) and Instagram (follow) — so any invite copy pulls
+ * from one place and can never drift between messages.
+ */
+const SOCIAL = {
+  youtube: process.env.YOUTUBE_URL || 'https://www.youtube.com/@QuizPeIndia',
+  instagram: process.env.INSTAGRAM_URL || 'https://www.instagram.com/quizpeindia',
+};
+
+/**
+ * A short "follow us" block appended to the end-of-quiz thank-you. Plain text
+ * with bare URLs, which WhatsApp auto-links — deliberately NOT buttons: a CTA
+ * message allows only one, and that slot is the rating. Kept to two lines so it
+ * never overshadows the quiz result above it.
+ */
+function socialInvite() {
+  return `\n\n📣 *Enjoying QuizPe? Help us reach more kids:*\n`
+    + `▶️ Subscribe on YouTube → ${SOCIAL.youtube}\n`
+    + `📸 Follow on Instagram → ${SOCIAL.instagram}`;
+}
+
 module.exports = {
   welcome, trialTerms, plansList, subscriptionDetails,
   quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, parentGuidance, business, fmtDate, fmtTime,
+  SOCIAL, socialInvite,
 };

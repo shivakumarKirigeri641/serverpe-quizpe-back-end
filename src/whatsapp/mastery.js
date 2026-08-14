@@ -22,6 +22,20 @@ const CFG = {
   EXPOSURE_CAP: 25,           // move the frontier forward after this many attempts
                               // even if not mastered, so a child never freezes —
                               // the weak chapter keeps coming back until mastered
+
+  // A chapter must be the frontier for at least this many DAYS before mastery can
+  // promote it — even for a child scoring 100%. Without this, a fast learner
+  // clears a chapter in a quiz or two and the frontier races AHEAD of what the
+  // school has actually taught, so the quiz asks chapters "not yet started"
+  // (real parent feedback). Six days keeps advancement to ~1 chapter/week, in
+  // step with a normal classroom, while leaving the child plenty of fresh, varied
+  // revision on the current chapter meanwhile. The EXPOSURE_CAP escape hatch is
+  // NOT time-gated, so a genuinely stuck child still moves on. Set to 0 to
+  // restore the old instant-on-mastery behaviour.
+  MIN_DAYS_ON_LEVEL: Number(process.env.MASTERY_MIN_DAYS_ON_LEVEL ?? 6),
+  // A student with fewer than this many total answers is treated as brand-new
+  // and eased in — a gentler, more foundational mix while they find their feet.
+  EASE_IN_ANSWERED: Number(process.env.MASTERY_EASE_IN_ANSWERED ?? 24),
   REINFORCE_RATIO: 0.4,       // daily share for weak (unmastered) earlier chapters
   FRONTIER_RATIO: 0.4,        // daily share for the current/newest chapter
   // remaining ~0.2 = spaced revision of already-mastered chapters
@@ -33,7 +47,10 @@ const CFG = {
   // reads it as failure. One or two questions is curiosity; five is a wall.
   PREVIEW_ACCURACY: 0.85,     // must be doing better than "mastered" to earn it
   PREVIEW_MIN_ANSWERED: 8,    // and have answered enough for that to mean anything
-  PREVIEW_MAX: 2,             // never more than this many, whatever the quiz length
+  // Next-chapter "stretch" questions. Turned OFF by default: they deliberately
+  // showed material the school may not have taught, which is exactly the "not yet
+  // started" complaint. Set MASTERY_PREVIEW_MAX=2 to bring the taste back.
+  PREVIEW_MAX: Number(process.env.MASTERY_PREVIEW_MAX ?? 0),
 
   MAX_PER_SHAPE: 2,           // most questions of one TEMPLATE in a single quiz
   MAX_PER_CONCEPT: 3,         // most questions testing one SKILL in a single quiz
@@ -76,10 +93,30 @@ const CONCEPT_SQL = `
     ELSE 'other'
   END`;
 
-/** Ordered chapters for a student's board/grade/subject/medium (seq 1..N). */
+/**
+ * The academic calendar: chapters are taught June → March (April/May = break).
+ * A chapter's ORIGIN month (min revision) says which month it belongs to, so the
+ * quiz can be anchored to the DATE — serve "June up to today's month", never a
+ * future month the class has not reached. This is the school pace, month-wise.
+ */
+const ACAD_ORDER = [6, 7, 8, 9, 10, 11, 12, 1, 2, 3];   // June … March
+const acadRank = (m) => ACAD_ORDER.indexOf(Number(m));   // June=0 … March=9, else -1
+
+/** Where the CALENDAR is today: the current month's rank + how far through it. */
+function calendarNow(d = new Date()) {
+  const month = d.getMonth() + 1;
+  const inYear = ACAD_ORDER.includes(month);
+  // During the Apr/May break, open the whole taught year for revision.
+  const rank = inYear ? acadRank(month) : ACAD_ORDER.length - 1;
+  const daysInMonth = new Date(d.getFullYear(), month, 0).getDate();
+  const monthProgress = inYear ? Math.min(1, d.getDate() / daysInMonth) : 1;   // 0..1 through the month
+  return { month, rank, monthProgress, inYear };
+}
+
+/** Ordered chapters for a student's board/grade/subject/medium (seq 1..N) with month. */
 async function chapterSequence(studentId, subjectId, exec = db) {
   const { rows } = await exec.query(
-    `SELECT qb.chapter,
+    `SELECT qb.chapter, min(qb.revision)::int AS month,
             dense_rank() OVER (ORDER BY CASE WHEN min(qb.revision) >= 6 THEN min(qb.revision)
                                              ELSE min(qb.revision) + 12 END)::int AS seq
        FROM question_bank qb
@@ -89,7 +126,7 @@ async function chapterSequence(studentId, subjectId, exec = db) {
       GROUP BY qb.chapter
       ORDER BY seq`,
     [studentId, subjectId]);
-  return rows;   // [{ chapter, seq }]
+  return rows;   // [{ chapter, month, seq }]
 }
 
 /** Get or create the progress row; keeps total_chapters + frontier_chapter fresh. */
@@ -102,8 +139,11 @@ async function getProgress(studentId, subjectId, exec = db) {
 
   if (!p) {
     p = (await exec.query(
-      `INSERT INTO student_subject_progress (student_id, subject_id, frontier_seq, frontier_chapter, total_chapters)
-       VALUES ($1,$2,1,$3,$4)
+      // last_promoted_at seeds the MIN_DAYS_ON_LEVEL clock from enrollment, so the
+      // very first chapter is time-gated too (it is NULL otherwise, only ever set
+      // on a later promotion).
+      `INSERT INTO student_subject_progress (student_id, subject_id, frontier_seq, frontier_chapter, total_chapters, last_promoted_at)
+       VALUES ($1,$2,1,$3,$4,now())
        ON CONFLICT (student_id, subject_id) DO UPDATE SET total_chapters=EXCLUDED.total_chapters, modified_at=now()
        RETURNING *`,
       [studentId, subjectId, chapters[0]?.chapter || null, total])).rows[0];
@@ -156,21 +196,37 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
   if (!chapters.length) return { ids: [], progress, chapters };
 
-  // A "level" (seq) can hold MORE THAN ONE chapter: the NEP-restructured lower
-  // grades bundle several playful-named chapters into one revision month, so
-  // seq repeats. The frontier is therefore the whole SET of chapters at the
-  // current seq, never a single array position — indexing chapters[seq-1] would
-  // serve one chapter while mastery was judged on another that was never shown,
-  // freezing the child. So everything below keys off seq, not array index.
-  const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
-  const frontierSeq = Math.min(progress.frontier_seq, maxSeq);
-  const frontierChapters = chapters.filter(c => c.seq === frontierSeq).map(c => c.chapter);
-  const frontierChapter = frontierChapters[0];        // representative, for the return value
   const stats = await perChapterStats(studentId, subjectId, chapters, exec);
+  const statBy = Object.fromEntries(stats.map(s => [s.chapter, s]));
 
-  const weakEarlier = stats.filter(s => s.seq < frontierSeq && s.answered > 0 && !s.mastered)
-    .sort((a, b) => a.accuracy - b.accuracy).map(s => s.chapter);      // weakest first
-  const masteredEarlier = stats.filter(s => s.seq < frontierSeq && s.mastered).map(s => s.chapter);
+  // --- CALENDAR ANCHOR (month-wise) -----------------------------------------
+  // Serve only what the school has taught by TODAY. Each chapter carries its
+  // origin month; the CURRENT calendar month is the "new learning" band, earlier
+  // taught months are revision, and FUTURE months are locked out entirely. The
+  // current month's share ramps up through the month (light on the 1st, fuller
+  // by month-end) so a just-started month is never dumped in full — the finest
+  // resolution the month-tagged content allows.
+  const cal = calendarNow();
+  const withRank = chapters.map(c => ({ chapter: c.chapter, rank: acadRank(c.month) }))
+    .filter(c => c.rank >= 0);
+  // "current" = chapters of the present month; if this month has none yet (thin
+  // content), fall back to the latest taught month so there is still a current band.
+  let curRank = cal.rank;
+  let currentBand = withRank.filter(c => c.rank === curRank).map(c => c.chapter);
+  if (!currentBand.length) {
+    curRank = withRank.filter(c => c.rank <= cal.rank).reduce((m, c) => Math.max(m, c.rank), -1);
+    currentBand = withRank.filter(c => c.rank === curRank).map(c => c.chapter);
+  }
+  const revisionChapters = withRank.filter(c => c.rank >= 0 && c.rank < curRank).map(c => c.chapter);
+  const taughtChapters = withRank.filter(c => c.rank <= curRank).map(c => c.chapter);   // never a future month
+  const frontierChapter = currentBand[0] || taughtChapters[0] || null;
+
+  // Weak (attempted, not-yet-mastered) taught chapters first — adaptive
+  // reinforcement is kept, it just operates within the taught (calendar) range.
+  const weakRevision = revisionChapters
+    .filter(c => (statBy[c]?.answered || 0) > 0 && !statBy[c]?.mastered)
+    .sort((a, b) => statBy[a].accuracy - statBy[b].accuracy);
+  const otherRevision = revisionChapters.filter(c => !weakRevision.includes(c));
 
   /**
    * Pick `n` questions, spread across question SHAPES rather than drawn purely
@@ -289,44 +345,27 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     return added;
   };
 
-  // Stretch questions from the NEXT level, for a child who has the current one
-  // well in hand. Mastery of the frontier is judged across ALL chapters at the
-  // current seq, aggregated — not one of them.
-  const level = stats.filter(s => s.seq === frontierSeq);
-  const fAnswered = level.reduce((a, s) => a + s.answered, 0);
-  const fAccuracy = fAnswered ? level.reduce((a, s) => a + s.correct, 0) / fAnswered : 0;
-  const nextChapters = chapters.filter(c => c.seq === frontierSeq + 1).map(c => c.chapter);
-  const earnsPreview = nextChapters.length
-    && fAnswered >= CFG.PREVIEW_MIN_ANSWERED
-    && fAccuracy >= CFG.PREVIEW_ACCURACY;
-  let previewCount = 0;
-  if (earnsPreview) {
-    previewCount = (await take(nextChapters, Math.min(CFG.PREVIEW_MAX, Math.max(1, Math.floor(count * 0.1))))).length;
-  }
+  // ---- WEIGHTS (calendar-anchored) ------------------------------------------
+  // The current month is "new learning" and its share RAMPS UP through the month
+  // (light on the 1st, fuller by the 30th), so a just-started month is a small
+  // slice. The rest is revision of earlier taught months, weakest chapters first.
+  // Brand-new students lean even harder on earlier, foundational revision.
+  const totalAnswered = stats.reduce((a, s) => a + s.answered, 0);
+  const newStudent = totalAnswered < CFG.EASE_IN_ANSWERED;
+  const rawShare = 0.15 + 0.30 * cal.monthProgress;          // ~0.15 early month → ~0.45 late month
+  const currentShare = revisionChapters.length ? (newStudent ? rawShare * 0.6 : rawShare) : 1;
+  const currentN = currentBand.length ? Math.max(1, Math.round(count * currentShare)) : 0;
 
-  const reinforceN = weakEarlier.length ? Math.round(count * CFG.REINFORCE_RATIO) : 0;
-  const frontierN = Math.round(count * CFG.FRONTIER_RATIO) + (masteredEarlier.length ? 0 : Math.round(count * 0.2));
+  await take(currentBand, currentN);                         // this month (new learning)
+  await take(weakRevision, count - ids.length);              // weakest taught chapters first
+  if (ids.length < count) await take(otherRevision, count - ids.length);   // other taught chapters
 
-  await take(weakEarlier, reinforceN);
-  await take(frontierChapters, Math.max(frontierN, count - ids.length - (masteredEarlier.length ? Math.round(count * 0.2) : 0)));
-  if (ids.length < count && masteredEarlier.length) await take(masteredEarlier, count - ids.length);
-
-  // Top up from any unlocked chapter — concept budget still holds, so a thin
-  // frontier borrows VARIETY from earlier work rather than repeating itself.
-  const unlocked = chapters.slice(0, frontierSeq).map(c => c.chapter);
-  if (ids.length < count) await take(unlocked, count - ids.length);
-
-  // Still short? The current MONTH's pool is thin (common in early grades /
-  // low-content chapters). Top up with genuine REVISION: the same unlocked
-  // chapters, but from ANY revision month — still never a repeat, still never a
-  // future chapter, and the concept caps still hold. This is what stops a thin
-  // month from producing an 8-question quiz, without re-introducing repetition.
-  if (ids.length < count) await take(unlocked, count - ids.length, { anyMonth: true });
-
-  // Last resort: the child is genuinely out of fresh, varied questions across
-  // every month. Relax the caps rather than send a stubby quiz — a repeat is a
-  // worse quiz, but eight questions instead of fifteen is a broken one.
-  if (ids.length < count) await take(unlocked, count - ids.length, { anyMonth: true, relax: true });
+  // Top up WITHIN the taught (calendar) range only — never a future month. A
+  // thin current month borrows VARIETY from earlier taught work, current-month
+  // first then any revision month, and only then relaxes the caps.
+  if (ids.length < count) await take(taughtChapters, count - ids.length);
+  if (ids.length < count) await take(taughtChapters, count - ids.length, { anyMonth: true });
+  if (ids.length < count) await take(taughtChapters, count - ids.length, { anyMonth: true, relax: true });
 
   // Absolute floor (MIN_QUESTIONS): everything above only ever draws questions
   // the child has NEVER seen, so a thin grade — or a child who has already seen
@@ -348,18 +387,20 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
                    WHERE t.student_id = $1 AND h.question_id = qb.id) ASC NULLS FIRST,
                  random()
         LIMIT $5`,
-      [studentId, subjectId, unlocked, ids, CFG.MIN_QUESTIONS - ids.length]);
+      [studentId, subjectId, taughtChapters, ids, CFG.MIN_QUESTIONS - ids.length]);
     for (const r of rows) { if (!seen.has(r.id)) { ids.push(r.id); seen.add(r.id); } }
   }
 
-  return { ids: ids.slice(0, count), progress, chapters, frontierChapter, weakChapters: weakEarlier,
-           previewChapter: previewCount ? nextChapters[0] : null, previewCount };
+  return { ids: ids.slice(0, count), progress, chapters, frontierChapter,
+           weakChapters: weakRevision, currentMonth: cal.month, taughtChapters };
 }
 
 /**
  * After a quiz, move the frontier forward when the current chapter is either
- * MASTERED (≥80% over ≥12) OR sufficiently EXPOSED (≥ EXPOSURE_CAP attempts) —
- * so no child freezes. Unmastered chapters stay in the reinforcement pool.
+ * MASTERED (≥80% over ≥12) AND has been the frontier ≥ MIN_DAYS_ON_LEVEL days,
+ * OR sufficiently EXPOSED (≥ EXPOSURE_CAP attempts) — so a fast learner does not
+ * outrun the school, yet no child freezes. Unmastered chapters stay in the
+ * reinforcement pool.
  */
 async function evaluateAndPromote(studentId, subjectId, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
@@ -380,6 +421,20 @@ async function evaluateAndPromote(studentId, subjectId, exec = db) {
   const exposed = answered >= CFG.EXPOSURE_CAP;
   if (!masteredNow && !exposed) {
     return { promoted: false, chapter: frontierChapter, accuracy, answered, status: 'learning' };
+  }
+
+  // Time-gate the MASTERY path so a fast learner cannot outrun the school. A
+  // chapter must have been the frontier for at least MIN_DAYS_ON_LEVEL days
+  // before mastery may advance it; until then the child keeps getting fresh,
+  // varied revision of the current chapter. EXPOSURE (a stuck child) bypasses
+  // the gate so no one freezes. A legacy row with no timestamp is left alone —
+  // we cannot know how long they have been here, so we do not hold them back.
+  const daysOnLevel = progress.last_promoted_at
+    ? (Date.now() - new Date(progress.last_promoted_at).getTime()) / 86400000
+    : Infinity;
+  if (masteredNow && !exposed && daysOnLevel < CFG.MIN_DAYS_ON_LEVEL) {
+    return { promoted: false, chapter: frontierChapter, accuracy, answered,
+             status: 'learning', heldForPacing: true, daysOnLevel: Math.floor(daysOnLevel) };
   }
 
   if (frontierSeq >= maxSeq) {
@@ -460,20 +515,31 @@ async function currentStreak(studentId, exec = db) {
   return rows[0]?.streak || 0;
 }
 
-/** Compact progress summary for reports / menus. */
+/** Compact progress summary for reports / menus — calendar (month) anchored. */
 async function progressSummary(studentId, subjectId, exec = db) {
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
-  // Progress is measured in LEVELS (seq), not raw chapters — a level may bundle
-  // several chapters, so counting chapters would understate how far along a
-  // child in the lower grades actually is.
-  const maxSeq = chapters.reduce((m, c) => Math.max(m, c.seq), 1);
-  const mastered = Math.max(0, Math.min(progress.frontier_seq, maxSeq) - 1);
+  const cal = calendarNow();
+  const withRank = chapters.map(c => ({ chapter: c.chapter, rank: acadRank(c.month) })).filter(c => c.rank >= 0);
+  // The current month's chapter is what the class is on now; if this month has
+  // no chapter yet, fall back to the latest taught month.
+  let curRank = cal.rank;
+  let current = withRank.filter(c => c.rank === curRank);
+  if (!current.length) {
+    curRank = withRank.filter(c => c.rank <= cal.rank).reduce((m, c) => Math.max(m, c.rank), -1);
+    current = withRank.filter(c => c.rank === curRank);
+  }
+  const taught = withRank.filter(c => c.rank <= curRank).map(c => c.chapter);
+  const currentChapter = current[0]?.chapter || taught[taught.length - 1] || progress.frontier_chapter;
+  // "mastered" = chapters the child has genuinely mastered among those taught so far.
+  const stats = await perChapterStats(studentId, subjectId, chapters, exec);
+  const mastered = stats.filter(s => taught.includes(s.chapter) && s.mastered).length;
+  const total = taught.length || 1;
   return {
-    frontier_chapter: progress.frontier_chapter,
+    frontier_chapter: currentChapter,
     frontier_seq: progress.frontier_seq,
-    mastered, total: maxSeq,
+    mastered, total,
     status: progress.status,
-    pct: maxSeq ? Math.round(mastered * 100 / maxSeq) : 0,
+    pct: Math.round(mastered * 100 / total),
   };
 }
 

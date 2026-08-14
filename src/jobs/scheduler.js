@@ -35,6 +35,40 @@ const CATCH_UP_MIN = Number(process.env.SCHEDULER_CATCHUP_MIN) || 20;
 // still leaves 2h15m of window, which is plenty for a 5-minute quiz. No
 // unsolicited message from QuizPe goes out after this time.
 const MISSED_AT_HHMM = process.env.MISSED_AT_HHMM || '21:30';
+// End-of-day recap for children who did NOT finish today's quiz. Fires just
+// AFTER the day-cutoff has settled today's trackers (see DAY_CUTOFF_HHMM), so
+// "missed" is final rather than "not started yet". Only NON-completers get it:
+// a gentle "you missed it, all the best tomorrow" plus a progress stat. Must be
+// after the cutoff (23:50 by default) — 23:52 leaves the settle to finish.
+const DAYRECAP_TEMPLATE = process.env.DAYRECAP_TEMPLATE || 'qp_daymissed_v1';
+const DAYRECAP_AT_HHMM = process.env.DAYRECAP_AT_HHMM || '23:52';
+// Weekly report scan — once a day, enqueue reports for students whose rolling
+// 7-day cycle just closed. Delivery (free-form vs document template) is decided
+// per parent inside the job, based on the 24h window.
+const WEEKLY_AT_HHMM = process.env.WEEKLY_REPORT_AT_HHMM || '10:00';
+// Founder's nightly analytics digest to the operator inbox. Fires just AFTER the
+// day-cutoff (23:50) and the missed recap (23:52) have settled today's trackers,
+// so the numbers are final rather than mid-flight. Default 23:55 ("around
+// 11:50pm"). One email per day, deduped by date via the job queue.
+const DIGEST_AT_HHMM = process.env.DIGEST_AT_HHMM || '23:55';
+// "Open all day" nudge — weekends AND holidays, mid-morning. Tells families the
+// quiz can be taken any time today, not just the evening. In-window parents get
+// a free-form button; the rest need the approved template, which stays dormant
+// (deferred) until Meta clears it. One template serves both occasions via an
+// occasion variable ({{2}} = "weekend"/"holiday").
+const WEEKEND_NUDGE_AT_HHMM = process.env.WEEKEND_NUDGE_AT_HHMM || '09:00';
+const OPENALLDAY_TEMPLATE = process.env.OPENALLDAY_TEMPLATE || 'qp_openallday_v1';
+// ALL-DAY QUIZ MODEL: the quiz is open 06:00–23:45 every day, taken once, any
+// time. Three touchpoints replace the old evening reminder+trigger:
+//   • MORNING  — "today's quiz is ready" (+ Start button), reaches everyone
+//   • EVENING  — a gentle "not taken yet" reminder (in-window free-form)
+//   • NIGHT    — a "last chance, closes soon" nudge ~1h before close
+// Each fires only for families who have NOT finished today, deduped per day.
+const MORNING_NUDGE_AT_HHMM    = process.env.MORNING_NUDGE_AT_HHMM    || '08:00';
+const EVENING_REMINDER_AT_HHMM = process.env.EVENING_REMINDER_AT_HHMM || '19:00';
+const NIGHT_REMINDER_AT_HHMM   = process.env.NIGHT_REMINDER_AT_HHMM   || '22:45';
+// Out-of-window morning reach reuses the already-approved daily-quiz template.
+const MORNING_TEMPLATE = process.env.MORNING_TEMPLATE || 'qp_quizstart_daily_v2';
 // Advisory-lock key so only one process anywhere runs a scheduler tick.
 const SCHEDULER_LOCK = 918101;
 // Preference order for the evening reminder. The first APPROVED one is used,
@@ -135,12 +169,18 @@ async function dueNow(kind, hhmm, offsetMin = 0) {
         -- one per student per kind per day
         AND NOT EXISTS (SELECT 1 FROM notification_log n
                          WHERE n.student_id = st.id AND n.kind = $2 AND n.send_date = CURRENT_DATE)
-        -- never chase someone who already finished today
+        -- never chase someone who already finished today: the quiz is marked
+        -- completed/closed, OR every question in today's tracker is already
+        -- answered (covers the gap between the last answer and finishQuiz
+        -- flipping the tracker to 'completed')
         AND NOT EXISTS (
               SELECT 1 FROM quizpe_tracker t
-                JOIN quizpe_status qs ON qs.id = t.status_id
                WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
-                 AND qs.status_code IN ('completed','closed'))`,
+                 AND ( EXISTS (SELECT 1 FROM quizpe_status qs
+                                WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
+                    OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                         AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
+                                          WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) ))`,
     [nowMin, kind, BASE_SUBJECT, CATCH_UP_MIN, offsetMin]);
   return rows;
 }
@@ -343,6 +383,260 @@ async function runFormNudge() {
   if (sent) console.log(`[scheduler] form_nudge: ${sent} sent`);
 }
 
+/* ----------------------------------- all-day quiz nudges (morning/eve/night) -- */
+/**
+ * Active families who have NOT finished today's quiz, for a given nudge `kind`.
+ * ONE ROW PER PARENT (a representative student, so UNIQUE (student_id, kind,
+ * send_date) dedupes per parent). Skips paused parents and anyone already done
+ * today. `in_window` decides free-form vs template; `day_number`+name feed the
+ * out-of-window morning template.
+ */
+async function notCompletedDue(kind) {
+  const { rows } = await db.query(
+    `SELECT DISTINCT ON (p.id)
+            p.id AS parent_id, p.parent_name, p.parent_mobile_number,
+            st.id AS student_id, st.student_name,
+            ((CURRENT_DATE - s.plan_start_date) + 1) AS day_number,
+            w.id AS session_id,
+            (w.last_inbound_at > now() - interval '24 hours') AS in_window
+       FROM parents_quizpe_subscriptions s
+       JOIN parents  p  ON p.id = s.parent_id AND p.is_active AND NOT p.service_paused
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       LEFT JOIN LATERAL (SELECT id, last_inbound_at FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+        AND NOT EXISTS (SELECT 1 FROM notification_log n
+                         WHERE n.student_id = st.id AND n.kind = $1 AND n.send_date = CURRENT_DATE)
+        AND NOT EXISTS (
+              SELECT 1 FROM quizpe_tracker t
+               WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                 AND EXISTS (SELECT 1 FROM quizpe_status qs
+                              WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed')))
+      ORDER BY p.id, st.id`, [kind]);
+  return rows;
+}
+
+/** The in-window free-form body for each nudge variant. */
+function quizNudgeMessage(variant, row, close) {
+  const name = row.student_name;
+  if (variant === 'evening') {
+    return `⏰ *Reminder:* ${name} hasn't taken today's quiz yet.\n\n`
+      + `It's open until *${close}* — just 5 minutes. Tap below whenever it suits you. 🌟`;
+  }
+  if (variant === 'night') {
+    return `🌙 *Last chance for today!*\n\n${name}'s quiz closes at *${close}*. `
+      + `There's still time for a quick 5-minute round — tap below to begin. 💪`;
+  }
+  return `☀️ *Good morning!*\n\n${name}'s quiz for today is ready. `
+    + `Take it any time before *${close}* — about 5 minutes. Tap below to begin! 🌟`;
+}
+
+/**
+ * Send one of the three daily nudges (morning / evening / night). Fires only at
+ * its target time (± catch-up), only for families not done today. In-window →
+ * free-form with a one-tap Start button (no template, no cost). Out of window →
+ * only the MORNING nudge has a template (the approved daily-quiz one); evening
+ * and night are in-window-only (secondary), never a non-compliant send.
+ */
+async function runQuizNudge(kind, atHHMM, variant) {
+  const qw = require('../whatsapp/quizWindow');
+  const [th, tm] = atHHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm, now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  const close = M_fmt(qw.CLOSE_HHMM);
+  const tmpl = variant === 'morning' ? await approvedTemplate(MORNING_TEMPLATE) : null;
+  const due = await notCompletedDue(kind);
+  let sent = 0;
+  for (const row of due) {
+    // Morning: create today's quiz BEFORE announcing it, so "Start Quiz" always
+    // has questions ready and the day-cutoff/missed-recap see a scheduled quiz.
+    // Idempotent (student+subject+day UNIQUE). Runs even for unreachable rows.
+    if (variant === 'morning') {
+      try { await Q.scheduleDailyQuizzes(row.student_id); }
+      catch (e) { console.error(`[scheduler] tracker setup failed for student ${row.student_id}: ${e.message}`); }
+    }
+    if (!row.session_id) continue;                     // no session → unreachable
+    if (!row.in_window && !tmpl) continue;             // out of window, no template → skip
+    if (!(await claimSend(row, kind, row.in_window ? null : tmpl.template_name))) continue;
+    try {
+      if (row.in_window) {
+        await wa.sendButtons(row.session_id, row.parent_mobile_number,
+          quizNudgeMessage(variant, row, close),
+          [{ id: 'start_quiz', title: '▶️ Start quiz now' }]);
+        await finishSend(row, kind, null, null);
+      } else {
+        const first = String(row.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
+        const res = await wa.sendTemplate(row.session_id, row.parent_mobile_number, tmpl.template_name,
+          [first, row.student_name, String(row.day_number), 'Mathematics', 'any time today']);
+        await finishSend(row, kind, null, res && res.sent === false ? (res.reason || 'send failed') : null);
+      }
+      sent++;
+    } catch (e) {
+      await finishSend(row, kind, null, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 250));      // stay under Meta's rate limit
+  }
+  if (sent) console.log(`[scheduler] ${kind}: ${sent} sent`);
+}
+
+/** '23:45' -> '11:45 PM' for weekend-nudge copy (kept local; messages.fmtTime needs no db). */
+function M_fmt(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+/* ------------------------------------------------ end-of-day "missed" recap -- */
+/**
+ * Children who did NOT finish today's quiz, for the post-cutoff recap.
+ *
+ * "Did not finish" = the tracker is NOT 'completed' AND not every question is
+ * answered. This deliberately INCLUDES 'skipped' (never started) and 'closed'
+ * partial attempts — both are "missed / half-done" and both should hear the
+ * gentle "all the best tomorrow" nudge. A quiz must actually have been
+ * scheduled for them today (a tracker exists), so a parent whose slot never
+ * fired is never told they "missed" something that was never offered.
+ *
+ * Also returns the progress stat: distinct days attempted (any answered
+ * question) out of days enrolled so far.
+ */
+async function dayMissedDue() {
+  const { rows } = await db.query(
+    `SELECT st.id  AS student_id, st.student_name,
+            p.id   AS parent_id, p.parent_name, p.parent_mobile_number,
+            (CURRENT_DATE - s.plan_start_date) + 1 AS enrolled_days,
+            (SELECT COUNT(DISTINCT t.quiz_date)::int
+               FROM quizpe_tracker t
+              WHERE t.student_id = st.id
+                AND t.quiz_date BETWEEN s.plan_start_date AND CURRENT_DATE
+                AND EXISTS (SELECT 1 FROM student_quizpe_histories h
+                             WHERE h.tracker_id = t.id AND h.answered_option IS NOT NULL)) AS attempted_days,
+            w.id AS session_id
+       FROM parents_quizpe_subscriptions s
+       JOIN parents  p  ON p.id = s.parent_id AND p.is_active
+       JOIN students st ON st.parent_id = p.id AND st.is_active
+       LEFT JOIN LATERAL (SELECT id FROM whatsapp_sessions x
+                           WHERE x.mobile_number = p.parent_mobile_number AND x.is_active
+                           ORDER BY x.id DESC LIMIT 1) w ON true
+      WHERE s.is_active
+        AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+        -- never on the parent's very first day (setup confusion, not a skip)
+        AND (CURRENT_DATE - s.plan_start_date) + 1 > 1
+        AND NOT p.service_paused
+        -- Only say "all the best for tomorrow" if there actually IS a quiz
+        -- tomorrow — i.e. some active subscription covers CURRENT_DATE + 1. A plan
+        -- expiring today with no renewal has no tomorrow, so the expiry/expired
+        -- lifecycle messages handle them; a "see you tomorrow" would be wrong.
+        AND EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s2
+                     WHERE s2.parent_id = p.id AND s2.is_active
+                       AND (CURRENT_DATE + 1) BETWEEN s2.plan_start_date AND s2.plan_end_date)
+        -- a quiz was actually scheduled for them today
+        AND EXISTS (SELECT 1 FROM quizpe_tracker t
+                     WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE)
+        -- but they did NOT finish it (completed OR all-answered = finished)
+        AND NOT EXISTS (
+              SELECT 1 FROM quizpe_tracker t
+               WHERE t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                 AND ( EXISTS (SELECT 1 FROM quizpe_status qs
+                                WHERE qs.id = t.status_id AND qs.status_code = 'completed')
+                    OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
+                         AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
+                                          WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) ))
+        -- once per student per day
+        AND NOT EXISTS (SELECT 1 FROM notification_log n
+                         WHERE n.student_id = st.id AND n.kind = 'day_missed' AND n.send_date = CURRENT_DATE)`);
+  return rows;
+}
+
+/**
+ * The post-cutoff recap. Fires once, in the window at DAYRECAP_AT_HHMM, and only
+ * once the recap template is APPROVED (skips silently until then). Params, in
+ * the order the template body expects: parent name, child name, attempted days,
+ * enrolled days.
+ */
+async function runDayMissedRecap() {
+  const [th, tm] = DAYRECAP_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  if (!(await require('../whatsapp/lifecycle').approved(DAYRECAP_TEMPLATE))) return;
+
+  const due = await dayMissedDue();
+  if (!due.length) return;
+  console.log(`[scheduler] day_missed recap @${nowHHMM()}: ${due.length} to send (${DAYRECAP_TEMPLATE})`);
+
+  for (const row of due) {
+    if (!(await claimSend(row, 'day_missed', DAYRECAP_TEMPLATE))) continue;   // already sent today
+    try {
+      const params = [
+        String(row.parent_name || 'there'),
+        String(row.student_name || 'your child'),
+        String(row.attempted_days ?? 0),
+        String(row.enrolled_days ?? 0),
+      ];
+      const id = await wa.sendTemplate(row.session_id, row.parent_mobile_number, DAYRECAP_TEMPLATE, params);
+      await finishSend(row, 'day_missed', id, null);
+    } catch (e) {
+      console.error(`[scheduler] day_missed failed for ${row.parent_mobile_number}: ${e.message}`);
+      await finishSend(row, 'day_missed', null, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 250));            // stay under Meta's rate limit
+  }
+}
+
+/**
+ * Once-a-day scan (at WEEKLY_AT_HHMM): enqueue a weekly report for every
+ * student whose rolling 7-day cycle has just closed. The job itself decides
+ * delivery — free-form inside the 24h window, document template outside it.
+ */
+async function runWeeklyReports() {
+  const [th, tm] = WEEKLY_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  const jobs = require('./jobQueue');
+  const due = await require('../pdf/weeklyReport').dueWeeklyStudents();
+  if (!due.length) return;
+  console.log(`[scheduler] weekly reports: ${due.length} due`);
+  for (const r of due) {
+    await jobs.push('weekly_report',
+      { studentId: r.student_id, weekStart: r.week_start, weekEnd: r.week_end,
+        sessionId: r.session_id, mobile: r.parent_mobile_number },
+      { dedupeKey: `weekly:${r.student_id}:${r.week_end}` });
+  }
+}
+
+/**
+ * Enqueue the founder's nightly analytics digest, once, in the window at
+ * DIGEST_AT_HHMM. The job builds the email and sends it to the operator inbox;
+ * the per-day dedupeKey means a restart or an overlapping tick never sends two.
+ */
+async function runDailyDigest() {
+  const [th, tm] = DIGEST_AT_HHMM.split(':').map(Number);
+  const [nh, nm] = nowHHMM().split(':').map(Number);
+  const target = th * 60 + tm;
+  const now = nh * 60 + nm;
+  if (now < target || now > target + CATCH_UP_MIN) return;
+
+  // Today's date IST, for the once-per-day dedupe key.
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date()); // YYYY-MM-DD
+  const key = `digest:${today}`;
+  // The queue's dedupe only guards a job that is still pending/running; once the
+  // digest has SENT and gone 'done', a later tick inside the catch-up window
+  // could enqueue a second. So skip if today's digest exists in ANY status.
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM job_queue WHERE kind='daily_digest' AND dedupe_key=$1 LIMIT 1`, [key]);
+  if (rowCount) return;
+  await require('./jobQueue').push('daily_digest', {}, { dedupeKey: key });
+}
+
 const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN',
   { day: '2-digit', month: 'short', year: 'numeric' });
 
@@ -482,11 +776,12 @@ function startScheduler() {
     }
 
     try {
-      // prefer the new reminder template; fall back to v1 until it is approved
-      await runJob('reminder', REMINDER_TEMPLATES);
-      await runJob('quiz_trigger', 'qp_quizstart_daily_v2');
-      // a gentle nudge MISSED_AFTER_MIN after quiz time, only if still untouched
-      await runJob('quiz_missed', 'qp_quiz_missed_daily_v1');
+      // ALL-DAY QUIZ: three daily touchpoints, each only for families not done
+      // today (open 06:00–23:45, taken once, any time).
+      await runQuizNudge('quiz_morning', MORNING_NUDGE_AT_HHMM, 'morning');   // "today's quiz is ready"
+      await runQuizNudge('quiz_evening', EVENING_REMINDER_AT_HHMM, 'evening'); // "not taken yet"
+      await runQuizNudge('quiz_night',   NIGHT_REMINDER_AT_HHMM,   'night');   // "last chance, closes soon"
+
       // plan expiry, mid-morning rather than at quiz time — a renewal decision
       // is made in daylight, not thirty seconds before the child sits down
       await runLifecycleJob('expiring');
@@ -497,6 +792,18 @@ function startScheduler() {
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();
+
+      // A gentle end-of-day recap to children who missed / half-did today's
+      // quiz. Runs AFTER the cutoff has settled the trackers (DAYRECAP_AT_HHMM
+      // is a couple of minutes past CUTOFF_HHMM), so "missed" is final.
+      await runDayMissedRecap();
+
+      // Weekly performance reports, mid-morning — one per student whose rolling
+      // 7-day cycle just closed (only if they attempted at least once).
+      await runWeeklyReports();
+
+      // The founder's nightly analytics digest, just after the day settles.
+      await runDailyDigest();
     } catch (e) {
       console.error('[scheduler] tick failed:', e.message);
     } finally {
@@ -508,7 +815,7 @@ function startScheduler() {
     }
   }, { timezone: TZ });
 
-  console.log(`[scheduler] started (${TZ}) — reminder=v1 @reminder_time, quiz trigger=v2 @quiz_time`);
+  console.log(`[scheduler] started (${TZ}) — all-day quiz; nudges: morning ${MORNING_NUDGE_AT_HHMM} · evening ${EVENING_REMINDER_AT_HHMM} · night ${NIGHT_REMINDER_AT_HHMM}`);
 }
 
 module.exports = { startScheduler, runJob, dueNow, nowHHMM };

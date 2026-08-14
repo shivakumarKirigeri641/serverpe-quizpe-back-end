@@ -242,28 +242,15 @@ async function releaseBankedOnRenewal(referrerId, client = db) {
 }
 
 /**
- * The FRIEND's own welcome bonus: a referred parent gets +rewardDays on their
- * FIRST paid plan — funded entirely by their own payment, so it costs nothing
- * unless they convert. One-time only (guarded by referee_rewarded_at). Parents
- * who were NOT referred get their normal plan length, untouched.
+ * REFERRER-ONLY MODEL — the referred friend gets NO welcome bonus.
  *
- * Independent of the referrer's reward: a parent can be both, and each pays out
- * on its own trigger.
+ * A referred parent gets only the normal trial; only the REFERRER earns days
+ * (see qualifyOnFirstQuiz / releaseBankedOnRenewal). This is intentionally a
+ * no-op, kept so existing callers and the export stay valid without ever
+ * granting the friend bonus days.
  */
-async function creditRefereeOnFirstPayment(refereeId, client = db) {
-  const s = await settings(client);
-  if (!s.enabled) return null;
-
-  const { rows } = await client.query(
-    `SELECT id FROM referrals
-      WHERE referee_id=$1 AND referee_rewarded_at IS NULL
-      ORDER BY id LIMIT 1 FOR UPDATE`, [refereeId]);
-  const ref = rows[0];
-  if (!ref) return null;                     // not referred, or already claimed
-
-  await client.query(`UPDATE referrals SET referee_rewarded_at=now() WHERE id=$1`, [ref.id]);
-  const refereeNewEnd = await extendPlan(refereeId, s.rewardDays, client);
-  return { days: s.rewardDays, refereeNewEnd };
+async function creditRefereeOnFirstPayment(/* refereeId, client */) {
+  return null;
 }
 
 /**
@@ -330,5 +317,5 @@ module.exports = {
   summary, shareLink, parseCode,
   qualifyOnFirstQuiz,          // friend's first quiz -> reward referrer (now or bank)
   releaseBankedOnRenewal,      // referrer pays -> release one banked +7
-  creditRefereeOnFirstPayment, // friend pays their first plan -> friend gets +7
+  creditRefereeOnFirstPayment, // no-op: referrer-only model, friend gets no bonus
 };

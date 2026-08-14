@@ -32,6 +32,13 @@ function normaliseMobile(raw) {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+// The pitch/demo number may start a FRESH trial repeatedly — the one-trial-per-
+// number policy is waived for it alone, so a school demo can walk the real
+// signup end-to-end as often as needed. Kept in sync with demo.js's DEMO_MOBILE;
+// inlined here rather than requiring demo.js (which requires us → circular).
+const DEMO_MOBILE = process.env.DEMO_MOBILE ? normaliseMobile(process.env.DEMO_MOBILE) : '';
+const isDemoMobile = (m) => !!DEMO_MOBILE && m === DEMO_MOBILE;
+
 /**
  * @param rawMobile  number in any format
  * @param exec       optional pg client — pass one when calling inside a
@@ -112,8 +119,11 @@ async function getUserContext(rawMobile, exec = db) {
     seatLimit: r.student_count,
     trialUsed: r.trial_used,
     trialDays,
-    // policy: one free trial per mobile number
-    canStartTrial: trialOffered && !r.trial_used && ['INCOMPLETE', 'NO_SUBSCRIPTION'].includes(status),
+    // policy: one free trial per mobile number — WAIVED for the demo number so a
+    // school pitch can (re)start the real trial any time, in any status.
+    canStartTrial: isDemoMobile(mobile)
+      ? trialOffered
+      : trialOffered && !r.trial_used && ['INCOMPLETE', 'NO_SUBSCRIPTION'].includes(status),
     isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status),
   };
 }
@@ -161,12 +171,15 @@ function buildMainMenu(ctx) {
     // with an 8:15 slot was being told to come back at a time already gone.
     const qw = require('./quizWindow');
     const st = qw.state();
+    const allDay = qw.isAllDayOpen();
+    const occ = qw.occasionFor();                       // 'weekend' | 'holiday' | null
+    const occCap = occ ? occ.charAt(0).toUpperCase() + occ.slice(1) : '';
     rows.push({ id: 'start_quiz', title: '▶️ Start quiz now',
                 description: st === 'open'
-                  ? `Open now — until ${fmtHour(qw.CLOSE_HHMM)}. About 5 minutes.`
+                  ? `Open now — until ${fmtHour(qw.CLOSE_HHMM)}.${allDay ? ` ${occCap}: take it any time!` : ' About 5 minutes.'}`
                   : st === 'before'
-                    ? `Opens at ${fmtHour(qw.OPEN_HHMM)} tonight. About 5 minutes.`
-                    : "Tonight's quiz has closed — the next one is tomorrow." });
+                    ? `Opens at ${fmtHour(qw.openHHMM())}${allDay ? ' — all day today!' : ' tonight'}. About 5 minutes.`
+                    : "Today's quiz has closed — the next one is tomorrow." });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
@@ -177,7 +190,7 @@ function buildMainMenu(ctx) {
   // recommend yet, and asking them to would be presumptuous.
   if (ctx.exists) {
     rows.push({ id: 'refer_friend', title: '🎁 Refer a friend',
-                description: 'You both get free days when they subscribe' });
+                description: 'Earn free days when a friend joins & starts' });
   }
   rows.push(
     { id: 'view_plans',      title: '💎 Premium plans',   description: 'Upgrade from just ₹99' },
