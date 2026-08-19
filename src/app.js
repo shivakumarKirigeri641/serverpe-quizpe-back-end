@@ -7,6 +7,7 @@
  */
 
 require('dotenv').config();
+require('./utils/logger');   // timestamp + level every console line (pm2-readable) — must load first
 const path = require('path');
 const express = require('express');
 const parentRouter = require('./routers/parentRouter');
