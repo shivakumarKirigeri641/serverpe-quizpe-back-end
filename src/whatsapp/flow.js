@@ -515,6 +515,10 @@ async function processInbound(msg, contactName) {
   const text = extractText(msg);
   const id = extractId(msg);
 
+  // One clean line per conversation turn, so `pm2 logs` reads like a chat log:
+  //   [wa] 9198xxxxxx state=active ← "▶️ Start quiz now"
+  console.log(`[wa] ${mobile} state=${session.state || 'new'} ← ${String(text || id || msg.type || '').slice(0, 60)}`);
+
   // DEMO number: run the demo's own taps and the word "demo"; force a GREETING
   // to start from the WELCOME message (a school pitch wants the fresh first-time
   // journey, not the returning-user menu — the number keeps a deactivated parent
