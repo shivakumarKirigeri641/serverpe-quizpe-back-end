@@ -296,6 +296,25 @@ const STEPS = [
       `CREATE INDEX IF NOT EXISTS expenses_date_idx ON expenses(expense_date) WHERE is_active`,
     ],
   },
+  {
+    name: 'quizpe_tracker.quiz_slot',
+    // Multiple quizzes per day: a per-day slot (1st/2nd/3rd) on each tracker row.
+    // Existing rows default to slot 1 — byte-for-byte identical to today's flow.
+    // Additive only; safe on the live DB.
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='quizpe_tracker' AND column_name='quiz_slot'`,
+    apply: [
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS quiz_slot smallint NOT NULL DEFAULT 1`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_slot_range`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_slot_range CHECK (quiz_slot BETWEEN 1 AND 3)`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_unique_student_subject_day`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_unique_student_subject_day_slot`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_unique_student_subject_day_slot
+         UNIQUE (student_id, subject_id, quiz_date, quiz_slot)`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_student_day_slot
+         ON quizpe_tracker (student_id, quiz_date, quiz_slot)`,
+    ],
+  },
 ];
 
 (async () => {

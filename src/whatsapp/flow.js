@@ -1084,21 +1084,19 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
         await wa.sendText(session.id, mobile, 'No child enrolled yet. Type *menu* to get started.');
         break;
       }
-      // Hide any child who has ALREADY taken today's quiz (completed/closed, or
-      // every question answered) — no point offering to "start" a done quiz.
-      const doneRows = (await db.query(
-        `SELECT DISTINCT t.student_id FROM quizpe_tracker t
-          WHERE t.quiz_date = CURRENT_DATE AND t.student_id = ANY($1::bigint[])
-            AND ( EXISTS (SELECT 1 FROM quizpe_status qs WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
-               OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
-                    AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) )`,
-        [students.map(s => s.id)])).rows;
-      const done = new Set(doneRows.map(r => Number(r.student_id)));
-      const pending = students.filter(s => !done.has(Number(s.id)));
+      // A child is available if they still have a quiz left today — either
+      // something pending, or they're under their daily slot cap (2/day, or 3 on
+      // weekends for premium). This replaces the old "one quiz per day" check so
+      // 2nd/3rd quizzes are offered too.
+      const pending = [];
+      for (const s of students) {
+        const prog = await Q.dailyQuizProgress(s.id);
+        if (prog.hasNext) pending.push(s);
+      }
 
       if (!pending.length) {
         await wa.sendText(session.id, mobile,
-          "✅ Today's quiz is already complete. Your next quiz will be ready tomorrow evening — see you then! 🌙");
+          "✅ All of today's quizzes are complete — brilliant! Fresh quizzes arrive tomorrow. See you then! 🌙");
         break;
       }
       // Multiple children still pending -> let the parent choose whose quiz to take.
@@ -1271,21 +1269,23 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
         return;
       }
 
-      // The morning job already creates today's trackers; this is the safety net
-      // for anyone starting a quiz outside that path (menu, or a first quiz on
-      // signup day). Idempotent, so calling it twice costs nothing.
+      // The morning job already creates today's slot-1 trackers; this is the
+      // safety net for anyone starting a quiz outside that path (menu, or a first
+      // quiz on signup day). Idempotent, so calling it twice costs nothing.
       await Q.scheduleDailyQuizzes(st.id);
 
-      const pending = await Q.pendingTrackers(st.id);
-      if (!pending.length) {
+      // Resolve the next quiz to run: a pending one, or (for the 2nd/3rd quiz of
+      // the day) unlock the next slot if still under the daily cap.
+      const maxSlots = await Q.entitledSlots(st.id);
+      const target = await Q.ensureNextTracker(st.id, maxSlots);
+      if (!target) {
         const at = await quizTimeOf(st.id);
         await wa.sendText(session.id, mobile,
           `✅ ${st.student_name} has finished all of today's quizzes. ` +
           `See you tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}! 🌙`);
         return;
       }
-
-      const target = pending[0];
+      const prog = await Q.dailyQuizProgress(st.id);
       const r = await Q.startQuiz(target.id);
       if (r.error || !r.trackerId) {
         console.error(`[flow] startQuiz failed: ${r.error} (tracker=${target.id}, student=${st.id})`);
@@ -1303,8 +1303,9 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
       await setState(session, 'in_quiz', r.resumed ? 'quiz_resumed' : 'quiz_started',
         { tracker_id: r.trackerId, subject: target.subject_code });
 
-      const more = pending.length > 1
-        ? `\n_${pending.length - 1} more subject${pending.length > 2 ? 's' : ''} after this._` : '';
+      // "Quiz N of M today" so the child sees this is the 1st/2nd/3rd of the day.
+      const quizNo = Math.min(prog.done + 1, prog.total);
+      const more = prog.total > 1 ? `\n_Quiz ${quizNo} of ${prog.total} today._` : '';
       const isTest = target.quiz_type === 'test';
       const intro = r.resumed
         ? '_Resuming where you left off._'

@@ -149,6 +149,12 @@ router.get('/analytics/activity', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
 });
 
+/** 1st/2nd/3rd-quiz engagement — is the multi-quiz feature being used? */
+router.get('/analytics/slots', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.slotBreakdown() }); }
+  catch (e) { console.error('[admin] slots:', e.message); fail(res, 500, 'Could not load slot breakdown.'); }
+});
+
 /** Cohort health as percentages — participation, scoring spread, movement. */
 router.get('/analytics/cohort', requireAdmin, async (req, res) => {
   try {
@@ -403,14 +409,14 @@ router.get('/students/:id/quizzes', requireAdmin, async (req, res) => {
   if (!id) return fail(res, 400, 'Bad student id.');
   try {
     const { rows } = await db.query(`
-      SELECT t.id, t.quiz_date::text, t.quiz_type, t.question_count,
+      SELECT t.id, t.quiz_date::text, t.quiz_type, t.question_count, t.quiz_slot,
              qs.status_code, sub.subject_name,
              r.score_correct, r.score_total, r.score_pct, r.grade, r.id AS report_id
         FROM quizpe_tracker t
         JOIN quizpe_status qs ON qs.id=t.status_id
         JOIN subjects sub ON sub.id=t.subject_id
         LEFT JOIN quiz_reports r ON r.tracker_id=t.id
-       WHERE t.student_id=$1 ORDER BY t.quiz_date DESC, t.id DESC`, [id]);
+       WHERE t.student_id=$1 ORDER BY t.quiz_date DESC, t.quiz_slot, t.id DESC`, [id]);
     ok(res, { rows });
   } catch (e) { console.error('[admin] student quizzes:', e.message); fail(res, 500, 'Could not load quizzes.'); }
 });
@@ -424,7 +430,7 @@ router.get('/quizzes/:trackerId', requireAdmin, async (req, res) => {
   if (!id) return fail(res, 400, 'Bad quiz id.');
   try {
     const head = (await db.query(`
-      SELECT t.id, t.quiz_date::text, t.quiz_type, qs.status_code,
+      SELECT t.id, t.quiz_date::text, t.quiz_type, t.quiz_slot, qs.status_code,
              st.id AS student_id, st.student_name, st.school_name,
              b.board_code, g.grade_name, m.medium_code, sub.subject_name,
              p.parent_name, p.parent_mobile_number,

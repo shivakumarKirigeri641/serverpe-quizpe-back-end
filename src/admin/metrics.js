@@ -671,4 +671,26 @@ async function activityCalendar(weeks = 12) {
   return rows;
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar };
+/**
+ * Multi-quiz engagement: how many quizzes were taken at each slot (1st/2nd/3rd)
+ * today and over the last 7 days, with how many students reached each slot. This
+ * is the number that shows whether the 2nd/3rd-quiz feature is landing.
+ */
+async function slotBreakdown() {
+  const { rows } = await db.query(`
+    SELECT t.quiz_slot AS slot,
+           COUNT(*) FILTER (WHERE t.quiz_date = CURRENT_DATE)::int AS today,
+           COUNT(DISTINCT t.student_id) FILTER (WHERE t.quiz_date = CURRENT_DATE
+             AND q.status_code IN ('completed','closed'))::int AS students_today,
+           COUNT(*) FILTER (WHERE t.quiz_date > CURRENT_DATE - 7)::int AS week,
+           COUNT(*) FILTER (WHERE t.quiz_date > CURRENT_DATE - 7
+             AND q.status_code IN ('completed','closed'))::int AS week_completed
+      FROM quizpe_tracker t
+      JOIN quizpe_status q ON q.id = t.status_id
+     WHERE t.quiz_date > CURRENT_DATE - 7
+     GROUP BY t.quiz_slot
+     ORDER BY t.quiz_slot`);
+  return rows;   // [{slot:1, today, students_today, week, week_completed}, ...]
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown };
