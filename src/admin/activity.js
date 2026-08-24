@@ -159,6 +159,8 @@ async function tonight() {
             p.id AS parent_id, p.parent_name, p.parent_mobile_number,
             to_char(sub.quiz_time, 'HH12:MI AM') AS quiz_time,
             sub.quiz_time AS quiz_time_raw,
+            sub.plan_end_date::text AS plan_end_date,
+            su.state_name,
             pl.plan_name, pl.is_trial,
             t.id AS tracker_id, t.question_count, t.quiz_slot, subj.subject_code, qs.status_code,
             COALESCE(h.answered, 0)::int AS answered,
@@ -173,6 +175,7 @@ async function tonight() {
          ON sub.parent_id = p.id AND sub.is_active
         AND CURRENT_DATE BETWEEN sub.plan_start_date AND sub.plan_end_date
        JOIN quizpe_plans pl ON pl.id = sub.plan_id
+       LEFT JOIN states_unions su ON su.state_code = p.state_code
        JOIN boards b ON b.id = st.board_id
        JOIN grades g ON g.id = st.grade_id
        LEFT JOIN quizpe_tracker t ON t.student_id = st.id AND t.quiz_date = CURRENT_DATE

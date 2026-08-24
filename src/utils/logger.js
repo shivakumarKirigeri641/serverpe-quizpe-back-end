@@ -36,12 +36,23 @@ const raw = {
 const prefix = (level) => [paint(C.dim, stamp()), " ", paint(LEVEL_COLOR[level] || C.dim, level.padEnd(5)), " "];
 const wrap = (level, sink) => (...args) => sink(prefix(level).join("") , ...args);
 
+// Node prints its own warnings (Experimental/Deprecation) via console.error, so
+// they'd otherwise show as ERROR. Detect those and downgrade to WARN — a real
+// error still shows as ERROR.
+const isNodeWarning = (args) => {
+  const f = args[0];
+  const s = typeof f === "string" ? f : (f && `${f.name || ""} ${f.message || ""}`) || "";
+  return /(?:Experimental|Deprecation|Timeout|Buffer)?Warning\b|^\(node:\d+\)/.test(s.trim());
+};
+
 // Only install once, even if this module is required from several places.
 if (!console.__qpWrapped) {
   console.log = wrap("LOG", raw.log);
   console.info = wrap("INFO", raw.info);
   console.warn = wrap("WARN", raw.warn);
-  console.error = wrap("ERROR", raw.error);
+  console.error = (...args) => isNodeWarning(args)
+    ? raw.warn(prefix("WARN").join(""), ...args)
+    : raw.error(prefix("ERROR").join(""), ...args);
   console.__qpWrapped = true;
 }
 
