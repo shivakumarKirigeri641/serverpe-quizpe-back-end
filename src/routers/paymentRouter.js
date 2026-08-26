@@ -943,6 +943,181 @@ ${s.name}'s daily quiz starts tonight. 🚀`);
   }
 }
 
+/* --------------------------------------------------- INSTANT QUIZ (pay-per-quiz) */
+/**
+ * Create a Razorpay Payment Link for a single Instant Quiz (₹9 + GST). Works for
+ * an ENROLLED child (studentId) or a BRAND-NEW child (newStudent with board/grade/
+ * medium/state). No subscription is created — the webhook runs finalizeInstant().
+ */
+async function createInstantLink({ sessionId = null, mobile, studentId = null, newStudent = null }) {
+  const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='INSTANT' AND is_active`)).rows[0];
+  if (!plan) return { error: 'Instant Quiz is not available right now.' };
+  const gstRow = (await db.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const { instantConfig } = require('../get/instantConfig');
+  const cfg = await instantConfig();
+  const gross = +(cfg.price * (1 + gstPct / 100)).toFixed(2);   // admin price + GST
+  const m = normMobile(mobile);
+  const parent = (await db.query(`SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
+
+  let cart;
+  if (studentId) {
+    const st = (await db.query(`SELECT id, student_name FROM students WHERE id=$1 AND is_active`, [studentId])).rows[0];
+    if (!st) return { error: 'That child was not found.' };
+    if (!parent?.state_code) return { error: 'no_state' };   // GST needs a state — caller collects it
+    cart = { instant: true, parent_name: parent.parent_name, state: parent.state_code,
+             student_id: st.id, student_name: st.student_name, total: gross };
+  } else if (newStudent) {
+    const { isDeliverable } = require('../content/availability');
+    if (!await isDeliverable(newStudent.board, newStudent.grade, newStudent.medium)) {
+      return { error: `No quiz content for ${newStudent.board} · ${newStudent.grade} · ${newStudent.medium} yet.` };
+    }
+    cart = { instant: true, parent_name: newStudent.parent_name || parent?.parent_name || 'Parent', state: newStudent.state,
+             student: { name: newStudent.name, board: newStudent.board, grade: newStudent.grade,
+                        medium: newStudent.medium, school_name: newStudent.school_name || null }, total: gross };
+  } else return { error: 'no student' };
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  const { rows: [ins] } = await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
+    [token, sessionId, m, plan.id, gross, JSON.stringify(cart)]);
+
+  const rzp = await razorpayCreds();
+  const plRes = await fetch(`${RZP}/payment_links`, {
+    method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: Math.round(gross * 100), currency: 'INR', accept_partial: false,
+      description: 'QuizPe Instant Quiz (12 questions)',
+      customer: { name: String(cart.parent_name || m).slice(0, 50), contact: `+91${m}` },
+      notify: { sms: false, email: false }, reminder_enable: false,
+      notes: { token: String(token), checkout_id: String(ins.id), instant: '1', mobile: String(m) },
+    }),
+  });
+  const link = await plRes.json();
+  if (!plRes.ok || !link.short_url) { console.error('[pay] instant link failed:', link); return { error: link?.error?.description || 'Could not create payment link.' }; }
+  await db.query(`UPDATE checkout_sessions SET razorpay_mode=$2 WHERE id=$1`, [ins.id, rzp.mode]);
+  return { short_url: link.short_url, amount: gross, token };
+}
+
+/**
+ * Activate an Instant Quiz once its Payment Link is paid. Records the payment,
+ * upserts the parent + the ONE child (existing or new), issues a subscription-free
+ * GST invoice, then starts the 12-question quiz on WhatsApp. Idempotent.
+ */
+async function finalizeInstant(c, pay) {
+  const cart = c.cart || {};
+  const done = (await db.query(
+    `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`,
+    [pay.id])).rows[0];
+  if (done) return { already: true, invoice: done.invoice_id };
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const locked = (await client.query(`SELECT id, used_at, status FROM checkout_sessions WHERE id=$1 FOR UPDATE`, [c.id])).rows[0];
+    if (locked.used_at || locked.status === 'paid') {
+      await client.query('ROLLBACK');
+      const inv = (await db.query(
+        `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`, [pay.id])).rows[0];
+      return { already: true, invoice: inv?.invoice_id };
+    }
+
+    const paymentDbId = (await client.query(
+      `INSERT INTO payments (payment_id, entity, amount, currency, status, order_id, method, captured,
+                             description, email, contact, notes, api_response)
+       VALUES ($1,'payment',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (payment_id) DO UPDATE SET status=EXCLUDED.status, modified_at=now()
+       RETURNING id`,
+      [pay.id, pay.amount / 100, pay.currency, pay.status, pay.order_id || null, pay.method, pay.captured === true,
+       'Instant Quiz', pay.email || null, pay.contact || c.mobile_number,
+       JSON.stringify(pay.notes || {}), JSON.stringify(pay)])).rows[0].id;
+
+    const parentId = (await client.query(
+      `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (parent_mobile_number) DO UPDATE
+         SET parent_name=COALESCE(NULLIF(EXCLUDED.parent_name,''), parents.parent_name),
+             state_code=COALESCE(EXCLUDED.state_code, parents.state_code), modified_at=now()
+       RETURNING id`, [String(cart.parent_name || 'Parent').trim().slice(0, 80) || 'Parent', c.mobile_number, cart.state || null])).rows[0].id;
+
+    let studentId = null, studentName = cart.student_name || null;
+    if (cart.student_id) {
+      const st = (await client.query(`SELECT id, student_name FROM students WHERE id=$1 AND parent_id=$2`, [cart.student_id, parentId])).rows[0];
+      if (st) { studentId = st.id; studentName = st.student_name; }
+    }
+    if (!studentId && cart.student) {
+      const s = cart.student;
+      const row = (await client.query(
+        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+         VALUES ($1,(SELECT id FROM boards WHERE board_code=$2),(SELECT id FROM grades WHERE grade_code=$3),
+                    (SELECT id FROM mediums WHERE medium_code=$4),$5,$6)
+         ON CONFLICT (parent_id, student_name) DO UPDATE
+           SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id, medium_id=EXCLUDED.medium_id,
+               school_name=COALESCE(EXCLUDED.school_name, students.school_name), is_active=true, modified_at=now()
+         RETURNING id`,
+        [parentId, s.board, s.grade, s.medium, String(s.name).trim().slice(0, 60), s.school_name || null])).rows[0];
+      studentId = row.id; studentName = String(s.name).trim().slice(0, 60);
+    }
+    if (!studentId) throw new Error('instant: no student resolved');
+
+    const { generateInstantInvoice } = require('../pdf/invoice');
+    const inv = await generateInstantInvoice({
+      paymentDbId,
+      parent: { id: parentId, parent_name: cart.parent_name, parent_mobile_number: c.mobile_number, state_code: cart.state || null },
+      student: { student_name: studentName }, exec: client,
+    });
+
+    await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
+    if (c.whatsapp_session_id) {
+      await client.query(`UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`, [c.whatsapp_session_id, parentId]);
+      await client.query(
+        `INSERT INTO whatsapp_session_events (session_id, from_state, to_state, event, payload)
+         VALUES ($1, COALESCE((SELECT state FROM whatsapp_sessions WHERE id=$1),'main_menu'), 'active','instant_paid',$2)`,
+        [c.whatsapp_session_id, JSON.stringify({ payment_id: pay.id, invoice: inv.invoiceNo, student_id: studentId })]);
+    }
+    await client.query('COMMIT');
+
+    // deliver: confirmation + invoice, then START the quiz
+    try {
+      const wa = require('../whatsapp/client');
+      await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`✅ *Payment successful!* ⚡
+
+Your *Instant Quiz* for *${studentName}* is starting now — 12 questions.
+🧾 Invoice: ${inv.invoiceNo}`);
+      await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
+        filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+        caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
+      });
+      if (studentId) await require('../whatsapp/instantQuiz').startInstantQuiz(c.whatsapp_session_id, c.mobile_number, studentId);
+    } catch (e) { console.error('[pay] instant deliver failed:', e.message); }
+
+    try {
+      const notify = require('../mail/notify');
+      const M2 = require('../whatsapp/messages');
+      notify.payment({
+        parent: { name: cart.parent_name || c.mobile_number, mobile: c.mobile_number, state: cart.state },
+        children: [{ name: studentName }],
+        plan: { name: 'Instant Quiz (₹9 + GST)', duration: null,
+                start: M2.fmtDate(new Date()), end: '—', quizTime: '—', reminderTime: '—' },
+        payment: { amount: Number(pay.amount / 100).toFixed(2), method: pay.method, status: pay.status,
+                   paymentId: pay.id, orderId: pay.order_id || '—', mode: c.razorpay_mode || 'test' },
+        invoice: { number: inv.invoiceNo, base: inv.amounts?.base, cgst: inv.amounts?.cgst,
+                   sgst: inv.amounts?.sgst, igst: inv.amounts?.igst, total: inv.amounts?.total },
+        ctx: { channel: 'Instant Quiz', at: new Date(), sessionId: c.whatsapp_session_id },
+      });
+    } catch (e) { console.error('[pay] instant alert skipped:', e.message); }
+
+    return { invoice: inv.invoiceNo, studentName };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /** Fetch a captured payment for an order (used to reconcile an already-paid order). */
 async function capturedPaymentForOrder(orderId, auth) {
   const header = auth || (await razorpayCreds()).authHeader;
@@ -1026,11 +1201,13 @@ async function activateFromToken(token, pay) {
     console.error(`[pay] webhook link amount mismatch token ${token}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
     return;
   }
-  // A mid-plan add-child link carries its own activation path (no new
-  // subscription; a pro-rated invoice against the family's current plan).
-  const result = c.cart && c.cart.midplan
-    ? await finalizeAddChild(c, pay)
-    : await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
+  // Each link type carries its own activation path: instant (no subscription,
+  // pay-per-quiz), mid-plan add-child (pro-rated), or a normal subscription.
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
   console.log(`[pay] webhook link ${result.already ? 'already active' : 'ACTIVATED'} token=${token} invoice=${result.invoice}`);
 }
 
@@ -1140,10 +1317,12 @@ async function reconcileByPaymentId(paymentId, token = null) {
     return { error: `Amount mismatch: checkout ₹${c.cart.total} vs payment ₹${Number(pay.amount) / 100}.` };
   }
 
-  const result = c.cart && c.cart.midplan
-    ? await finalizeAddChild(c, pay)
-    : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
-  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan) };
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
+  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan), instant: !!(c.cart && c.cart.instant) };
 }
 
 module.exports = router;
@@ -1152,3 +1331,4 @@ module.exports.reconcileByPaymentId = reconcileByPaymentId;
 module.exports.razorpayWebhook = razorpayWebhook;
 module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;
+module.exports.createInstantLink = createInstantLink;

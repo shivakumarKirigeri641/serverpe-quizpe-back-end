@@ -693,4 +693,69 @@ async function slotBreakdown() {
   return rows;   // [{slot:1, today, students_today, week, week_completed}, ...]
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown };
+/**
+ * Instant "Quick Quiz" analytics. Instant quizzes are quizpe_tracker.is_instant;
+ * revenue is the ₹9+GST captured payments (description='Instant Quiz'). Returns
+ * today vs yesterday, this-week vs last-week, a 14-day trend, a status split, a
+ * recent list, and all-time totals.
+ */
+async function quickQuiz() {
+  const many = async (sql, p = []) => (await db.query(sql, p)).rows;
+  const one = async (sql, p = []) => (await db.query(sql, p)).rows[0];
+
+  const dayStats = (dateExpr) => one(
+    `SELECT COUNT(*)::int quizzes,
+            COUNT(DISTINCT t.student_id)::int children,
+            COUNT(*) FILTER (WHERE qs.status_code='completed')::int completed,
+            COUNT(*) FILTER (WHERE qs.status_code='in_progress')::int in_progress,
+            (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+              WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+                AND ${IST_DATE('created_at')} = ${dateExpr})::numeric revenue
+       FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant AND t.quiz_date = ${dateExpr}`);
+
+  const weekStats = (woff) => one(
+    `SELECT (SELECT COUNT(*)::int FROM quizpe_tracker
+              WHERE is_instant AND date_trunc('week',quiz_date)=date_trunc('week',CURRENT_DATE)-($1||' weeks')::interval) quizzes,
+            (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+              WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+                AND date_trunc('week', ${IST_DATE('created_at')})=date_trunc('week',CURRENT_DATE)-($1||' weeks')::interval) revenue`,
+    [woff]);
+
+  const [today, yesterday, this_week, last_week, totals] = await Promise.all([
+    dayStats('CURRENT_DATE'), dayStats('(CURRENT_DATE-1)'), weekStats(0), weekStats(1),
+    one(`SELECT (SELECT COUNT(*)::int FROM quizpe_tracker WHERE is_instant) quizzes,
+                (SELECT COUNT(DISTINCT student_id)::int FROM quizpe_tracker WHERE is_instant) children,
+                (SELECT COALESCE(SUM(amount),0)::numeric FROM payments WHERE description='Instant Quiz' AND status IN ('captured','authorized')) revenue`),
+  ]);
+
+  const trend = await many(
+    `WITH span AS (SELECT generate_series(CURRENT_DATE-13, CURRENT_DATE, '1 day')::date d)
+     SELECT to_char(span.d,'DD Mon') label, span.d::text date,
+       (SELECT COUNT(*)::int FROM quizpe_tracker t WHERE t.is_instant AND t.quiz_date=span.d) quizzes,
+       (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+         WHERE description='Instant Quiz' AND status IN ('captured','authorized') AND ${IST_DATE('created_at')}=span.d) revenue
+     FROM span ORDER BY span.d`);
+
+  const status = await many(
+    `SELECT qs.status_code status, COUNT(*)::int n
+       FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant AND t.quiz_date > CURRENT_DATE-30
+      GROUP BY qs.status_code ORDER BY n DESC`);
+
+  const recent = await many(
+    `SELECT st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            qs.status_code status, r.score_correct, r.score_total, r.score_pct,
+            to_char(t.modified_at AT TIME ZONE '${TZ}','DD Mon HH24:MI') at
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       JOIN quizpe_status qs ON qs.id=t.status_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant
+      ORDER BY t.modified_at DESC LIMIT 30`);
+
+  return { today, yesterday, this_week, last_week, trend, status, recent, totals };
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown, quickQuiz };

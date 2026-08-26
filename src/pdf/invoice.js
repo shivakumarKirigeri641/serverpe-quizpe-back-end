@@ -60,17 +60,24 @@ async function ensureInvoiceSequence(exec = db) {
     `SELECT setval('invoice_seq', GREATEST($1::bigint, last_value), true) FROM invoice_seq`, [r.n]);
 }
 
-async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, cart = null) {
-  // A subscription must have exactly ONE tax invoice. finalize() is idempotent
-  // and can re-run (retry, webhook replay, a parent reloading the success
-  // page), so hand back the invoice that already exists rather than issuing a
-  // second number for money that was only charged once.
-  const already = (await exec.query(
-    `SELECT invoice_id, invoice_path FROM invoices
-      WHERE subscription_id = $1 AND ($2::bigint IS NULL OR payment_id = $2::bigint)
-      ORDER BY id LIMIT 1`, [subscriptionId, paymentDbId])).rows[0];
+async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, cart = null, opts = {}) {
+  // A subscription (or a subscription-free instant purchase) must have exactly ONE
+  // tax invoice. Callers are idempotent (retry, webhook replay, page reload), so
+  // hand back the existing invoice rather than issuing a second number. For a
+  // subscription we dedupe by subscription_id; for an instant purchase (no
+  // subscription) we dedupe by payment_id.
+  const already = subscriptionId
+    ? (await exec.query(
+        `SELECT invoice_id, invoice_path FROM invoices
+          WHERE subscription_id = $1 AND ($2::bigint IS NULL OR payment_id = $2::bigint)
+          ORDER BY id LIMIT 1`, [subscriptionId, paymentDbId])).rows[0]
+    : (paymentDbId
+        ? (await exec.query(
+            `SELECT invoice_id, invoice_path FROM invoices WHERE payment_id = $1 ORDER BY id LIMIT 1`,
+            [paymentDbId])).rows[0]
+        : null);
   if (already) {
-    console.log(`[invoice] reusing ${already.invoice_id} for subscription ${subscriptionId}`);
+    console.log(`[invoice] reusing ${already.invoice_id}`);
     return {
       reused: true,
       invoiceNo: already.invoice_id,
@@ -79,7 +86,9 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
     };
   }
 
-  const head = (await exec.query(
+  // Normal path reads the head from the subscription; the instant path supplies
+  // it directly (parent + plan + payment), since there is no subscription.
+  const head = opts.head || (await exec.query(
     `SELECT s.id AS subscription_id, s.plan_start_date, s.plan_end_date,
             pl.plan_code, pl.plan_name, pl.price, pl.student_count, pl.duration,
             p.id AS parent_id, p.parent_name, p.parent_mobile_number, p.state_code,
@@ -280,7 +289,7 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
     [invoiceDbId, paymentDbId, invoiceNo, filingPeriod,
      biz.gstin || '', biz.gst_state_code || BUSINESS_STATE,
      head.parent_name || 'Customer', head.parent_mobile_number, posCode,
-     placeOfSupply, intra ? 'INTRA' : 'INTER', SAC_CODE, `${head.plan_name} (${head.duration} days)`,
+     placeOfSupply, intra ? 'INTRA' : 'INTER', SAC_CODE, head.gstr_desc || `${head.plan_name} (${head.duration} days)`,
      base, gstPct, intra ? gstPct / 2 : 0, cgst, intra ? gstPct / 2 : 0, sgst,
      intra ? 0 : gstPct, igst, gross, head.rzp_payment_id || null]);
 
@@ -292,4 +301,45 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   };
 }
 
-module.exports = { generateInvoice, nextInvoiceNumber, ensureInvoiceSequence };
+/**
+ * Tax invoice for an Instant Quiz — NO subscription. ₹9 is the EX-GST base; GST
+ * is added on top, so the parent pays 9 × (1 + gst/100). We pass the GST-inclusive
+ * gross to the shared generator (which extracts base + GST) with a caller-supplied
+ * head + baseLine, so the PDF and GSTR-1 read "Instant Quiz".
+ */
+async function generateInstantInvoice({ paymentDbId, parent, student, exec = db }) {
+  const gstRow = (await exec.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const plan = (await exec.query(`SELECT plan_name FROM quizpe_plans WHERE plan_code='INSTANT'`)).rows[0]
+            || { plan_name: 'Instant Quiz' };
+  const { instantConfig } = require('../get/instantConfig');
+  const baseExcl = (await instantConfig(exec)).price;         // admin-configurable ex-GST price
+  const gross = +(baseExcl * (1 + gstPct / 100)).toFixed(2);   // what the parent pays
+  const pay = (await exec.query(
+    `SELECT payment_id AS rzp_payment_id, order_id AS rzp_order_id, method FROM payments WHERE id=$1`, [paymentDbId])).rows[0] || {};
+  const stateRow = parent.state_code
+    ? (await exec.query(`SELECT state_name FROM states_unions WHERE state_code=$1`, [parent.state_code])).rows[0]
+    : null;
+
+  const head = {
+    subscription_id: null,
+    plan_code: 'INSTANT', plan_name: plan.plan_name || 'Instant Quiz',
+    price: gross, student_count: 1, duration: 0,
+    plan_start_date: new Date(), plan_end_date: new Date(),
+    parent_id: parent.id, parent_name: parent.parent_name || 'Customer',
+    parent_mobile_number: parent.parent_mobile_number, state_code: parent.state_code || null,
+    state_name: stateRow?.state_name || null,
+    rzp_payment_id: pay.rzp_payment_id || null, rzp_order_id: pay.rzp_order_id || null, method: pay.method || null,
+    gstr_desc: 'Instant Quiz — 12 questions',
+  };
+  const cart = {
+    total: gross, students: [],
+    baseLine: {
+      desc: 'Instant Quiz — Mathematics (12 questions)', plan: 'INSTANT', qty: 1, gross,
+      sub: student?.student_name ? `One quiz · ${student.student_name}` : 'One quiz',
+    },
+  };
+  return generateInvoice(null, paymentDbId, exec, cart, { head });
+}
+
+module.exports = { generateInvoice, generateInstantInvoice, nextInvoiceNumber, ensureInvoiceSequence };

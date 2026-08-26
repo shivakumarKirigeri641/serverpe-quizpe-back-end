@@ -96,6 +96,38 @@ const STEPS = [
     ],
   },
   {
+    name: 'instant quiz plan',
+    // 'Instant Quiz' — a pay-per-quiz plan (₹9 ex-GST) with NO subscription and
+    // NO validity: pay, get 12 Maths questions, complete, pay again for another.
+    // Kept OUT of the public plans list (is_instant) so the existing trial/premium
+    // flow is untouched; it's reached only via its own menu entry. Invoices can now
+    // exist without a subscription (instant purchases have none).
+    check: `SELECT 1 FROM quizpe_plans WHERE plan_code='INSTANT'`,
+    apply: [
+      `ALTER TABLE quizpe_plans ADD COLUMN IF NOT EXISTS is_instant boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE invoices ALTER COLUMN subscription_id DROP NOT NULL`,
+      // Mark instant-quiz trackers so the daily engine + daily dashboards can
+      // ignore them (existing rows are all false → behaviour unchanged).
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS is_instant boolean NOT NULL DEFAULT false`,
+      // Instant quizzes are pay-per-use, so a child can have several in one day —
+      // widen the slot range so each gets a distinct slot (daily still caps at 3
+      // in code). Existing slots 1..3 stay valid.
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_slot_range`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_slot_range CHECK (quiz_slot BETWEEN 1 AND 999)`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_instant ON quizpe_tracker (student_id, quiz_date) WHERE is_instant`,
+      `INSERT INTO quizpe_plans
+         (plan_code, plan_name, plan_description, price, comparable_price, regular_price,
+          student_count, duration, is_trial, is_instant, is_active)
+       SELECT 'INSTANT', 'Instant Quiz',
+              'One quick 12-question quiz, anytime — pay per quiz, no subscription.',
+              9, 9, 9, 1, 0, false, true, true
+        WHERE NOT EXISTS (SELECT 1 FROM quizpe_plans WHERE plan_code='INSTANT')`,
+      // Admin-configurable Instant Quiz price (ex-GST) + question count.
+      `INSERT INTO app_settings (key, value) VALUES ('instant_quiz', '{"price":9,"questions":12}')
+         ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
+  {
     name: 'launch_offer settings',
     // Seat-capped launch offer. Stored in app_settings so it can be switched
     // off, re-capped or ended from the admin panel without a deploy.

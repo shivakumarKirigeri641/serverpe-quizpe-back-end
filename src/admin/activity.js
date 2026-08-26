@@ -179,6 +179,7 @@ async function tonight() {
        JOIN boards b ON b.id = st.board_id
        JOIN grades g ON g.id = st.grade_id
        LEFT JOIN quizpe_tracker t ON t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                                 AND NOT COALESCE(t.is_instant, false)
        LEFT JOIN subjects subj ON subj.id = t.subject_id
        LEFT JOIN quizpe_status qs ON qs.id = t.status_id
        LEFT JOIN LATERAL (

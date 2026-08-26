@@ -117,6 +117,7 @@ async function dailyQuizProgress(studentId, exec = db) {
     `SELECT COUNT(*)::int done FROM quizpe_tracker t
        JOIN quizpe_status qs ON qs.id = t.status_id
       WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
+        AND NOT COALESCE(t.is_instant, false)
         AND qs.status_code IN ('completed','closed')`, [studentId]);
   const done = doneRows[0].done;
   // Available if something is still pending, or a subject is under its slot cap.
@@ -126,7 +127,7 @@ async function dailyQuizProgress(studentId, exec = db) {
     for (const s of subjects) {
       const used = (await exec.query(
         `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
-          WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE`, [studentId, s.id])).rows[0].m;
+          WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
       if (used < maxSlots) { hasNext = true; break; }
     }
   }
@@ -149,7 +150,7 @@ async function ensureNextTracker(studentId, maxSlots, exec = db) {
   for (const s of subjects) {
     const used = (await exec.query(
       `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
-        WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE`, [studentId, s.id])).rows[0].m;
+        WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
     if (used < maxSlots) {
       const nextSlot = used + 1;
       const qc = await mastery.recommendedQuestionCount(studentId, s.id, exec);
@@ -174,6 +175,7 @@ async function pendingTrackers(studentId) {
        JOIN subjects s       ON s.id = t.subject_id
        JOIN quizpe_status qs ON qs.id = t.status_id
       WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
+        AND NOT COALESCE(t.is_instant, false)
         AND qs.status_code IN ('scheduled','delivered','yet_to_start','in_progress')
       ORDER BY t.quiz_slot ASC, (s.subject_code = $2) DESC, s.subject_code`,
     [studentId, BASE_SUBJECT]);
@@ -507,8 +509,13 @@ _Full answers & explanations are in the report below._ 📄`);
   // window and cap, offer a one-tap button to start the next one now. Best-effort
   // — the offer must never break the score/report the child just earned.
   try {
-    const t = (await db.query(`SELECT student_id FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
-    if (t) {
+    const t = (await db.query(`SELECT student_id, is_instant FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+    if (t && t.is_instant) {
+      // Instant Quiz is pay-per-use: offer to buy another (₹9) — anytime, no window.
+      await wa.sendButtons(sessionId, mobile,
+        `⚡ Want *another quick quiz*? Just ₹9 + GST for 12 fresh questions — anytime.`,
+        [{ id: 'instant_again', title: '⚡ Take another (₹9)' }]);
+    } else if (t) {
       const W = require('./quizWindow');
       const prog = await dailyQuizProgress(t.student_id);
       if (prog.hasNext && W.state() === 'open') {
