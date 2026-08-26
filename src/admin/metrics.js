@@ -755,7 +755,23 @@ async function quickQuiz() {
       WHERE t.is_instant
       ORDER BY t.modified_at DESC LIMIT 30`);
 
-  return { today, yesterday, this_week, last_week, trend, status, recent, totals };
+  // Instant-quiz invoices, for the download/view buttons on the Quick Quiz page.
+  // An instant sale is the only invoice with NO subscription behind it, which is
+  // exactly what makes it identifiable without a tracker->invoice join (there
+  // isn't one: the payment happens before the quiz exists).
+  const invoices = await many(
+    `SELECT i.id, i.invoice_id, i.amount_base::numeric, i.cgst::numeric, i.sgst::numeric,
+            i.igst::numeric, i.total::numeric,
+            to_char(i.created_at AT TIME ZONE '${TZ}','DD Mon YYYY HH24:MI') at,
+            p.payment_id rzp_payment_id, p.contact mobile,
+            COALESCE(pa.parent_name,'—') parent_name
+       FROM invoices i
+       JOIN payments p ON p.id = i.payment_id
+       LEFT JOIN parents pa ON pa.parent_mobile_number = p.contact
+      WHERE i.is_active AND i.subscription_id IS NULL AND p.description = 'Instant Quiz'
+      ORDER BY i.id DESC LIMIT 50`);
+
+  return { today, yesterday, this_week, last_week, trend, status, recent, totals, invoices };
 }
 
 module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown, quickQuiz };

@@ -128,6 +128,24 @@ const STEPS = [
     ],
   },
   {
+    name: 'tracker quiz_type allows instant',
+    // quizpe_tracker.quiz_type is guarded by a CHECK that predates Instant Quiz
+    // (daily/test/revision/practice). An instant tracker sets quiz_type='instant'
+    // and was being rejected at INSERT — the parent paid, got the invoice, and
+    // the quiz never started. Widen the list; every existing value stays valid.
+    //
+    // Kept as its OWN step because the 'instant quiz plan' step above is already
+    // applied on the live DB, so its check passes and it would never re-run.
+    check: `SELECT 1 FROM pg_constraint
+             WHERE conname='tracker_quiz_type_valid'
+               AND pg_get_constraintdef(oid) LIKE '%instant%'`,
+    apply: [
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_type_valid`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_type_valid
+         CHECK (quiz_type IN ('daily','test','revision','practice','instant'))`,
+    ],
+  },
+  {
     name: 'launch_offer settings',
     // Seat-capped launch offer. Stored in app_settings so it can be switched
     // off, re-capped or ended from the admin panel without a deploy.

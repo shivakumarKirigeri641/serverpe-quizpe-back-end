@@ -580,15 +580,28 @@ router.delete('/finance/expenses/:id', requireAdmin, async (req, res) => {
 router.get('/finance/invoices', requireAdmin, async (req, res) => {
   const limit = clamp(req.query.limit, 100, 500);
   try {
+    // LEFT JOINs, deliberately: an Instant Quiz sale has NO subscription, so the
+    // old inner join dropped those invoices from the ledger entirely — real,
+    // taxable revenue that never appeared in the list it is meant to reconcile.
+    // Where there is no subscription, the customer is resolved from the payment.
     const { rows } = await db.query(`
       SELECT i.id, i.invoice_id, i.amount_base::numeric, i.gst_pct, i.cgst::numeric,
              i.sgst::numeric, i.igst::numeric, i.total::numeric, i.created_at,
-             p.parent_name, p.parent_mobile_number, p.state_code,
-             pl.plan_name, pl.plan_code
+             COALESCE(p.parent_name, pp.parent_name, '—')                AS parent_name,
+             COALESCE(p.parent_mobile_number, pay.contact, '—')          AS parent_mobile_number,
+             COALESCE(p.state_code, pp.state_code)                       AS state_code,
+             COALESCE(pl.plan_name,
+                      CASE WHEN pay.description = 'Instant Quiz' THEN 'Instant Quiz' END,
+                      '—')                                              AS plan_name,
+             COALESCE(pl.plan_code,
+                      CASE WHEN pay.description = 'Instant Quiz' THEN 'INSTANT' END,
+                      '—')                                              AS plan_code
         FROM invoices i
-        JOIN parents_quizpe_subscriptions s ON s.id=i.subscription_id
-        JOIN parents p ON p.id=s.parent_id
-        JOIN quizpe_plans pl ON pl.id=s.plan_id
+        LEFT JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
+        LEFT JOIN parents p  ON p.id = s.parent_id
+        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
+        LEFT JOIN payments pay ON pay.id = i.payment_id
+        LEFT JOIN parents pp ON pp.parent_mobile_number = pay.contact
        WHERE i.is_active ORDER BY i.id DESC LIMIT $1`, [limit]);
     ok(res, { rows });
   } catch (e) { console.error('[admin] invoices:', e.message); fail(res, 500, 'Could not load invoices.'); }

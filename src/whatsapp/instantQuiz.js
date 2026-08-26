@@ -60,7 +60,14 @@ async function fallbackFill(trackerId, studentId, subjectId, count, exec = db) {
   return true;
 }
 
-/** Build + start + send the first question of a new instant quiz. */
+/**
+ * Build + start an instant quiz and send its LINK.
+ *
+ * The quiz runs on the same web page as the daily quiz (public/quiz.html), not
+ * in chat: full option text with no 24-character truncation, and the next
+ * question appears on tap instead of a stream of "answer saved" messages. The
+ * score, report and invoice still come back to WhatsApp.
+ */
 async function startInstantQuiz(sessionId, mobile, studentId) {
   const wa = require('./client');
   const { trackerId, subjectId, questions } = await buildInstantTracker(studentId);
@@ -78,9 +85,20 @@ async function startInstantQuiz(sessionId, mobile, studentId) {
   }
   const qn = await quiz.nextQuestion(trackerId);
   if (!qn) return { trackerId, done: true };
-  await wa.sendText(sessionId, mobile, `⚡ *Your Instant Quiz is ready!* ${questions} questions — let's go. 🚀`);
-  await quiz.sendQuestion(sessionId, mobile, trackerId, qn);
-  return { trackerId };
+
+  const name = (await db.query(`SELECT student_name FROM students WHERE id=$1`, [studentId]))
+    .rows[0]?.student_name || 'your child';
+  const { createQuizLink } = require('../routers/quizWebRouter');
+  const { url } = await createQuizLink(sessionId, mobile, trackerId);
+  await wa.sendCtaUrl(sessionId, mobile, {
+    header: `⚡ ${name}'s Instant Quiz`,
+    body: `📚 *Mathematics*\n_${questions} questions — about 5 minutes._\n\n`
+        + `Tap below to begin — the score and report come straight back here. 🚀`,
+    displayText: '▶️ Start quiz',
+    url,
+    footer: 'QuizPe by ServerPe App Solutions',
+  });
+  return { trackerId, url };
 }
 
 /** An unfinished instant quiz for this student today (enforces one-at-a-time). */

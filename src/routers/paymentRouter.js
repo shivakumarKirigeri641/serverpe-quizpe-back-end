@@ -210,6 +210,12 @@ router.get('/api/context', async (req, res) => {
       availability, gst_pct: gstPct,
       business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
       existing: await existingFamily(c.mobile_number),   // pre-fill for renewals
+      // Instant Quiz prices differently from the plans: the admin price is
+      // EX-GST (₹9) and GST is added ON TOP, where a plan's price already
+      // includes it. Send both breakups so the page can show the exact split
+      // for the state chosen (intra = CGST+SGST, inter = IGST) without
+      // guessing, and never mix the two pricing models up.
+      ...(c.cart && c.cart.instant ? await instantPricing(gstPct) : {}),
     });
   } catch (e) {
     console.error('[pay] context failed:', e.message);
@@ -945,18 +951,165 @@ ${s.name}'s daily quiz starts tonight. 🚀`);
 
 /* --------------------------------------------------- INSTANT QUIZ (pay-per-quiz) */
 /**
- * Create a Razorpay Payment Link for a single Instant Quiz (₹9 + GST). Works for
- * an ENROLLED child (studentId) or a BRAND-NEW child (newStudent with board/grade/
- * medium/state). No subscription is created — the webhook runs finalizeInstant().
+ * Open an Instant Quiz checkout: mint a checkout_session and return the URL of
+ * the web form (public/instant.html). The parent fills in the child's details
+ * there and pays ₹9 + GST through Razorpay's Standard Checkout modal — the same
+ * shape as the plan checkout (pay.html), NOT a payment link.
+ *
+ * Nothing about the child is decided here: the form collects (or pre-fills) it,
+ * and /api/instant-order validates it server-side before any order is created.
+ * That is what lets a brand-new number buy a quiz with no trial and no plan.
  */
-async function createInstantLink({ sessionId = null, mobile, studentId = null, newStudent = null }) {
+async function createInstantCheckout({ sessionId = null, mobile }) {
   const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='INSTANT' AND is_active`)).rows[0];
   if (!plan) return { error: 'Instant Quiz is not available right now.' };
+  const gross = await instantGross();
+  const m = normMobile(mobile);
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days')`,
+    [token, sessionId, m, plan.id, gross, JSON.stringify({ instant: true, total: gross })]);
+
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+  return { url: `${base}/instant.html?token=${token}`, amount: gross, token };
+}
+
+/**
+ * Instant Quiz pricing for the checkout page. The admin price is EX-GST, so the
+ * base is exactly what the admin set and GST is added on top; both the intra
+ * (CGST+SGST) and inter (IGST) splits are returned so the page can switch on the
+ * state without a round-trip. gstBreakup() takes the GROSS and extracts, so
+ * feeding it the computed gross returns the admin's base back unchanged.
+ */
+async function instantPricing(gstPct) {
+  const { instantConfig } = require('../get/instantConfig');
+  const cfg = await instantConfig();
+  const gross = +(cfg.price * (1 + gstPct / 100)).toFixed(2);
+  return {
+    instant: {
+      base: Number(cfg.price), questions: cfg.questions, gst_pct: gstPct, gross,
+      intra: gstBreakup(gross, gstPct, true),
+      inter: gstBreakup(gross, gstPct, false),
+    },
+  };
+}
+
+/** ₹ the parent pays for one Instant Quiz: admin-set ex-GST price + live GST. */
+async function instantGross() {
   const gstRow = (await db.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
   const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
   const { instantConfig } = require('../get/instantConfig');
   const cfg = await instantConfig();
-  const gross = +(cfg.price * (1 + gstPct / 100)).toFixed(2);   // admin price + GST
+  return +(cfg.price * (1 + gstPct / 100)).toFixed(2);
+}
+
+/**
+ * Instant Quiz order. Validates the ONE child against what we can actually
+ * deliver, resolves them to an existing child where the name matches (so a
+ * repeat purchase never creates a duplicate), prices the quiz server-side, and
+ * opens a Razorpay order. The client's total is never trusted.
+ */
+router.post('/api/instant-order', async (req, res) => {
+  try {
+    const { token, student, state, parent_name } = req.body || {};
+    const c = await loadCheckout(token);
+    if (!c || !c.cart || !c.cart.instant) return res.status(410).json({ success: false, error: 'This link has expired. Please tap ⚡ Instant Quiz again.' });
+
+    const s = student || {};
+    const name = String(s.name || '').trim().slice(0, 60);
+    if (!name) return res.status(400).json({ success: false, error: "Please enter the child's name." });
+    if (!s.board || !s.grade || !s.medium) return res.status(400).json({ success: false, error: 'Please choose board, grade and medium.' });
+    if (!(await db.query(`SELECT 1 FROM states_unions WHERE state_code=$1 AND is_active`, [state])).rowCount) {
+      return res.status(400).json({ success: false, error: 'Please select your state.' });
+    }
+    const { isDeliverable } = require('../content/availability');
+    if (!await isDeliverable(s.board, s.grade, s.medium)) {
+      return res.status(400).json({ success: false, error: `We don't have quizzes for ${s.board} · ${s.grade} · ${s.medium} yet.` });
+    }
+
+    // Reuse the child when the name matches one already on this number — the
+    // form arrives pre-filled, so an unchanged name must map to the same child
+    // rather than quietly creating a second copy of them.
+    const existing = (await db.query(
+      `SELECT id FROM students WHERE parent_id=(SELECT id FROM parents WHERE parent_mobile_number=$1)
+         AND lower(btrim(student_name))=lower($2) AND is_active LIMIT 1`, [c.mobile_number, name])).rows[0];
+
+    const gross = await instantGross();
+    const cart = {
+      instant: true, total: gross,
+      parent_name: String(parent_name || '').trim().slice(0, 80) || 'Parent',
+      state,
+      ...(existing
+        ? { student_id: existing.id, student_name: name }
+        : { student: { name, board: s.board, grade: s.grade, medium: s.medium,
+                       school_name: String(s.school_name || '').trim().slice(0, 120) || null } }),
+    };
+
+    const rzp = await razorpayCreds();
+    const rzpRes = await fetch(`${RZP}/orders`, {
+      method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: Math.round(gross * 100), currency: 'INR', receipt: `qpi_${c.id}`,
+        notes: { plan: 'INSTANT', instant: '1', token: String(token), mobile: String(c.mobile_number) } }),
+    });
+    const order = await rzpRes.json();
+    if (!rzpRes.ok) { console.error('[pay] instant order failed:', order); return res.status(502).json({ success: false, error: order?.error?.description || 'Could not start payment.' }); }
+
+    await db.query(
+      `UPDATE checkout_sessions SET razorpay_order_id=$2, amount=$3, status='order_created', cart=$4, razorpay_mode=$5 WHERE id=$1`,
+      [c.id, order.id, gross, JSON.stringify(cart), rzp.mode]);
+
+    res.json({ success: true, order_id: order.id, amount: Math.round(gross * 100), currency: 'INR', key: rzp.keyId });
+  } catch (e) {
+    console.error('[pay] instant-order failed:', e.message);
+    res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
+  }
+});
+
+/** Verify an Instant Quiz payment and activate it (invoice + quiz on WhatsApp). */
+router.post('/api/instant-verify', async (req, res) => {
+  const { token, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  try {
+    const c = await loadCheckoutAny(token);         // also loads a paid one, for idempotent replays
+    if (!c || !c.cart || !c.cart.instant) return res.status(410).json({ success: false, error: 'Link expired.' });
+
+    const rzp = await razorpayCreds(c.razorpay_mode);
+    const expected = crypto.createHmac('sha256', rzp.keySecret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`).digest('hex');
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ success: false, error: 'Payment could not be verified.' });
+    }
+
+    const payRes = await fetch(`${RZP}/payments/${razorpay_payment_id}`, { headers: { Authorization: rzp.authHeader } });
+    const pay = await payRes.json();
+    if (!payRes.ok || !['captured', 'authorized'].includes(pay.status)) {
+      return res.status(400).json({ success: false, error: 'Payment not completed.' });
+    }
+    if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+      console.error(`[pay] instant amount mismatch: cart ${c.cart.total} vs paid ${Number(pay.amount) / 100}`);
+      return res.status(400).json({ success: false, error: 'Amount mismatch. Contact support if money was deducted.' });
+    }
+
+    const result = await finalizeInstant(c, pay);
+    res.json({ success: true, invoice: result.invoice, already_paid: !!result.already, whatsapp_url: waHandoffUrl() });
+  } catch (e) {
+    console.error('[pay] instant-verify failed:', e.message);
+    res.status(500).json({ success: false, error: 'Payment verification failed. If money was deducted, contact support.' });
+  }
+});
+
+/** wa.me link used to hand the parent back to the chat after paying. */
+function waHandoffUrl() {
+  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+  return n ? `https://wa.me/${n}` : null;
+}
+
+/** Kept for the admin/one-off path: a Razorpay Payment Link for one Instant Quiz. */
+async function createInstantLink({ sessionId = null, mobile, studentId = null, newStudent = null }) {
+  const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='INSTANT' AND is_active`)).rows[0];
+  if (!plan) return { error: 'Instant Quiz is not available right now.' };
+  const gross = await instantGross();
   const m = normMobile(mobile);
   const parent = (await db.query(`SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
 
@@ -964,8 +1117,11 @@ async function createInstantLink({ sessionId = null, mobile, studentId = null, n
   if (studentId) {
     const st = (await db.query(`SELECT id, student_name FROM students WHERE id=$1 AND is_active`, [studentId])).rows[0];
     if (!st) return { error: 'That child was not found.' };
-    if (!parent?.state_code) return { error: 'no_state' };   // GST needs a state — caller collects it
-    cart = { instant: true, parent_name: parent.parent_name, state: parent.state_code,
+    // A missing state is NOT a dead-end. The GST invoice already defaults an
+    // unknown recipient state to the supplier's state (place of supply = supplier
+    // location, correct for a B2C sale with no address on file).
+    cart = { instant: true, parent_name: parent?.parent_name || 'Parent',
+             state: parent?.state_code || null,
              student_id: st.id, student_name: st.student_name, total: gross };
   } else if (newStudent) {
     const { isDeliverable } = require('../content/availability');
@@ -1213,14 +1369,45 @@ async function activateFromToken(token, pay) {
 
 async function activateFromWebhook(pay) {
   if (!['captured', 'authorized'].includes(pay.status)) return;
-  const c = await loadCheckoutByOrder(pay.order_id);
-  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id}`); return; }
+  let c = await loadCheckoutByOrder(pay.order_id);
+
+  // A PAYMENT LINK payment also fires payment.captured, but its checkout was
+  // never stored against an order id — only the token in the link's notes. So an
+  // order miss is not a dead end: fall back to that token, then to the payer's
+  // number + exact amount (the same matching the admin reconcile uses). Without
+  // this, a link payment silently vanishes unless payment_link.paid happens to
+  // be subscribed in the Razorpay dashboard — the parent pays and gets nothing.
+  if (!c) {
+    const token = pay.notes && (pay.notes.token || pay.notes.checkout_token);
+    if (token) c = await loadCheckoutByToken(String(token));
+  }
+  if (!c) {
+    const mobile = normMobile(pay.contact || '');
+    if (mobile) {
+      const { rows } = await db.query(
+        `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+                pl.regular_price, pl.student_count, pl.duration
+           FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+          WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
+      c = applyOfferPrice(
+        rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null);
+    }
+  }
+  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id} (token/mobile fallback also missed)`); return; }
+
   // amount safety — the same guard the browser path uses
   if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
     console.error(`[pay] webhook amount mismatch order ${pay.order_id}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
     return;
   }
-  const result = await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
+
+  // Route by cart type, exactly as the payment-link path does — an Instant Quiz
+  // reaching here must NOT be run through finalize() (which expects a plan).
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
   console.log(`[pay] webhook ${result.already ? 'already active' : 'ACTIVATED'} order=${pay.order_id} invoice=${result.invoice}`);
 }
 
@@ -1332,3 +1519,4 @@ module.exports.razorpayWebhook = razorpayWebhook;
 module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;
 module.exports.createInstantLink = createInstantLink;
+module.exports.createInstantCheckout = createInstantCheckout;

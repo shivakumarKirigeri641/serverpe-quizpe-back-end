@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <link rel="icon" type="image/png" href="/assets/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/assets/logo-mark.png" />
+  <title>QuizPe — Instant Quiz</title>
+  <style>
+    :root{--brand:#008069;--brand-dark:#075e54;--accent:#00a884;--bg:#efeae2;--card:#fff;--text:#111b21;--muted:#667781;--border:#d1d7db;--danger:#c0392b;}
+    *{box-sizing:border-box;}
+    body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:0 0 30px;}
+    .head{background:var(--brand);color:#fff;padding:16px;position:sticky;top:0;z-index:9;display:flex;align-items:center;gap:12px;}
+    .head img{width:40px;height:40px;border-radius:9px;background:#fff;padding:2px;}
+    .head h1{margin:0;font-size:17px;}.head p{margin:2px 0 0;font-size:12px;opacity:.9;}
+    .wrap{max-width:560px;margin:0 auto;padding:14px 12px;}
+    .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.06);}
+    .card h2{margin:0 0 10px;font-size:14px;color:var(--brand-dark);}
+    .sum-row{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px dashed var(--border);}
+    .sum-row:last-child{border-bottom:none;}
+    .sum-row .k{color:var(--muted);}.sum-row .v{font-weight:700;}
+    .sum-total{display:flex;justify-content:space-between;font-size:18px;font-weight:800;color:var(--brand-dark);margin-top:8px;padding-top:8px;border-top:2px solid var(--border);}
+    .pill{font-size:11px;font-weight:700;color:#fff;background:var(--accent);padding:3px 9px;border-radius:10px;display:inline-block;margin-bottom:8px;}
+    .field{margin-bottom:10px;}.field label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;}
+    .field input,.field select{width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:15px;background:#fff;outline:none;}
+    .field input:focus,.field select:focus{border-color:var(--accent);}
+    .field select:disabled{background:#f2f2f2;color:var(--muted);}
+    .row2{display:flex;gap:10px;}.row2 .field{flex:1;}
+    .terms{display:flex;gap:9px;align-items:flex-start;font-size:13px;margin:6px 0;}
+    .terms input{margin-top:2px;width:17px;height:17px;accent-color:var(--accent);}
+    .terms a{color:var(--brand-dark);font-weight:600;}
+    .btn{width:100%;padding:14px;border:none;border-radius:24px;background:var(--accent);color:#fff;font-size:16px;font-weight:800;cursor:pointer;}
+    .btn:disabled{background:#a9c7ba;cursor:not-allowed;}
+    .error{color:var(--danger);font-size:13px;margin-top:10px;text-align:center;}
+    .secure{text-align:center;font-size:11px;color:var(--muted);margin-top:10px;}
+    .note{font-size:12px;color:var(--muted);margin:8px 0 0;}
+    .done{display:none;text-align:center;padding:40px 20px;}
+    .done .tick{font-size:48px;}.done h2{color:var(--brand-dark);margin:10px 0 6px;}.done p{color:var(--muted);font-size:14px;}
+    .wa-btn{display:inline-block;margin-top:16px;padding:12px 24px;border-radius:22px;background:var(--accent);color:#fff;font-weight:700;text-decoration:none;}
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="/assets/logo-mark.png" alt="QuizPe" />
+    <div><h1>⚡ Instant Quiz</h1><p id="sub">Loading…</p></div>
+  </div>
+
+  <div class="wrap" id="wrap" style="display:none">
+    <div class="card">
+      <span class="pill">⚡ One quiz · no plan</span>
+      <div id="summary"></div>
+      <p class="note">No subscription and no validity — this is a single quiz. The score, report and GST invoice come straight back to your WhatsApp.</p>
+    </div>
+
+    <div class="card">
+      <h2>Parent / Guardian</h2>
+      <div class="field">
+        <label for="parentName">Your name (billed to) *</label>
+        <input id="parentName" maxlength="80" placeholder="Parent / guardian full name" autocomplete="name" />
+      </div>
+      <div class="field">
+        <label for="state">Your State / UT (for billing) *</label>
+        <select id="state"><option value="">Select state</option></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Who is taking the quiz?</h2>
+      <div class="field">
+        <label for="sName">Child's name *</label>
+        <input id="sName" maxlength="60" placeholder="e.g. Aarav" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="sSchool">School name</label>
+        <input id="sSchool" maxlength="120" placeholder="Short name is enough" autocomplete="off" />
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label for="sBoard">Board *</label>
+          <select id="sBoard"><option value="">Select</option></select>
+        </div>
+        <div class="field">
+          <label for="sGrade">Grade *</label>
+          <select id="sGrade" disabled><option value="">Board first</option></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="sMedium">Medium *</label>
+        <select id="sMedium" disabled><option value="">Grade first</option></select>
+      </div>
+      <p class="note" id="matchNote"></p>
+    </div>
+
+    <div class="card">
+      <label class="terms"><input id="accept" type="checkbox" />
+        <span>I have read and accept the <a id="terms" href="#" target="_blank" rel="noopener">Terms &amp; Privacy Policy</a>, and I am the parent/guardian.</span></label>
+      <button class="btn" id="payBtn" disabled>Pay</button>
+      <div class="error" id="err"></div>
+      <div class="secure">🔒 Payments are processed securely by Razorpay. We never store your card details.</div>
+      <div class="secure" style="margin-top:6px;font-weight:600;">Powered by ServerPe App Solutions</div>
+    </div>
+  </div>
+
+  <div class="done" id="done">
+    <div class="tick">⚡</div>
+    <h2>Payment successful!</h2>
+    <p id="doneMsg"></p>
+    <p><b>Your invoice and the quiz link are already in your WhatsApp chat.</b></p>
+    <p style="color:#667781;font-size:13px;">Tap the button below, or just close this window to go back to the conversation.</p>
+    <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
+  </div>
+
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script>
+    const token = new URLSearchParams(location.search).get("token");
+    const $ = (id) => document.getElementById(id);
+    const inr = (n) => "₹" + Number(n).toFixed(2);
+    let ctx = null;
+    let WA = "https://wa.me/918618592876";
+
+    async function load() {
+      if (!token) { $("sub").textContent = "This link is invalid."; return; }
+      try {
+        const r = await (await fetch("/pay/api/context?token=" + encodeURIComponent(token))).json();
+        if (!r.success) { $("sub").textContent = r.error || "This link has expired."; return; }
+        ctx = r;
+        $("sub").textContent = (ctx.instant ? ctx.instant.questions : 12) + " questions · Mathematics";
+
+        // states
+        ctx.states.forEach(s => {
+          const o = document.createElement("option");
+          o.value = s.state_code; o.textContent = s.state_name; $("state").appendChild(o);
+        });
+        // boards we can actually deliver
+        Object.keys(ctx.availability).sort().forEach(b => {
+          const o = document.createElement("option");
+          o.value = b; o.textContent = b; $("sBoard").appendChild(o);
+        });
+        if (ctx.policy && ctx.policy.url) $("terms").href = ctx.policy.url;
+
+        wire();
+        prefill(ctx.existing);
+        recompute(); validate();
+        $("wrap").style.display = "block";
+      } catch { $("sub").textContent = "Could not load. Please try again."; }
+    }
+
+    /* Cascading dropdowns, driven by what we can actually deliver — a combo only
+       appears if Maths has questions for it, so nobody can pay for an empty quiz. */
+    function fillGrades() {
+      const b = $("sBoard").value, g = $("sGrade");
+      g.innerHTML = '<option value="">Select</option>'; g.disabled = !b;
+      if (!b) { fillMediums(); return; }
+      Object.entries(ctx.availability[b] || {}).forEach(([code, v]) => {
+        const o = document.createElement("option");
+        o.value = code; o.textContent = v.grade_name || code; g.appendChild(o);
+      });
+      fillMediums();
+    }
+    function fillMediums() {
+      const b = $("sBoard").value, gr = $("sGrade").value, m = $("sMedium");
+      m.innerHTML = '<option value="">Select</option>'; m.disabled = !(b && gr);
+      if (!b || !gr) return;
+      const mediums = ((ctx.availability[b] || {})[gr] || {}).mediums || {};
+      Object.entries(mediums).forEach(([code, v]) => {
+        const o = document.createElement("option");
+        o.value = code; o.textContent = v.label || code; m.appendChild(o);
+      });
+      if (Object.keys(mediums).length === 1) m.value = Object.keys(mediums)[0];
+    }
+
+    function wire() {
+      $("sBoard").addEventListener("change", () => { fillGrades(); validate(); });
+      $("sGrade").addEventListener("change", () => { fillMediums(); validate(); });
+      ["sMedium", "state"].forEach(id => $(id).addEventListener("change", () => { recompute(); validate(); }));
+      ["parentName", "sName", "sSchool"].forEach(id => $(id).addEventListener("input", validate));
+      $("sName").addEventListener("input", matchNote);
+      $("accept").addEventListener("change", validate);
+    }
+
+    /* Pre-fill from the family already on file so a returning parent can just
+       accept and pay. Everything stays editable — typing a different name buys
+       the quiz for a different child instead. */
+    function prefill(ex) {
+      if (!ex) return;
+      if (ex.parent_name) $("parentName").value = ex.parent_name;
+      if (ex.state_code) $("state").value = ex.state_code;
+      const s = (ex.students || [])[0];
+      if (!s) return;
+      $("sName").value = s.name || "";
+      $("sSchool").value = s.school_name || "";
+      $("sBoard").value = s.board || ""; fillGrades();
+      $("sGrade").value = s.grade || ""; fillMediums();
+      $("sMedium").value = s.medium || "";
+      matchNote();
+    }
+
+    /* Tell the parent plainly whether this buys a quiz for the child already on
+       file or adds a new one — a silent duplicate is the failure to avoid. */
+    function matchNote() {
+      const typed = $("sName").value.trim().toLowerCase();
+      const known = ((ctx.existing || {}).students || []).map(s => (s.name || "").trim().toLowerCase());
+      if (!typed || !known.length) { $("matchNote").textContent = ""; return; }
+      $("matchNote").textContent = known.includes(typed)
+        ? "✅ This quiz is for " + $("sName").value.trim() + ", already on your account."
+        : "➕ " + $("sName").value.trim() + " will be added to your account for this quiz.";
+    }
+
+    /* GST is added ON TOP of the ₹9 price (unlike the plans, where it is already
+       included), so the base is exactly what is charged plus tax. */
+    function recompute() {
+      const base = ctx.instant ? ctx.instant.base : 9;
+      const pct = ctx.instant ? ctx.instant.gst_pct : (ctx.gst_pct || 18);
+      const st = $("state").value;
+      const intra = !st || st === "29";
+      const b = ctx.instant ? (intra ? ctx.instant.intra : ctx.instant.inter) : null;
+      const gst = b ? +(b.cgst + b.sgst + b.igst).toFixed(2) : +(base * pct / 100).toFixed(2);
+      const total = b ? b.total : +(base + gst).toFixed(2);
+      const qs = ctx.instant ? ctx.instant.questions : 12;
+
+      $("summary").innerHTML =
+        `<div class="sum-row"><span class="k">Instant Quiz — Mathematics (${qs} questions)</span><span class="v">${inr(base)}</span></div>` +
+        `<div class="sum-row"><span class="k">Taxable value</span><span class="v">${inr(base)}</span></div>` +
+        (intra
+          ? `<div class="sum-row"><span class="k">CGST @ ${pct / 2}%</span><span class="v">${inr(b ? b.cgst : gst / 2)}</span></div>
+             <div class="sum-row"><span class="k">SGST @ ${pct / 2}%</span><span class="v">${inr(b ? b.sgst : gst / 2)}</span></div>`
+          : `<div class="sum-row"><span class="k">IGST @ ${pct}%</span><span class="v">${inr(b ? b.igst : gst)}</span></div>`) +
+        `<div class="sum-total"><span>Total payable</span><span>${inr(total)}</span></div>`;
+      $("payBtn").textContent = `Pay now · ${inr(total)}`;
+    }
+
+    function student() {
+      return {
+        name: $("sName").value.trim(),
+        school_name: $("sSchool").value.trim(),
+        board: $("sBoard").value,
+        grade: $("sGrade").value,
+        medium: $("sMedium").value,
+      };
+    }
+    function validate() {
+      const s = student();
+      $("payBtn").disabled = !($("parentName").value.trim().length >= 2 &&
+        s.name.length >= 2 && s.board && s.grade && s.medium &&
+        $("state").value && $("accept").checked);
+    }
+
+    /* Standard Checkout on our own domain: create the order, open Razorpay's
+       modal, verify server-side the moment it succeeds — so the invoice and the
+       quiz reach WhatsApp immediately instead of waiting on the webhook. */
+    $("payBtn").addEventListener("click", async () => {
+      $("err").textContent = ""; $("payBtn").disabled = true;
+      const label = $("payBtn").textContent;
+      $("payBtn").textContent = "Starting secure payment…";
+      const body = { token, student: student(), state: $("state").value, parent_name: $("parentName").value.trim() };
+      try {
+        const o = await (await fetch("/pay/api/instant-order", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+        if (!o.success) { $("err").textContent = o.error; reset(); return; }
+
+        const rzp = new Razorpay({
+          key: o.key, order_id: o.order_id, amount: o.amount, currency: o.currency || "INR",
+          name: (ctx.business && ctx.business.product_name) || "QuizPe",
+          description: "Instant Quiz (" + (ctx.instant ? ctx.instant.questions : 12) + " questions)",
+          prefill: { contact: ctx.mobile || "", name: $("parentName").value.trim() },
+          theme: { color: "#075e54" },
+          handler: async (resp) => {
+            $("wrap").innerHTML = "<div style='text-align:center;padding:48px 0;color:#667781'>Verifying your payment…</div>";
+            try {
+              const v = await (await fetch("/pay/api/instant-verify", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token,
+                  razorpay_order_id: resp.razorpay_order_id,
+                  razorpay_payment_id: resp.razorpay_payment_id,
+                  razorpay_signature: resp.razorpay_signature }) })).json();
+              if (v.success) {
+                if (v.whatsapp_url) WA = v.whatsapp_url;
+                showDone(v.already_paid ? "This quiz is already paid for. ⚡" : "Your quiz is ready — check WhatsApp! ⚡");
+              } else {
+                $("wrap").style.display = "block";
+                $("err").textContent = v.error || "We couldn't confirm the payment. If money was deducted, contact support.";
+                reset();
+              }
+            } catch {
+              $("wrap").style.display = "block";
+              $("err").textContent = "Payment taken but confirmation failed. If money was deducted, contact support.";
+              reset();
+            }
+          },
+          modal: { ondismiss: () => reset() },
+        });
+        rzp.on("payment.failed", (r) => { $("err").textContent = (r.error && r.error.description) || "Payment failed. Please try again."; reset(); });
+        rzp.open();
+        $("payBtn").textContent = label;
+      } catch { $("err").textContent = "Something went wrong. Please try again."; reset(); }
+    });
+
+    function reset() { $("payBtn").disabled = false; recompute(); validate(); }
+
+    function showDone(msg) {
+      $("doneMsg").textContent = msg;
+      $("waBtn").href = WA;
+      $("wrap").style.display = "none"; $("done").style.display = "block";
+
+      // Hand the parent straight back to the conversation: close the in-app
+      // browser if we can, else follow the wa.me link. The invoice and quiz are
+      // already delivered, so leaving sooner loses nothing.
+      let n = 3;
+      const note = document.createElement("p");
+      note.style.cssText = "font-size:12px;color:#667781;margin-top:10px;";
+      $("done").appendChild(note);
+      const t = setInterval(() => {
+        n -= 1;
+        note.textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : "Opening WhatsApp…";
+        if (n <= 0) { clearInterval(t); try { window.close(); } catch (e) {} location.href = WA; }
+      }, 1000);
+    }
+
+    load();
+  </script>
+</body>
+</html>

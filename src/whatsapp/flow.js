@@ -687,8 +687,16 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
 
   // Instant Quiz buttons work from ANY state: the "Take another (₹9)" button sent
   // after a quiz, the menu row, and the child picker.
-  if (id === 'instant_again' || id === 'instant_quiz' || (id && id.startsWith('instant_child_'))) {
-    await handleMenuChoice(session, mobile, ctx, id);
+  //
+  // Matched on the TITLE as well as the id. A list tap normally carries its row
+  // id, but some clients (and a template quick-reply) deliver only the label —
+  // the id then arrives empty, the choice falls through to the default branch,
+  // and the parent gets a silently-deduped menu instead of their quiz. Reading
+  // the visible text too makes the tap work whichever way WhatsApp sends it.
+  const wantsInstant = /instant\s*quiz|take another/i.test(text);
+  if (id === 'instant_again' || id === 'instant_quiz' || (id && id.startsWith('instant_child_'))
+      || (!id && wantsInstant)) {
+    await handleMenuChoice(session, mobile, ctx, id || 'instant_quiz');
     return;
   }
 
@@ -1076,60 +1084,42 @@ async function sendUnrecognized(session, mobile, ctx) {
 }
 
 /**
- * Instant Quiz purchase (₹9 + GST). Enforces one-at-a-time, picks the child, and
- * sends a Razorpay Payment Link; on payment the webhook (finalizeInstant) starts
- * the 12-question quiz. Brand-new numbers (no child yet) are nudged to the free
- * trial first, which puts a child + billing state on file.
+ * Instant Quiz purchase (₹9 + GST). Opens the web checkout (public/instant.html):
+ * the parent confirms the child's details there — pre-filled from the family on
+ * file, blank for a brand-new number — accepts the terms and pays through
+ * Razorpay's modal. On payment the invoice and the quiz link come back here.
+ *
+ * Open to EVERYONE: lapsed, premium, trial, and numbers with no child at all,
+ * since the form collects whatever we don't already know. No subscription is
+ * involved and nothing about the daily quiz changes.
  */
-async function startInstantPurchase(session, mobile, ctx, students, studentId = null) {
-  const { createInstantLink } = require('../routers/paymentRouter');
+async function startInstantPurchase(session, mobile, ctx, students) {
+  const { createInstantCheckout } = require('../routers/paymentRouter');
   const IQ = require('./instantQuiz');
 
-  if (!students.length) {
-    // Instant Quiz is per-child, so a brand-new number gets set up the REGULAR way
-    // first — the free 7-day trial (no payment). Once a child is enrolled, ⚡ Instant
-    // Quiz is one tap from the menu, anytime.
-    await wa.sendText(session.id, mobile,
-      "⚡ *Instant Quiz* is a per-child quiz. Let's get your child set up first with a *free 7-day trial* — no payment.\n\nAfter that, ⚡ *Instant Quiz* is one tap from the menu, anytime.");
-    await handleMenuChoice(session, mobile, ctx, 'start_trial');
-    return;
-  }
-  // one at a time — if any child has an unfinished instant quiz, finish that first
+  // One at a time: an unfinished instant quiz must be completed before another
+  // is bought, so a parent never pays twice for a quiz already waiting.
   for (const s of students) {
     if (await IQ.openInstantTracker(s.id)) {
       await wa.sendButtons(session.id, mobile,
-        `⚡ *${s.student_name}* already has an Instant Quiz in progress — please finish that one first.`,
+        `⚡ *${s.student_name}* already has an Instant Quiz waiting — please finish that one first.`,
         [{ id: 'start_quiz', title: '▶️ Continue quiz' }]);
       return;
     }
   }
-  const kid = studentId
-    ? students.find(s => String(s.id) === String(studentId))
-    : (students.length === 1 ? students[0] : null);
-  if (!kid) {
-    await wa.sendList(session.id, mobile, {
-      header: '⚡ Instant Quiz — ₹9',
-      text: 'Which child is taking the Instant Quiz?',
-      buttonText: 'Choose child',
-      rows: students.map(s => ({ id: `instant_child_${s.id}`, title: s.student_name.slice(0, 24),
-        description: `${s.board_code} · ${s.grade_name}` })),
-    });
-    return;
-  }
-  const r = await createInstantLink({ sessionId: session.id, mobile, studentId: kid.id });
-  if (r.error === 'no_state') {
-    await wa.sendText(session.id, mobile,
-      "To bill you correctly (GST needs your state), please start a *free trial* or a plan once — then ⚡ Instant Quiz works instantly. Type *menu*.");
-    return;
-  }
+
+  const r = await createInstantCheckout({ sessionId: session.id, mobile });
   if (r.error) { await wa.sendText(session.id, mobile, `😕 ${r.error}\n\nPlease try again in a moment, or type *menu*.`); return; }
+
   const first = String(ctx.parentName || 'there').trim().split(/\s+/)[0] || 'there';
   await wa.sendCtaUrl(session.id, mobile, {
     header: '⚡ QuizPe — Instant Quiz',
-    body: `Hi ${first} 👋 One quick quiz for *${kid.student_name}* — *12 questions*, just *₹9 + GST = ₹${r.amount}*.\n\n`
-      + `🔒 Opens *Razorpay's* secure page (UPI · card · netbanking). The quiz starts the moment it's paid. 🚀`,
-    displayText: `💳 Pay ₹${r.amount}`, url: r.short_url,
-    footer: 'Razorpay · ServerPe App Solutions (GST-registered)',
+    body: `Hi ${first} 👋 One quick quiz — *12 questions*, just *₹9 + GST*.\n\n`
+      + `Tap below to confirm your child's details and pay *₹${r.amount}*.\n\n`
+      + `🔒 Secure payment by *Razorpay* (UPI · card · netbanking). Your invoice and the quiz come straight back here. 🚀`,
+    displayText: '⚡ Start — ₹' + r.amount,
+    url: r.url,
+    footer: 'ServerPe App Solutions (GST-registered)',
   });
 }
 
@@ -1147,9 +1137,11 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
     if (kid) { await beginQuizFor(session, mobile, kid, students.length); return; }
   }
 
-  // A specific child was picked for an Instant Quiz purchase.
+  // Older chats may still hold an 'instant_child_*' row from the previous
+  // child-picker. The web form now collects the child, so any of those simply
+  // reopens the checkout rather than dead-ending on an id nothing handles.
   if (String(choice).startsWith('instant_child_')) {
-    await startInstantPurchase(session, mobile, ctx, students, String(choice).slice('instant_child_'.length));
+    await startInstantPurchase(session, mobile, ctx, students);
     return;
   }
 
