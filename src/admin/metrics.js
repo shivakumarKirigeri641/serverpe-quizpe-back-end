@@ -699,7 +699,29 @@ async function slotBreakdown() {
  * today vs yesterday, this-week vs last-week, a 14-day trend, a status split, a
  * recent list, and all-time totals.
  */
-async function quickQuiz() {
+/**
+ * Quick Quiz (Instant Quiz) analytics.
+ *
+ * `range` selects the window every range-sensitive block uses. The headline
+ * today/yesterday and week comparisons stay FIXED regardless, so the founder's
+ * daily glance never shifts under them when a filter is changed.
+ */
+const QQ_RANGES = {
+  '7d':         { label: 'Last 7 days',  from: 'CURRENT_DATE-6',  to: 'CURRENT_DATE' },
+  '14d':        { label: 'Last 14 days', from: 'CURRENT_DATE-13', to: 'CURRENT_DATE' },
+  '30d':        { label: 'Last 30 days', from: 'CURRENT_DATE-29', to: 'CURRENT_DATE' },
+  'this_week':  { label: 'This week',    from: "date_trunc('week',CURRENT_DATE)::date", to: 'CURRENT_DATE' },
+  'last_week':  { label: 'Last week',    from: "(date_trunc('week',CURRENT_DATE)-interval '1 week')::date",
+                                         to:   "(date_trunc('week',CURRENT_DATE)-interval '1 day')::date" },
+  'this_month': { label: 'This month',   from: "date_trunc('month',CURRENT_DATE)::date", to: 'CURRENT_DATE' },
+  'last_month': { label: 'Last month',   from: "(date_trunc('month',CURRENT_DATE)-interval '1 month')::date",
+                                         to:   "(date_trunc('month',CURRENT_DATE)-interval '1 day')::date" },
+  'all':        { label: 'All time',     from: "'2000-01-01'::date", to: 'CURRENT_DATE' },
+};
+
+async function quickQuiz(range = '7d') {
+  const R = QQ_RANGES[range] || QQ_RANGES['7d'];
+  const FROM = R.from, TO = R.to;
   const many = async (sql, p = []) => (await db.query(sql, p)).rows;
   const one = async (sql, p = []) => (await db.query(sql, p)).rows[0];
 
@@ -729,18 +751,119 @@ async function quickQuiz() {
                 (SELECT COALESCE(SUM(amount),0)::numeric FROM payments WHERE description='Instant Quiz' AND status IN ('captured','authorized')) revenue`),
   ]);
 
+  // Trend across the SELECTED range, capped at 92 buckets so "all time" cannot
+  // render a bar per day for years and melt the page.
   const trend = await many(
-    `WITH span AS (SELECT generate_series(CURRENT_DATE-13, CURRENT_DATE, '1 day')::date d)
+    `WITH bounds AS (SELECT GREATEST(${FROM}, ${TO} - 91) a, ${TO}::date b),
+          span AS (SELECT generate_series((SELECT a FROM bounds), (SELECT b FROM bounds), '1 day')::date d)
      SELECT to_char(span.d,'DD Mon') label, span.d::text date,
        (SELECT COUNT(*)::int FROM quizpe_tracker t WHERE t.is_instant AND t.quiz_date=span.d) quizzes,
        (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
          WHERE description='Instant Quiz' AND status IN ('captured','authorized') AND ${IST_DATE('created_at')}=span.d) revenue
      FROM span ORDER BY span.d`);
 
+  // LIVE — who is on a quick quiz right now, and WHICH NUMBER it is for that
+  // child (their 1st, 2nd, 7th). The ordinal is the thing that shows whether
+  // pay-per-quiz actually repeats, one family at a time.
+  const live = await many(
+    `SELECT t.id tracker_id, st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            b.board_code, g.grade_name, qs.status_code status, t.question_count,
+            (SELECT COUNT(*)::int FROM student_quizpe_histories h
+              WHERE h.tracker_id=t.id AND h.answered_option IS NOT NULL) answered,
+            (SELECT COUNT(*)::int FROM quizpe_tracker t2
+              WHERE t2.is_instant AND t2.student_id=t.student_id AND t2.id<=t.id) nth,
+            to_char(t.created_at AT TIME ZONE '${TZ}','DD Mon HH24:MI') started,
+            EXTRACT(EPOCH FROM (now()-t.created_at))::int age_seconds
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+       JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant
+        AND qs.status_code IN ('scheduled','delivered','yet_to_start','in_progress')
+      ORDER BY t.created_at DESC LIMIT 25`);
+
+  // Range roll-up, plus the SAME-LENGTH preceding window, so a filter answers
+  // "better or worse than before?" rather than only "how many?".
+  const rangeStats = await one(
+    `WITH cur AS (
+       SELECT COUNT(*)::int quizzes, COUNT(DISTINCT student_id)::int children
+         FROM quizpe_tracker WHERE is_instant AND quiz_date BETWEEN ${FROM} AND ${TO}),
+     prev AS (
+       SELECT COUNT(*)::int quizzes FROM quizpe_tracker
+        WHERE is_instant AND quiz_date BETWEEN (${FROM}) - ((${TO}) - (${FROM}) + 1) AND (${FROM}) - 1),
+     rev AS (
+       SELECT COALESCE(SUM(amount),0)::numeric revenue, COUNT(*)::int payments
+         FROM payments WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+          AND ${IST_DATE('created_at')} BETWEEN ${FROM} AND ${TO}),
+     done AS (
+       SELECT COUNT(*)::int completed, COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score
+         FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+         LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+        WHERE t.is_instant AND qs.status_code='completed'
+          AND t.quiz_date BETWEEN ${FROM} AND ${TO})
+     SELECT cur.quizzes, cur.children, prev.quizzes prev_quizzes,
+            rev.revenue, rev.payments, done.completed, done.avg_score,
+            CASE WHEN cur.quizzes>0 THEN ROUND(done.completed*100.0/cur.quizzes)::int ELSE 0 END completion_pct
+       FROM cur, prev, rev, done`);
+
+  // Repeat behaviour — the single number that says whether pay-per-quiz works.
+  const repeat = await one(
+    `WITH per_child AS (
+       SELECT student_id, COUNT(*)::int n FROM quizpe_tracker
+        WHERE is_instant AND quiz_date BETWEEN ${FROM} AND ${TO} GROUP BY student_id)
+     SELECT COUNT(*)::int buyers,
+            COUNT(*) FILTER (WHERE n>1)::int repeat_buyers,
+            COALESCE(ROUND(AVG(n)::numeric,2),0)::numeric avg_per_child,
+            COALESCE(MAX(n),0)::int max_per_child
+       FROM per_child`);
+
+  // When people actually buy — drives nudge timing.
+  const byHour = await many(
+    `SELECT EXTRACT(HOUR FROM t.created_at AT TIME ZONE '${TZ}')::int AS hour_of_day, COUNT(*)::int n
+       FROM quizpe_tracker t
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1 ORDER BY 1`);
+
+  // Where demand comes from — tells you which board/grade content to add next.
+  const byGrade = await many(
+    `SELECT b.board_code, g.grade_name, COUNT(*)::int n
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1,2 ORDER BY n DESC LIMIT 8`);
+
+  // Top families in the range.
+  const topBuyers = await many(
+    `SELECT st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            COUNT(*)::int quizzes, COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1,2,3 ORDER BY quizzes DESC, avg_score DESC LIMIT 10`);
+
+  // Does a quick quiz lead to a plan? The funnel question this product exists for.
+  const conversion = await one(
+    `WITH iq AS (SELECT DISTINCT st.parent_id FROM quizpe_tracker t
+                   JOIN students st ON st.id=t.student_id
+                  WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO})
+     SELECT COUNT(*)::int instant_parents,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM parents_quizpe_subscriptions s
+                JOIN quizpe_plans pl ON pl.id=s.plan_id
+               WHERE s.parent_id=iq.parent_id AND s.is_active AND NOT pl.is_trial
+                 AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date))::int now_subscribed
+       FROM iq`);
+
   const status = await many(
     `SELECT qs.status_code status, COUNT(*)::int n
        FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
-      WHERE t.is_instant AND t.quiz_date > CURRENT_DATE-30
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
       GROUP BY qs.status_code ORDER BY n DESC`);
 
   const recent = await many(
@@ -771,7 +894,12 @@ async function quickQuiz() {
       WHERE i.is_active AND i.subscription_id IS NULL AND p.description = 'Instant Quiz'
       ORDER BY i.id DESC LIMIT 50`);
 
-  return { today, yesterday, this_week, last_week, trend, status, recent, totals, invoices };
+  return {
+    range, range_label: R.label,
+    ranges: Object.entries(QQ_RANGES).map(([k, v]) => ({ key: k, label: v.label })),
+    today, yesterday, this_week, last_week, trend, status, recent, totals, invoices,
+    live, rangeStats, repeat, byHour, byGrade, topBuyers, conversion,
+  };
 }
 
 module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown, quickQuiz };

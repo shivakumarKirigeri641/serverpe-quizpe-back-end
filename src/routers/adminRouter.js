@@ -170,7 +170,7 @@ router.get('/analytics/slots', requireAdmin, async (req, res) => {
 
 /** Instant "Quick Quiz" analytics — counts, revenue, day/week comparisons, trend. */
 router.get('/quick-quiz', requireAdmin, async (req, res) => {
-  try { ok(res, await metrics.quickQuiz()); }
+  try { ok(res, await metrics.quickQuiz(String(req.query.range || '7d'))); }
   catch (e) { console.error('[admin] quick-quiz:', e.message); fail(res, 500, 'Could not load Quick Quiz analytics.'); }
 });
 
