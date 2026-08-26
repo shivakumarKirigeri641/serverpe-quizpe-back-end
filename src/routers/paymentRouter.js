@@ -1497,7 +1497,13 @@ async function reconcileByPaymentId(paymentId, token = null) {
               pl.regular_price, pl.student_count, pl.duration
          FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
         WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
-    c = rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null;
+    const sameAmount = rows.filter(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount));
+    // Prefer an UNUSED checkout. A parent who buys the same thing twice has two
+    // checkouts of identical value; taking the newest blindly lands on the one
+    // already paid, whose finalize then returns "already" and silently drops the
+    // second payment — money captured, no invoice, no quiz. The unpaid one is
+    // always the one this payment still needs.
+    c = sameAmount.find(r => !r.used_at && r.status !== 'paid') || sameAmount[0] || null;
   }
   if (!c) return { error: 'No matching checkout found for this payment (by token, or by mobile + amount).' };
   if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
