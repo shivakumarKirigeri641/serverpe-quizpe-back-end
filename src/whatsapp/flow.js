@@ -1351,10 +1351,8 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
       const maxSlots = await Q.entitledSlots(st.id);
       const target = await Q.ensureNextTracker(st.id, maxSlots);
       if (!target) {
-        const at = await quizTimeOf(st.id);
         await wa.sendText(session.id, mobile,
-          `✅ ${st.student_name} has finished all of today's quizzes. ` +
-          `See you tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}! 🌙`);
+          `✅ ${st.student_name} has finished all of today's quizzes. See you tomorrow! 🌙`);
         return;
       }
       const prog = await Q.dailyQuizProgress(st.id);
@@ -1411,7 +1409,7 @@ async function nextQuizSignOff(ctx) {
       if (r?.quiz_time) t = M.fmtTime(r.quiz_time);
     }
   } catch { /* default time */ }
-  return `See you tomorrow at *${t}* for the next quiz! 🚀`;
+  return 'See you tomorrow! 🚀';
 }
 
 function safeJson(s) {

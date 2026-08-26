@@ -65,7 +65,6 @@ async function feedbackAsk({ trackerId, sessionId, mobile }) {
        FROM parents_quizpe_subscriptions s
        JOIN quizpe_plans pl ON pl.id = s.plan_id
       WHERE s.parent_id=$1 AND s.is_active ORDER BY s.id DESC LIMIT 1`, [info.parent_id])).rows[0];
-  const nextAt = t ? ` at *${M.fmtTime(t.quiz_time)}*` : '';
 
   // Social "follow us" invite — sent DAILY, but ONLY to trial families. The
   // trial is a 7-day window where we most want to build community, and it's too
@@ -77,7 +76,7 @@ async function feedbackAsk({ trackerId, sessionId, mobile }) {
 
   if (!due.due) {
     await wa.sendText(sessionId, mobile,
-      `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow${nextAt} for the next one! 🚀${social}`);
+      `🙏 *Thank you!*\n\nThat's today's quiz done. See you tomorrow! 🚀${social}`);
     return;
   }
 
