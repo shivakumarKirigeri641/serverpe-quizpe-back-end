@@ -614,6 +614,27 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // ---------------------------------------------------------------- free quiz
+  // An admin-granted free quiz is delivered on ANY inbound message, not only a
+  // "Start Quiz" tap. None of our approved templates pairs the right wording
+  // with a start-quiz button — the closest ones blame the child for missing a
+  // quiz that was actually our fault — so the notification is plain text and
+  // whatever the parent replies brings them here.
+  //
+  // Skipped while the session owns the message: mid-quiz answers, a feedback
+  // reply and the signup questions must reach their own handlers first, or a
+  // grant would hijack them. Those states are short-lived, and the grant keeps
+  // for 7 days, so nothing is lost by waiting.
+  {
+    const owned = session.state === 'in_quiz'
+      || session.state === 'awaiting_feedback_text'
+      || String(session.state || '').startsWith('ask_');
+    const ownedTap = id.startsWith('ans_') || id.startsWith('fb_') || id.startsWith('qt_');
+    if (!owned && !ownedTap && !id.startsWith('freeq_child_')) {
+      if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
+    }
+  }
+
   // Feedback rating tap — valid from ANY state (the prompt arrives after a
   // quiz, but the parent may tap it much later).
   if (id.startsWith('fb_')) {
@@ -676,12 +697,26 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
   // message. Tapping it reopens the 24h window AND starts today's quiz, from
   // whatever state the session is in.
   if (isStartQuiz(msg, text, id)) {
+    // An admin-granted FREE quiz outranks the subscription check: the grant is
+    // attached to the NUMBER precisely so it can reach a lapsed or brand-new
+    // parent, who would otherwise be told their subscription isn't active. It
+    // is consumed once, then this branch stops applying.
+    if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
+
     if (ctx.isSubscribed) {
       await handleMenuChoice(session, mobile, ctx, 'start_quiz');
     } else {
       await wa.sendText(session.id, mobile,
         `Your subscription isn't active. Type *menu* to subscribe. 💎`);
     }
+    return;
+  }
+
+  // The child picker for a granted quiz (premium families with several children).
+  if (id && id.startsWith('freeq_child_')) {
+    const gid = Number(id.slice('freeq_child_'.length).split('_')[0]);
+    const sid = Number(id.slice('freeq_child_'.length).split('_')[1]);
+    await startGrantedQuizFor(session, mobile, gid, sid);
     return;
   }
 
@@ -1121,6 +1156,73 @@ async function startInstantPurchase(session, mobile, ctx, students) {
     url: r.url,
     footer: 'ServerPe App Solutions (GST-registered)',
   });
+}
+
+/**
+ * Deliver an admin-granted free quiz, if this number has one waiting.
+ *
+ * Returns true when it has handled the message, so the caller stops. Three
+ * cases, in the order they actually occur:
+ *
+ *   • no child on file  -> send the signup form; the grant stays pending and is
+ *     picked up automatically once the child exists
+ *   • exactly one child -> start it straight away
+ *   • several children  -> ask which one
+ */
+async function deliverFreeGrantIfAny(session, mobile, ctx) {
+  const FQ = require('./freeQuiz');
+  let grant;
+  try { grant = await FQ.pendingGrant(mobile); } catch { return false; }
+  if (!grant) return false;
+
+  const students = await getStudents(ctx.parentId);
+
+  if (!students.length) {
+    // Brand-new number: we cannot build a quiz without knowing the child's
+    // board, grade and medium. The form collects it; the grant is untouched, so
+    // nothing is lost if they close the page and come back later.
+    const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+    await wa.sendCtaUrl(session.id, mobile, {
+      header: '🎁 Your free quiz',
+      body: `🙏 *Sorry the quiz didn't reach you.*\n\n`
+          + `We've added a *free quiz* to your number. Just tell us a little about your child `
+          + `and it will start right away — no payment, nothing to cancel.`,
+      displayText: "📝 Enter child's details",
+      url: `${base}/trial.html?token=freequiz`,
+      footer: 'QuizPe by ServerPe App Solutions',
+    });
+    return true;
+  }
+
+  if (students.length === 1) {
+    await FQ.startFreeQuiz(session.id, mobile, students[0].id, grant);
+    return true;
+  }
+
+  await wa.sendList(session.id, mobile, {
+    header: '🎁 Your free quiz',
+    text: `🙏 *Sorry the quiz didn't reach you.*\n\nWhich child should take the free quiz?`,
+    buttonText: 'Choose child',
+    rows: students.slice(0, 10).map(s => ({
+      id: `freeq_child_${grant.id}_${s.id}`,
+      title: s.student_name.slice(0, 24),
+      description: `${s.board_code} · ${s.grade_name}`,
+    })),
+  });
+  return true;
+}
+
+/** A child was picked for a granted quiz. Re-checks the grant so a stale tap
+ *  from an old message can never mint a second free quiz. */
+async function startGrantedQuizFor(session, mobile, grantId, studentId) {
+  const FQ = require('./freeQuiz');
+  const grant = await FQ.pendingGrant(mobile);
+  if (!grant || Number(grant.id) !== Number(grantId)) {
+    await wa.sendText(session.id, mobile,
+      `That free quiz has already been used. Type *menu* to see your options. 😊`);
+    return;
+  }
+  await FQ.startFreeQuiz(session.id, mobile, studentId, grant);
 }
 
 async function handleMenuChoice(session, mobile, ctx, choice) {

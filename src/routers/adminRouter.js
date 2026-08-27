@@ -33,6 +33,8 @@ router.use(require('../admin/inboxRoutes'));
 // first-party site-visitor analytics + inbox toggle
 router.use(require('../admin/visitorRoutes'));
 router.use(require('../admin/broadcastRoutes'));
+// "Free quiz slot" — grant a no-charge quiz when one failed to reach a family.
+router.use(require('../admin/freeQuizRoutes'));
 // reserve holidays (quiz open all day + scheduler nudge) from a calendar
 router.use(require('../admin/holidayRoutes'));
 
@@ -172,6 +174,20 @@ router.get('/analytics/slots', requireAdmin, async (req, res) => {
 router.get('/quick-quiz', requireAdmin, async (req, res) => {
   try { ok(res, await metrics.quickQuiz(String(req.query.range || '7d'))); }
   catch (e) { console.error('[admin] quick-quiz:', e.message); fail(res, 500, 'Could not load Quick Quiz analytics.'); }
+});
+
+/** One child's complete instant-quiz history — the drill-down behind a row. */
+router.get('/quick-quiz/student/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Which child?');
+  try {
+    const d = await metrics.quickQuizStudent(id);
+    if (!d) return fail(res, 404, 'Child not found.');
+    ok(res, d);
+  } catch (e) {
+    console.error('[admin] quick-quiz student:', e.message);
+    fail(res, 500, 'Could not load that child.');
+  }
 });
 
 /** Instant Quiz config — the ex-GST price and question count (admin-editable). */

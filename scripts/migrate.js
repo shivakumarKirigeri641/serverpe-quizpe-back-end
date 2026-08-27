@@ -146,6 +146,70 @@ const STEPS = [
     ],
   },
   {
+    name: 'free quiz grants',
+    // Admin-granted FREE quiz ("free quiz slot"). Used to make good when a quiz
+    // did not reach a family because of a fault on our side. A grant is a
+    // one-shot permission attached to a MOBILE NUMBER, consumed the moment the
+    // parent starts the quiz — so it works for a brand-new number that has no
+    // parent or student row yet, which is exactly the case a subscription-based
+    // permission cannot express.
+    //
+    // No payment and no invoice are involved. The quiz itself is an ordinary
+    // quiz: it feeds mastery, streaks and the usual report + feedback, because
+    // it stands in for the quiz they should have received.
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='free_quiz_grants'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS free_quiz_grants (
+         id             bigserial PRIMARY KEY,
+         mobile_number  text        NOT NULL,
+         student_id     bigint      REFERENCES students(id),
+         question_count smallint    NOT NULL DEFAULT 15,
+         reason         text,
+         granted_by     text,
+         status         text        NOT NULL DEFAULT 'pending',
+         tracker_id     bigint      REFERENCES quizpe_tracker(id),
+         notified_at    timestamptz,
+         consumed_at    timestamptz,
+         expires_at     timestamptz NOT NULL DEFAULT now() + interval '7 days',
+         created_at     timestamptz NOT NULL DEFAULT now(),
+         modified_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      // One PENDING grant per number at a time: re-granting the same number must
+      // top up rather than stack, or a single mistake hands out several quizzes.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_free_quiz_pending
+         ON free_quiz_grants (mobile_number) WHERE status = 'pending'`,
+      `CREATE INDEX IF NOT EXISTS idx_free_quiz_status ON free_quiz_grants (status, expires_at)`,
+      // Marks a tracker as an admin-granted freebie. Everything else about it
+      // behaves like a daily quiz; this only keeps revenue reporting honest.
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS is_free boolean NOT NULL DEFAULT false`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_free ON quizpe_tracker (student_id, quiz_date) WHERE is_free`,
+    ],
+  },
+  {
+    name: 'free quiz template row',
+    // Seeds the row for a purpose-built free-quiz template. It is inserted as
+    // PENDING because Meta must approve the real template first — nothing sends
+    // while it is pending, and the Broadcast picker only lists APPROVED rows.
+    //
+    // Once Meta approves it: flip approval_status to 'APPROVED' here (or from
+    // the admin templates page) and it becomes available BOTH to the Free Quiz
+    // Slot page (set FREE_QUIZ_TEMPLATE=qp_freequiz_v1) and to Broadcast.
+    check: `SELECT 1 FROM whatsapp_templates WHERE template_name='qp_freequiz_v1'`,
+    apply: [
+      `INSERT INTO whatsapp_templates
+         (template_name, approval_status, is_active, language, variables, body_text, buttons, send_context)
+       SELECT 'qp_freequiz_v1', 'PENDING', true, 'en',
+              '["parent_name"]'::jsonb,
+              'Hi {{1}} 👋' || chr(10) || chr(10) ||
+              '🎁 We owe you a free quiz.' || chr(10) || chr(10) ||
+              E'Sorry — your last quiz did not reach you, and that was our fault, not yours. We have added a free quiz to your number.' || chr(10) || chr(10) ||
+              'Tap the button below (or reply hi) and it will start right away. No payment, nothing to cancel. 🙏',
+              '[{"text":"▶️ Start Quiz now","type":"QUICK_REPLY"}]'::jsonb,
+              'Free quiz make-good'
+        WHERE NOT EXISTS (SELECT 1 FROM whatsapp_templates WHERE template_name='qp_freequiz_v1')`,
+    ],
+  },
+  {
     name: 'launch_offer settings',
     // Seat-capped launch offer. Stored in app_settings so it can be switched
     // off, re-capped or ended from the admin panel without a deploy.
