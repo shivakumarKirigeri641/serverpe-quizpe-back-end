@@ -210,6 +210,12 @@ router.get('/api/context', async (req, res) => {
       availability, gst_pct: gstPct,
       business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
       existing: await existingFamily(c.mobile_number),   // pre-fill for renewals
+      // Instant Quiz prices differently from the plans: the admin price is
+      // EX-GST (₹9) and GST is added ON TOP, where a plan's price already
+      // includes it. Send both breakups so the page can show the exact split
+      // for the state chosen (intra = CGST+SGST, inter = IGST) without
+      // guessing, and never mix the two pricing models up.
+      ...(c.cart && c.cart.instant ? await instantPricing(gstPct) : {}),
     });
   } catch (e) {
     console.error('[pay] context failed:', e.message);
@@ -943,6 +949,331 @@ ${s.name}'s daily quiz starts tonight. 🚀`);
   }
 }
 
+/* --------------------------------------------------- INSTANT QUIZ (pay-per-quiz) */
+/**
+ * Open an Instant Quiz checkout: mint a checkout_session and return the URL of
+ * the web form (public/instant.html). The parent fills in the child's details
+ * there and pays ₹9 + GST through Razorpay's Standard Checkout modal — the same
+ * shape as the plan checkout (pay.html), NOT a payment link.
+ *
+ * Nothing about the child is decided here: the form collects (or pre-fills) it,
+ * and /api/instant-order validates it server-side before any order is created.
+ * That is what lets a brand-new number buy a quiz with no trial and no plan.
+ */
+async function createInstantCheckout({ sessionId = null, mobile }) {
+  const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='INSTANT' AND is_active`)).rows[0];
+  if (!plan) return { error: 'Instant Quiz is not available right now.' };
+  const gross = await instantGross();
+  const m = normMobile(mobile);
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days')`,
+    [token, sessionId, m, plan.id, gross, JSON.stringify({ instant: true, total: gross })]);
+
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+  return { url: `${base}/instant.html?token=${token}`, amount: gross, token };
+}
+
+/**
+ * Instant Quiz pricing for the checkout page. The admin price is EX-GST, so the
+ * base is exactly what the admin set and GST is added on top; both the intra
+ * (CGST+SGST) and inter (IGST) splits are returned so the page can switch on the
+ * state without a round-trip. gstBreakup() takes the GROSS and extracts, so
+ * feeding it the computed gross returns the admin's base back unchanged.
+ */
+async function instantPricing(gstPct) {
+  const { instantConfig } = require('../get/instantConfig');
+  const cfg = await instantConfig();
+  const gross = +(cfg.price * (1 + gstPct / 100)).toFixed(2);
+  return {
+    instant: {
+      base: Number(cfg.price), questions: cfg.questions, gst_pct: gstPct, gross,
+      intra: gstBreakup(gross, gstPct, true),
+      inter: gstBreakup(gross, gstPct, false),
+    },
+  };
+}
+
+/** ₹ the parent pays for one Instant Quiz: admin-set ex-GST price + live GST. */
+async function instantGross() {
+  const gstRow = (await db.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const { instantConfig } = require('../get/instantConfig');
+  const cfg = await instantConfig();
+  return +(cfg.price * (1 + gstPct / 100)).toFixed(2);
+}
+
+/**
+ * Instant Quiz order. Validates the ONE child against what we can actually
+ * deliver, resolves them to an existing child where the name matches (so a
+ * repeat purchase never creates a duplicate), prices the quiz server-side, and
+ * opens a Razorpay order. The client's total is never trusted.
+ */
+router.post('/api/instant-order', async (req, res) => {
+  try {
+    const { token, student, state, parent_name } = req.body || {};
+    const c = await loadCheckout(token);
+    if (!c || !c.cart || !c.cart.instant) return res.status(410).json({ success: false, error: 'This link has expired. Please tap ⚡ Instant Quiz again.' });
+
+    const s = student || {};
+    const name = String(s.name || '').trim().slice(0, 60);
+    if (!name) return res.status(400).json({ success: false, error: "Please enter the child's name." });
+    if (!s.board || !s.grade || !s.medium) return res.status(400).json({ success: false, error: 'Please choose board, grade and medium.' });
+    if (!(await db.query(`SELECT 1 FROM states_unions WHERE state_code=$1 AND is_active`, [state])).rowCount) {
+      return res.status(400).json({ success: false, error: 'Please select your state.' });
+    }
+    const { isDeliverable } = require('../content/availability');
+    if (!await isDeliverable(s.board, s.grade, s.medium)) {
+      return res.status(400).json({ success: false, error: `We don't have quizzes for ${s.board} · ${s.grade} · ${s.medium} yet.` });
+    }
+
+    // Reuse the child when the name matches one already on this number — the
+    // form arrives pre-filled, so an unchanged name must map to the same child
+    // rather than quietly creating a second copy of them.
+    const existing = (await db.query(
+      `SELECT id FROM students WHERE parent_id=(SELECT id FROM parents WHERE parent_mobile_number=$1)
+         AND lower(btrim(student_name))=lower($2) AND is_active LIMIT 1`, [c.mobile_number, name])).rows[0];
+
+    const gross = await instantGross();
+    const cart = {
+      instant: true, total: gross,
+      parent_name: String(parent_name || '').trim().slice(0, 80) || 'Parent',
+      state,
+      ...(existing
+        ? { student_id: existing.id, student_name: name }
+        : { student: { name, board: s.board, grade: s.grade, medium: s.medium,
+                       school_name: String(s.school_name || '').trim().slice(0, 120) || null } }),
+    };
+
+    const rzp = await razorpayCreds();
+    const rzpRes = await fetch(`${RZP}/orders`, {
+      method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: Math.round(gross * 100), currency: 'INR', receipt: `qpi_${c.id}`,
+        notes: { plan: 'INSTANT', instant: '1', token: String(token), mobile: String(c.mobile_number) } }),
+    });
+    const order = await rzpRes.json();
+    if (!rzpRes.ok) { console.error('[pay] instant order failed:', order); return res.status(502).json({ success: false, error: order?.error?.description || 'Could not start payment.' }); }
+
+    await db.query(
+      `UPDATE checkout_sessions SET razorpay_order_id=$2, amount=$3, status='order_created', cart=$4, razorpay_mode=$5 WHERE id=$1`,
+      [c.id, order.id, gross, JSON.stringify(cart), rzp.mode]);
+
+    res.json({ success: true, order_id: order.id, amount: Math.round(gross * 100), currency: 'INR', key: rzp.keyId });
+  } catch (e) {
+    console.error('[pay] instant-order failed:', e.message);
+    res.status(500).json({ success: false, error: 'Something went wrong. Please try again.' });
+  }
+});
+
+/** Verify an Instant Quiz payment and activate it (invoice + quiz on WhatsApp). */
+router.post('/api/instant-verify', async (req, res) => {
+  const { token, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  try {
+    const c = await loadCheckoutAny(token);         // also loads a paid one, for idempotent replays
+    if (!c || !c.cart || !c.cart.instant) return res.status(410).json({ success: false, error: 'Link expired.' });
+
+    const rzp = await razorpayCreds(c.razorpay_mode);
+    const expected = crypto.createHmac('sha256', rzp.keySecret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`).digest('hex');
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ success: false, error: 'Payment could not be verified.' });
+    }
+
+    const payRes = await fetch(`${RZP}/payments/${razorpay_payment_id}`, { headers: { Authorization: rzp.authHeader } });
+    const pay = await payRes.json();
+    if (!payRes.ok || !['captured', 'authorized'].includes(pay.status)) {
+      return res.status(400).json({ success: false, error: 'Payment not completed.' });
+    }
+    if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+      console.error(`[pay] instant amount mismatch: cart ${c.cart.total} vs paid ${Number(pay.amount) / 100}`);
+      return res.status(400).json({ success: false, error: 'Amount mismatch. Contact support if money was deducted.' });
+    }
+
+    const result = await finalizeInstant(c, pay);
+    res.json({ success: true, invoice: result.invoice, already_paid: !!result.already, whatsapp_url: waHandoffUrl() });
+  } catch (e) {
+    console.error('[pay] instant-verify failed:', e.message);
+    res.status(500).json({ success: false, error: 'Payment verification failed. If money was deducted, contact support.' });
+  }
+});
+
+/** wa.me link used to hand the parent back to the chat after paying. */
+function waHandoffUrl() {
+  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+  return n ? `https://wa.me/${n}` : null;
+}
+
+/** Kept for the admin/one-off path: a Razorpay Payment Link for one Instant Quiz. */
+async function createInstantLink({ sessionId = null, mobile, studentId = null, newStudent = null }) {
+  const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='INSTANT' AND is_active`)).rows[0];
+  if (!plan) return { error: 'Instant Quiz is not available right now.' };
+  const gross = await instantGross();
+  const m = normMobile(mobile);
+  const parent = (await db.query(`SELECT id, parent_name, state_code FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
+
+  let cart;
+  if (studentId) {
+    const st = (await db.query(`SELECT id, student_name FROM students WHERE id=$1 AND is_active`, [studentId])).rows[0];
+    if (!st) return { error: 'That child was not found.' };
+    // A missing state is NOT a dead-end. The GST invoice already defaults an
+    // unknown recipient state to the supplier's state (place of supply = supplier
+    // location, correct for a B2C sale with no address on file).
+    cart = { instant: true, parent_name: parent?.parent_name || 'Parent',
+             state: parent?.state_code || null,
+             student_id: st.id, student_name: st.student_name, total: gross };
+  } else if (newStudent) {
+    const { isDeliverable } = require('../content/availability');
+    if (!await isDeliverable(newStudent.board, newStudent.grade, newStudent.medium)) {
+      return { error: `No quiz content for ${newStudent.board} · ${newStudent.grade} · ${newStudent.medium} yet.` };
+    }
+    cart = { instant: true, parent_name: newStudent.parent_name || parent?.parent_name || 'Parent', state: newStudent.state,
+             student: { name: newStudent.name, board: newStudent.board, grade: newStudent.grade,
+                        medium: newStudent.medium, school_name: newStudent.school_name || null }, total: gross };
+  } else return { error: 'no student' };
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  const { rows: [ins] } = await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
+    [token, sessionId, m, plan.id, gross, JSON.stringify(cart)]);
+
+  const rzp = await razorpayCreds();
+  const plRes = await fetch(`${RZP}/payment_links`, {
+    method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: Math.round(gross * 100), currency: 'INR', accept_partial: false,
+      description: 'QuizPe Instant Quiz (12 questions)',
+      customer: { name: String(cart.parent_name || m).slice(0, 50), contact: `+91${m}` },
+      notify: { sms: false, email: false }, reminder_enable: false,
+      notes: { token: String(token), checkout_id: String(ins.id), instant: '1', mobile: String(m) },
+    }),
+  });
+  const link = await plRes.json();
+  if (!plRes.ok || !link.short_url) { console.error('[pay] instant link failed:', link); return { error: link?.error?.description || 'Could not create payment link.' }; }
+  await db.query(`UPDATE checkout_sessions SET razorpay_mode=$2 WHERE id=$1`, [ins.id, rzp.mode]);
+  return { short_url: link.short_url, amount: gross, token };
+}
+
+/**
+ * Activate an Instant Quiz once its Payment Link is paid. Records the payment,
+ * upserts the parent + the ONE child (existing or new), issues a subscription-free
+ * GST invoice, then starts the 12-question quiz on WhatsApp. Idempotent.
+ */
+async function finalizeInstant(c, pay) {
+  const cart = c.cart || {};
+  const done = (await db.query(
+    `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`,
+    [pay.id])).rows[0];
+  if (done) return { already: true, invoice: done.invoice_id };
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const locked = (await client.query(`SELECT id, used_at, status FROM checkout_sessions WHERE id=$1 FOR UPDATE`, [c.id])).rows[0];
+    if (locked.used_at || locked.status === 'paid') {
+      await client.query('ROLLBACK');
+      const inv = (await db.query(
+        `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`, [pay.id])).rows[0];
+      return { already: true, invoice: inv?.invoice_id };
+    }
+
+    const paymentDbId = (await client.query(
+      `INSERT INTO payments (payment_id, entity, amount, currency, status, order_id, method, captured,
+                             description, email, contact, notes, api_response)
+       VALUES ($1,'payment',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (payment_id) DO UPDATE SET status=EXCLUDED.status, modified_at=now()
+       RETURNING id`,
+      [pay.id, pay.amount / 100, pay.currency, pay.status, pay.order_id || null, pay.method, pay.captured === true,
+       'Instant Quiz', pay.email || null, pay.contact || c.mobile_number,
+       JSON.stringify(pay.notes || {}), JSON.stringify(pay)])).rows[0].id;
+
+    const parentId = (await client.query(
+      `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (parent_mobile_number) DO UPDATE
+         SET parent_name=COALESCE(NULLIF(EXCLUDED.parent_name,''), parents.parent_name),
+             state_code=COALESCE(EXCLUDED.state_code, parents.state_code), modified_at=now()
+       RETURNING id`, [String(cart.parent_name || 'Parent').trim().slice(0, 80) || 'Parent', c.mobile_number, cart.state || null])).rows[0].id;
+
+    let studentId = null, studentName = cart.student_name || null;
+    if (cart.student_id) {
+      const st = (await client.query(`SELECT id, student_name FROM students WHERE id=$1 AND parent_id=$2`, [cart.student_id, parentId])).rows[0];
+      if (st) { studentId = st.id; studentName = st.student_name; }
+    }
+    if (!studentId && cart.student) {
+      const s = cart.student;
+      const row = (await client.query(
+        `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)
+         VALUES ($1,(SELECT id FROM boards WHERE board_code=$2),(SELECT id FROM grades WHERE grade_code=$3),
+                    (SELECT id FROM mediums WHERE medium_code=$4),$5,$6)
+         ON CONFLICT (parent_id, student_name) DO UPDATE
+           SET board_id=EXCLUDED.board_id, grade_id=EXCLUDED.grade_id, medium_id=EXCLUDED.medium_id,
+               school_name=COALESCE(EXCLUDED.school_name, students.school_name), is_active=true, modified_at=now()
+         RETURNING id`,
+        [parentId, s.board, s.grade, s.medium, String(s.name).trim().slice(0, 60), s.school_name || null])).rows[0];
+      studentId = row.id; studentName = String(s.name).trim().slice(0, 60);
+    }
+    if (!studentId) throw new Error('instant: no student resolved');
+
+    const { generateInstantInvoice } = require('../pdf/invoice');
+    const inv = await generateInstantInvoice({
+      paymentDbId,
+      parent: { id: parentId, parent_name: cart.parent_name, parent_mobile_number: c.mobile_number, state_code: cart.state || null },
+      student: { student_name: studentName }, exec: client,
+    });
+
+    await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
+    if (c.whatsapp_session_id) {
+      await client.query(`UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`, [c.whatsapp_session_id, parentId]);
+      await client.query(
+        `INSERT INTO whatsapp_session_events (session_id, from_state, to_state, event, payload)
+         VALUES ($1, COALESCE((SELECT state FROM whatsapp_sessions WHERE id=$1),'main_menu'), 'active','instant_paid',$2)`,
+        [c.whatsapp_session_id, JSON.stringify({ payment_id: pay.id, invoice: inv.invoiceNo, student_id: studentId })]);
+    }
+    await client.query('COMMIT');
+
+    // deliver: confirmation + invoice, then START the quiz
+    try {
+      const wa = require('../whatsapp/client');
+      await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+`✅ *Payment successful!* ⚡
+
+Your *Instant Quiz* for *${studentName}* is starting now — 12 questions.
+🧾 Invoice: ${inv.invoiceNo}`);
+      await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
+        filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+        caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
+      });
+      if (studentId) await require('../whatsapp/instantQuiz').startInstantQuiz(c.whatsapp_session_id, c.mobile_number, studentId);
+    } catch (e) { console.error('[pay] instant deliver failed:', e.message); }
+
+    try {
+      const notify = require('../mail/notify');
+      const M2 = require('../whatsapp/messages');
+      notify.payment({
+        parent: { name: cart.parent_name || c.mobile_number, mobile: c.mobile_number, state: cart.state },
+        children: [{ name: studentName }],
+        plan: { name: 'Instant Quiz (₹9 + GST)', duration: null,
+                start: M2.fmtDate(new Date()), end: '—', quizTime: '—', reminderTime: '—' },
+        payment: { amount: Number(pay.amount / 100).toFixed(2), method: pay.method, status: pay.status,
+                   paymentId: pay.id, orderId: pay.order_id || '—', mode: c.razorpay_mode || 'test' },
+        invoice: { number: inv.invoiceNo, base: inv.amounts?.base, cgst: inv.amounts?.cgst,
+                   sgst: inv.amounts?.sgst, igst: inv.amounts?.igst, total: inv.amounts?.total },
+        ctx: { channel: 'Instant Quiz', at: new Date(), sessionId: c.whatsapp_session_id },
+      });
+    } catch (e) { console.error('[pay] instant alert skipped:', e.message); }
+
+    return { invoice: inv.invoiceNo, studentName };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /** Fetch a captured payment for an order (used to reconcile an already-paid order). */
 async function capturedPaymentForOrder(orderId, auth) {
   const header = auth || (await razorpayCreds()).authHeader;
@@ -1026,24 +1357,57 @@ async function activateFromToken(token, pay) {
     console.error(`[pay] webhook link amount mismatch token ${token}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
     return;
   }
-  // A mid-plan add-child link carries its own activation path (no new
-  // subscription; a pro-rated invoice against the family's current plan).
-  const result = c.cart && c.cart.midplan
-    ? await finalizeAddChild(c, pay)
-    : await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
+  // Each link type carries its own activation path: instant (no subscription,
+  // pay-per-quiz), mid-plan add-child (pro-rated), or a normal subscription.
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Razorpay payment link', at: new Date(), sessionId: c.whatsapp_session_id });
   console.log(`[pay] webhook link ${result.already ? 'already active' : 'ACTIVATED'} token=${token} invoice=${result.invoice}`);
 }
 
 async function activateFromWebhook(pay) {
   if (!['captured', 'authorized'].includes(pay.status)) return;
-  const c = await loadCheckoutByOrder(pay.order_id);
-  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id}`); return; }
+  let c = await loadCheckoutByOrder(pay.order_id);
+
+  // A PAYMENT LINK payment also fires payment.captured, but its checkout was
+  // never stored against an order id — only the token in the link's notes. So an
+  // order miss is not a dead end: fall back to that token, then to the payer's
+  // number + exact amount (the same matching the admin reconcile uses). Without
+  // this, a link payment silently vanishes unless payment_link.paid happens to
+  // be subscribed in the Razorpay dashboard — the parent pays and gets nothing.
+  if (!c) {
+    const token = pay.notes && (pay.notes.token || pay.notes.checkout_token);
+    if (token) c = await loadCheckoutByToken(String(token));
+  }
+  if (!c) {
+    const mobile = normMobile(pay.contact || '');
+    if (mobile) {
+      const { rows } = await db.query(
+        `SELECT c.*, pl.plan_code, pl.plan_name, pl.plan_description, pl.price, pl.comparable_price,
+                pl.regular_price, pl.student_count, pl.duration
+           FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
+          WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
+      c = applyOfferPrice(
+        rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null);
+    }
+  }
+  if (!c) { console.warn(`[pay] webhook: no checkout for order ${pay.order_id} (token/mobile fallback also missed)`); return; }
+
   // amount safety — the same guard the browser path uses
   if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
     console.error(`[pay] webhook amount mismatch order ${pay.order_id}: cart ${c.cart?.total} vs paid ${Number(pay.amount) / 100}`);
     return;
   }
-  const result = await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
+
+  // Route by cart type, exactly as the payment-link path does — an Instant Quiz
+  // reaching here must NOT be run through finalize() (which expects a plan).
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Razorpay webhook', at: new Date(), sessionId: c.whatsapp_session_id });
   console.log(`[pay] webhook ${result.already ? 'already active' : 'ACTIVATED'} order=${pay.order_id} invoice=${result.invoice}`);
 }
 
@@ -1133,17 +1497,25 @@ async function reconcileByPaymentId(paymentId, token = null) {
               pl.regular_price, pl.student_count, pl.duration
          FROM checkout_sessions c JOIN quizpe_plans pl ON pl.id = c.plan_id
         WHERE c.mobile_number = $1 ORDER BY c.id DESC LIMIT 25`, [mobile]);
-    c = rows.find(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount)) || null;
+    const sameAmount = rows.filter(r => r.cart && Math.round(Number(r.cart.total) * 100) === Number(pay.amount));
+    // Prefer an UNUSED checkout. A parent who buys the same thing twice has two
+    // checkouts of identical value; taking the newest blindly lands on the one
+    // already paid, whose finalize then returns "already" and silently drops the
+    // second payment — money captured, no invoice, no quiz. The unpaid one is
+    // always the one this payment still needs.
+    c = sameAmount.find(r => !r.used_at && r.status !== 'paid') || sameAmount[0] || null;
   }
   if (!c) return { error: 'No matching checkout found for this payment (by token, or by mobile + amount).' };
   if (c.cart && Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
     return { error: `Amount mismatch: checkout ₹${c.cart.total} vs payment ₹${Number(pay.amount) / 100}.` };
   }
 
-  const result = c.cart && c.cart.midplan
-    ? await finalizeAddChild(c, pay)
-    : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
-  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan) };
+  const result = c.cart && c.cart.instant
+    ? await finalizeInstant(c, pay)
+    : c.cart && c.cart.midplan
+      ? await finalizeAddChild(c, pay)
+      : await finalize(c, pay, { channel: 'Manual reconcile (admin)', at: new Date(), sessionId: c.whatsapp_session_id });
+  return { ok: true, invoice: result.invoice, end_date: result.end_date, already: !!result.already, midplan: !!(c.cart && c.cart.midplan), instant: !!(c.cart && c.cart.instant) };
 }
 
 module.exports = router;
@@ -1152,3 +1524,5 @@ module.exports.reconcileByPaymentId = reconcileByPaymentId;
 module.exports.razorpayWebhook = razorpayWebhook;
 module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;
+module.exports.createInstantLink = createInstantLink;
+module.exports.createInstantCheckout = createInstantCheckout;

@@ -467,10 +467,23 @@ async function geo() {
      WHERE p.is_active
      GROUP BY 1 ORDER BY n DESC`);
 
+  // Enrolled families that are CURRENTLY ACTIVE — a live subscription within its
+  // dates, trial or paid alike. DISTINCT so a family with both isn't counted twice.
+  const { rows: families_active } = await db.query(`
+    SELECT COALESCE(su.state_name, NULLIF(p.state_code,''), 'Unknown') AS name, COUNT(DISTINCT p.id)::int AS n
+      FROM parents p
+      JOIN parents_quizpe_subscriptions s
+        ON s.parent_id = p.id AND s.is_active
+       AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+      LEFT JOIN states_unions su ON su.state_code = p.state_code
+     WHERE p.is_active
+     GROUP BY 1 ORDER BY n DESC`);
+
   return {
     visitors: topN(all.map, 100), visitors_india: all.india, visitors_other: all.other,
     visitors_today: topN(today.map, 100), visitors_today_india: today.india, visitors_today_other: today.other,
     families,
+    families_active,
   };
 }
 

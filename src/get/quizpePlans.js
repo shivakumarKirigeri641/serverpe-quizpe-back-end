@@ -14,6 +14,7 @@ async function getQuizpePlans() {
             is_trial, is_active
        FROM quizpe_plans
       WHERE is_active = true
+        AND NOT COALESCE(is_instant, false)   -- Instant Quiz has its own entry, not the plans list
       ORDER BY price ASC`,
   );
   return rows;

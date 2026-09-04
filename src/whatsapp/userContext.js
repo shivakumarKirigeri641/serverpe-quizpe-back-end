@@ -181,6 +181,11 @@ function buildMainMenu(ctx) {
                     ? `Opens at ${fmtHour(qw.openHHMM())}${allDay ? ' — all day today!' : ' tonight'}. About 5 minutes.`
                     : "Today's quiz has closed — the next one is tomorrow." });
   }
+  // Instant Quiz — pay-per-quiz, no plan needed. Offered to EVERYONE (lapsed,
+  // premium, trial, and numbers with no child yet): the checkout form collects
+  // whatever we don't already know, so it never depends on a subscription.
+  rows.push({ id: 'instant_quiz', title: '⚡ Instant quiz @ ₹9*',
+              description: '12 questions right now · pay per quiz, no plan · *+GST' });
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
     { id: 'quiz_report',     title: '📊 Quiz reports',    description: 'Recent scores and progress' },

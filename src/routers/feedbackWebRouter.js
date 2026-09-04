@@ -166,14 +166,11 @@ router.post('/api/submit', async (req, res) => {
     let thanks = null;
     try {
       const wa = require('../whatsapp/client');
-      const M = require('../whatsapp/messages');
-      const t = (await db.query(
-        `SELECT quiz_time FROM parents_quizpe_subscriptions
-          WHERE parent_id = $1 AND is_active ORDER BY id DESC LIMIT 1`, [l.parent_id])).rows[0];
-      const at = t ? ` at *${M.fmtTime(t.quiz_time)}*` : '';
+      // No time is named any more: the quiz is open all day, so naming an hour
+      // was both inaccurate and needless precision.
       thanks = stars >= 4
-        ? `🙏 *Thank you, ${l.parent_name || 'there'}!*\n\nSo glad ${l.student_name || 'your child'} is enjoying it. See you tomorrow${at} for the next quiz! 🚀`
-        : `🙏 *Thank you for the honest feedback.*\n\nWe read every message and we'll use this to make the questions better for ${l.student_name || 'your child'}. See you tomorrow${at}! 🚀`;
+        ? `🙏 *Thank you, ${l.parent_name || 'there'}!*\n\nSo glad ${l.student_name || 'your child'} is enjoying it. See you tomorrow! 🚀`
+        : `🙏 *Thank you for the honest feedback.*\n\nWe read every message and we'll use this to make the questions better for ${l.student_name || 'your child'}. See you tomorrow! 🚀`;
       await wa.sendText(l.whatsapp_session_id, l.mobile_number, thanks);
     } catch (e) {
       console.error('[feedbackweb] thank-you message failed:', e.message);

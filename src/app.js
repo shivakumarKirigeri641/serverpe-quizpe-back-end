@@ -7,6 +7,7 @@
  */
 
 require('dotenv').config();
+require('./utils/logger');   // timestamp + level every console line (pm2-readable) — must load first
 const path = require('path');
 const express = require('express');
 const parentRouter = require('./routers/parentRouter');
@@ -49,7 +50,10 @@ app.use(helmet({
       // Razorpay's checkout widget loads from their CDN and opens its card form
       // in an iframe that talks back to api.razorpay.com — the payment page is
       // dead without these three, which is exactly what broke "Pay ₹99".
-      scriptSrc: ["'self'", "'unsafe-inline'", 'https://checkout.razorpay.com'],
+      // cdn.razorpay.com serves the risk-detection bundle that checkout.js pulls
+      // in at runtime; without it the browser blocks the script and the console
+      // fills with CSP errors on every payment page (pay.html and instant.html).
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://checkout.razorpay.com', 'https://cdn.razorpay.com'],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'blob:', 'https://*.razorpay.com'],

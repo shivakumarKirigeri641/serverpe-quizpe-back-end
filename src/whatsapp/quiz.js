@@ -17,6 +17,11 @@ const QUESTIONS_PER_QUIZ = 15;   // default; per-quiz count lives on quizpe_trac
 const LETTERS = ['A', 'B', 'C', 'D'];
 const BASE_SUBJECT = 'MATHS';   // included in every plan; extras come from add-ons
 
+// Quizzes per day, per subject (the "slot"). Everyone gets DEFAULT; premium (paid,
+// not trial) gets PREMIUM_WEEKEND on Sat/Sun. Tunable without a redeploy.
+const SLOTS_DEFAULT         = Number(process.env.QUIZ_SLOTS_DEFAULT) || 2;   // trial & premium weekday
+const SLOTS_PREMIUM_WEEKEND = Number(process.env.QUIZ_SLOTS_PREMIUM_WEEKEND) || 3;
+
 /** Academic serving month: Jun..Mar (Apr/May fall back to June). */
 function servingMonth(d = new Date()) {
   const m = d.getMonth() + 1;
@@ -61,6 +66,7 @@ async function scheduleDailyQuizzes(studentId, exec = db, opts = {}) {
   // Quiz length adapts per child+subject: 10 when doing well, up to 20 when
   // they're carrying unmastered chapters. A test day can override explicitly.
   const quizType = opts.quizType || 'daily';
+  const slot = opts.slot || 1;   // which quiz of the day (1st/2nd/3rd)
 
   const subjects = await subjectsForStudent(studentId, exec);
   const created = [];
@@ -68,27 +74,110 @@ async function scheduleDailyQuizzes(studentId, exec = db, opts = {}) {
     const questionCount = opts.questionCount
       || await mastery.recommendedQuestionCount(studentId, s.id, exec);
     const { rows } = await exec.query(
-      `INSERT INTO quizpe_tracker (student_id, subject_id, status_id, question_count, quiz_type)
-       VALUES ($1,$2,(SELECT id FROM quizpe_status WHERE status_code='scheduled'),$3,$4)
-       ON CONFLICT (student_id, subject_id, quiz_date) DO NOTHING
+      `INSERT INTO quizpe_tracker (student_id, subject_id, status_id, question_count, quiz_type, quiz_slot)
+       VALUES ($1,$2,(SELECT id FROM quizpe_status WHERE status_code='scheduled'),$3,$4,$5)
+       ON CONFLICT (student_id, subject_id, quiz_date, quiz_slot) DO NOTHING
        RETURNING id`,
-      [studentId, s.id, questionCount, quizType]);
-    created.push({ subject: s.subject_code, trackerId: rows[0]?.id || null, questionCount, alreadyExisted: !rows[0] });
+      [studentId, s.id, questionCount, quizType, slot]);
+    created.push({ subject: s.subject_code, trackerId: rows[0]?.id || null, questionCount, slot, alreadyExisted: !rows[0] });
   }
   return { subjects, created };
+}
+
+/**
+ * How many quizzes/day this student is entitled to, per subject (the slot cap).
+ * Everyone: SLOTS_DEFAULT (2). Premium (paid, active, in-window) on a weekend:
+ * SLOTS_PREMIUM_WEEKEND (3). Trial members never get the weekend bonus.
+ */
+async function entitledSlots(studentId, exec = db) {
+  const W = require('./quizWindow');
+  if (!W.isWeekend()) return SLOTS_DEFAULT;
+  const { rows } = await exec.query(
+    `SELECT COALESCE(bool_or(
+              NOT COALESCE(pl.is_trial, false) AND s.is_active
+              AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+            ), false) AS paid_active
+       FROM students st
+       JOIN parents p ON p.id = st.parent_id
+       LEFT JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
+       LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
+      WHERE st.id = $1`, [studentId]);
+  return rows[0]?.paid_active ? SLOTS_PREMIUM_WEEKEND : SLOTS_DEFAULT;
+}
+
+/**
+ * The child's quiz standing for today: how many quizzes are done, the daily
+ * cap (slots × subjects), and whether another quiz can be started right now.
+ */
+async function dailyQuizProgress(studentId, exec = db) {
+  const maxSlots = await entitledSlots(studentId, exec);
+  const subjects = await subjectsForStudent(studentId, exec);
+  const total = maxSlots * Math.max(1, subjects.length);
+  const { rows: doneRows } = await exec.query(
+    `SELECT COUNT(*)::int done FROM quizpe_tracker t
+       JOIN quizpe_status qs ON qs.id = t.status_id
+      WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
+        AND NOT COALESCE(t.is_instant, false)
+        AND qs.status_code IN ('completed','closed')`, [studentId]);
+  const done = doneRows[0].done;
+  // Available if something is still pending, or a subject is under its slot cap.
+  const pend = await pendingTrackers(studentId);
+  let hasNext = pend.length > 0;
+  if (!hasNext) {
+    for (const s of subjects) {
+      const used = (await exec.query(
+        `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
+          WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
+      if (used < maxSlots) { hasNext = true; break; }
+    }
+  }
+  return { done, total, maxSlots, subjects: subjects.length, hasNext };
+}
+
+/**
+ * Return a runnable pending tracker for the next quiz, creating the next slot
+ * for a subject if the previous slot is done and the child is still under cap.
+ * Sequential: a subject's slot N+1 is only created once slot N is finished.
+ * Returns a pendingTrackers-shaped row, or null when the day's cap is reached.
+ */
+async function ensureNextTracker(studentId, maxSlots, exec = db) {
+  // 1) Anything already scheduled but not finished — lowest slot / base subject first.
+  let pend = await pendingTrackers(studentId);
+  if (pend.length) return pend[0];
+
+  // 2) Nothing pending: unlock the next slot for the first subject under its cap.
+  const subjects = await subjectsForStudent(studentId, exec);   // base subject first
+  for (const s of subjects) {
+    const used = (await exec.query(
+      `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
+        WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
+    if (used < maxSlots) {
+      const nextSlot = used + 1;
+      const qc = await mastery.recommendedQuestionCount(studentId, s.id, exec);
+      await exec.query(
+        `INSERT INTO quizpe_tracker (student_id, subject_id, status_id, question_count, quiz_type, quiz_slot)
+         VALUES ($1,$2,(SELECT id FROM quizpe_status WHERE status_code='scheduled'),$3,'daily',$4)
+         ON CONFLICT (student_id, subject_id, quiz_date, quiz_slot) DO NOTHING`,
+        [studentId, s.id, qc, nextSlot]);
+      pend = await pendingTrackers(studentId);
+      if (pend.length) return pend[0];
+    }
+  }
+  return null;
 }
 
 /** Today's trackers for a student that are not finished yet. */
 async function pendingTrackers(studentId) {
   const { rows } = await db.query(
-    `SELECT t.id, t.quiz_date, t.question_count, t.quiz_type,
+    `SELECT t.id, t.quiz_date, t.question_count, t.quiz_type, t.quiz_slot,
             s.subject_code, s.subject_name, qs.status_code
        FROM quizpe_tracker t
        JOIN subjects s       ON s.id = t.subject_id
        JOIN quizpe_status qs ON qs.id = t.status_id
       WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
+        AND NOT COALESCE(t.is_instant, false)
         AND qs.status_code IN ('scheduled','delivered','yet_to_start','in_progress')
-      ORDER BY (s.subject_code = $2) DESC, s.subject_code`,
+      ORDER BY t.quiz_slot ASC, (s.subject_code = $2) DESC, s.subject_code`,
     [studentId, BASE_SUBJECT]);
   return rows;
 }
@@ -416,6 +505,28 @@ _Full answers & explanations are in the report below._ 📄`);
     } catch (e) { console.error('[quiz] could not queue quiz-done alert:', e.message); }
   }
 
+  // Multiple quizzes a day: if this child still has another quiz within today's
+  // window and cap, offer a one-tap button to start the next one now. Best-effort
+  // — the offer must never break the score/report the child just earned.
+  try {
+    const t = (await db.query(`SELECT student_id, is_instant FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
+    if (t && t.is_instant) {
+      // Instant Quiz is pay-per-use: offer to buy another (₹9) — anytime, no window.
+      await wa.sendButtons(sessionId, mobile,
+        `⚡ Want *another quick quiz*? Just ₹9 + GST for 12 fresh questions — anytime.`,
+        [{ id: 'instant_again', title: '⚡ Take another (₹9)' }]);
+    } else if (t) {
+      const W = require('./quizWindow');
+      const prog = await dailyQuizProgress(t.student_id);
+      if (prog.hasNext && W.state() === 'open') {
+        const nextN = Math.min(prog.done + 1, prog.total);
+        await wa.sendButtons(sessionId, mobile,
+          `🎯 Ready for the next one? You can take *quiz ${nextN} of ${prog.total}* today.`,
+          [{ id: 'start_quiz', title: `▶️ Start quiz ${nextN}/${prog.total}`.slice(0, 20) }]);
+      }
+    }
+  } catch (e) { console.error('[quiz] next-quiz offer failed:', e.message); }
+
   return { total, correct, pct };
 }
 
@@ -447,5 +558,6 @@ async function saveFeedback(trackerId, rating, userName) {
 module.exports = {
   scheduleDailyQuizzes, subjectsForStudent, pendingTrackers, saveFeedback,
   startQuiz, nextQuestion, sendQuestion, submitAnswer, finishQuiz,
+  entitledSlots, dailyQuizProgress, ensureNextTracker,
   QUESTIONS_PER_QUIZ, BASE_SUBJECT, servingMonth, academicYear,
 };

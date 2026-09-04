@@ -671,4 +671,317 @@ async function activityCalendar(weeks = 12) {
   return rows;
 }
 
-module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar };
+/**
+ * Multi-quiz engagement: how many quizzes were taken at each slot (1st/2nd/3rd)
+ * today and over the last 7 days, with how many students reached each slot. This
+ * is the number that shows whether the 2nd/3rd-quiz feature is landing.
+ */
+async function slotBreakdown() {
+  const { rows } = await db.query(`
+    SELECT t.quiz_slot AS slot,
+           COUNT(*) FILTER (WHERE t.quiz_date = CURRENT_DATE)::int AS today,
+           COUNT(DISTINCT t.student_id) FILTER (WHERE t.quiz_date = CURRENT_DATE
+             AND q.status_code IN ('completed','closed'))::int AS students_today,
+           COUNT(*) FILTER (WHERE t.quiz_date > CURRENT_DATE - 7)::int AS week,
+           COUNT(*) FILTER (WHERE t.quiz_date > CURRENT_DATE - 7
+             AND q.status_code IN ('completed','closed'))::int AS week_completed
+      FROM quizpe_tracker t
+      JOIN quizpe_status q ON q.id = t.status_id
+     WHERE t.quiz_date > CURRENT_DATE - 7
+     GROUP BY t.quiz_slot
+     ORDER BY t.quiz_slot`);
+  return rows;   // [{slot:1, today, students_today, week, week_completed}, ...]
+}
+
+/**
+ * Instant "Quick Quiz" analytics. Instant quizzes are quizpe_tracker.is_instant;
+ * revenue is the ₹9+GST captured payments (description='Instant Quiz'). Returns
+ * today vs yesterday, this-week vs last-week, a 14-day trend, a status split, a
+ * recent list, and all-time totals.
+ */
+/**
+ * Quick Quiz (Instant Quiz) analytics.
+ *
+ * `range` selects the window every range-sensitive block uses. The headline
+ * today/yesterday and week comparisons stay FIXED regardless, so the founder's
+ * daily glance never shifts under them when a filter is changed.
+ */
+const QQ_RANGES = {
+  '7d':         { label: 'Last 7 days',  from: 'CURRENT_DATE-6',  to: 'CURRENT_DATE' },
+  '14d':        { label: 'Last 14 days', from: 'CURRENT_DATE-13', to: 'CURRENT_DATE' },
+  '30d':        { label: 'Last 30 days', from: 'CURRENT_DATE-29', to: 'CURRENT_DATE' },
+  'this_week':  { label: 'This week',    from: "date_trunc('week',CURRENT_DATE)::date", to: 'CURRENT_DATE' },
+  'last_week':  { label: 'Last week',    from: "(date_trunc('week',CURRENT_DATE)-interval '1 week')::date",
+                                         to:   "(date_trunc('week',CURRENT_DATE)-interval '1 day')::date" },
+  'this_month': { label: 'This month',   from: "date_trunc('month',CURRENT_DATE)::date", to: 'CURRENT_DATE' },
+  'last_month': { label: 'Last month',   from: "(date_trunc('month',CURRENT_DATE)-interval '1 month')::date",
+                                         to:   "(date_trunc('month',CURRENT_DATE)-interval '1 day')::date" },
+  'all':        { label: 'All time',     from: "'2000-01-01'::date", to: 'CURRENT_DATE' },
+};
+
+async function quickQuiz(range = '7d') {
+  const R = QQ_RANGES[range] || QQ_RANGES['7d'];
+  const FROM = R.from, TO = R.to;
+  const many = async (sql, p = []) => (await db.query(sql, p)).rows;
+  const one = async (sql, p = []) => (await db.query(sql, p)).rows[0];
+
+  const dayStats = (dateExpr) => one(
+    `SELECT COUNT(*)::int quizzes,
+            COUNT(DISTINCT t.student_id)::int children,
+            COUNT(*) FILTER (WHERE qs.status_code='completed')::int completed,
+            COUNT(*) FILTER (WHERE qs.status_code='in_progress')::int in_progress,
+            (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+              WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+                AND ${IST_DATE('created_at')} = ${dateExpr})::numeric revenue
+       FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant AND t.quiz_date = ${dateExpr}`);
+
+  const weekStats = (woff) => one(
+    `SELECT (SELECT COUNT(*)::int FROM quizpe_tracker
+              WHERE is_instant AND date_trunc('week',quiz_date)=date_trunc('week',CURRENT_DATE)-($1||' weeks')::interval) quizzes,
+            (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+              WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+                AND date_trunc('week', ${IST_DATE('created_at')})=date_trunc('week',CURRENT_DATE)-($1||' weeks')::interval) revenue`,
+    [woff]);
+
+  const [today, yesterday, this_week, last_week, totals] = await Promise.all([
+    dayStats('CURRENT_DATE'), dayStats('(CURRENT_DATE-1)'), weekStats(0), weekStats(1),
+    one(`SELECT (SELECT COUNT(*)::int FROM quizpe_tracker WHERE is_instant) quizzes,
+                (SELECT COUNT(DISTINCT student_id)::int FROM quizpe_tracker WHERE is_instant) children,
+                (SELECT COALESCE(SUM(amount),0)::numeric FROM payments WHERE description='Instant Quiz' AND status IN ('captured','authorized')) revenue`),
+  ]);
+
+  // Trend across the SELECTED range, capped at 92 buckets so "all time" cannot
+  // render a bar per day for years and melt the page.
+  const trend = await many(
+    `WITH bounds AS (SELECT GREATEST(${FROM}, ${TO} - 91) a, ${TO}::date b),
+          span AS (SELECT generate_series((SELECT a FROM bounds), (SELECT b FROM bounds), '1 day')::date d)
+     SELECT to_char(span.d,'DD Mon') label, span.d::text date,
+       (SELECT COUNT(*)::int FROM quizpe_tracker t WHERE t.is_instant AND t.quiz_date=span.d) quizzes,
+       (SELECT COALESCE(SUM(amount),0)::numeric FROM payments
+         WHERE description='Instant Quiz' AND status IN ('captured','authorized') AND ${IST_DATE('created_at')}=span.d) revenue
+     FROM span ORDER BY span.d`);
+
+  // LIVE — who is on a quick quiz right now, and WHICH NUMBER it is for that
+  // child (their 1st, 2nd, 7th). The ordinal is the thing that shows whether
+  // pay-per-quiz actually repeats, one family at a time.
+  const live = await many(
+    `SELECT t.id tracker_id, st.id student_id, st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            b.board_code, g.grade_name, qs.status_code status, t.question_count,
+            (SELECT COUNT(*)::int FROM student_quizpe_histories h
+              WHERE h.tracker_id=t.id AND h.answered_option IS NOT NULL) answered,
+            (SELECT COUNT(*)::int FROM quizpe_tracker t2
+              WHERE t2.is_instant AND t2.student_id=t.student_id AND t2.id<=t.id) nth,
+            to_char(t.created_at AT TIME ZONE '${TZ}','DD Mon HH24:MI') started,
+            EXTRACT(EPOCH FROM (now()-t.created_at))::int age_seconds
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+       JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant
+        AND qs.status_code IN ('scheduled','delivered','yet_to_start','in_progress')
+      ORDER BY t.created_at DESC LIMIT 25`);
+
+  // Range roll-up, plus the SAME-LENGTH preceding window, so a filter answers
+  // "better or worse than before?" rather than only "how many?".
+  const rangeStats = await one(
+    `WITH cur AS (
+       SELECT COUNT(*)::int quizzes, COUNT(DISTINCT student_id)::int children
+         FROM quizpe_tracker WHERE is_instant AND quiz_date BETWEEN ${FROM} AND ${TO}),
+     prev AS (
+       SELECT COUNT(*)::int quizzes FROM quizpe_tracker
+        WHERE is_instant AND quiz_date BETWEEN (${FROM}) - ((${TO}) - (${FROM}) + 1) AND (${FROM}) - 1),
+     rev AS (
+       SELECT COALESCE(SUM(amount),0)::numeric revenue, COUNT(*)::int payments
+         FROM payments WHERE description='Instant Quiz' AND status IN ('captured','authorized')
+          AND ${IST_DATE('created_at')} BETWEEN ${FROM} AND ${TO}),
+     done AS (
+       SELECT COUNT(*)::int completed, COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score
+         FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+         LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+        WHERE t.is_instant AND qs.status_code='completed'
+          AND t.quiz_date BETWEEN ${FROM} AND ${TO})
+     SELECT cur.quizzes, cur.children, prev.quizzes prev_quizzes,
+            rev.revenue, rev.payments, done.completed, done.avg_score,
+            CASE WHEN cur.quizzes>0 THEN ROUND(done.completed*100.0/cur.quizzes)::int ELSE 0 END completion_pct
+       FROM cur, prev, rev, done`);
+
+  // Repeat behaviour — the single number that says whether pay-per-quiz works.
+  const repeat = await one(
+    `WITH per_child AS (
+       SELECT student_id, COUNT(*)::int n FROM quizpe_tracker
+        WHERE is_instant AND quiz_date BETWEEN ${FROM} AND ${TO} GROUP BY student_id)
+     SELECT COUNT(*)::int buyers,
+            COUNT(*) FILTER (WHERE n>1)::int repeat_buyers,
+            COALESCE(ROUND(AVG(n)::numeric,2),0)::numeric avg_per_child,
+            COALESCE(MAX(n),0)::int max_per_child
+       FROM per_child`);
+
+  // When people actually buy — drives nudge timing.
+  const byHour = await many(
+    `SELECT EXTRACT(HOUR FROM t.created_at AT TIME ZONE '${TZ}')::int AS hour_of_day, COUNT(*)::int n
+       FROM quizpe_tracker t
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1 ORDER BY 1`);
+
+  // Where demand comes from — tells you which board/grade content to add next.
+  const byGrade = await many(
+    `SELECT b.board_code, g.grade_name, COUNT(*)::int n
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1,2 ORDER BY n DESC LIMIT 8`);
+
+  // Top families in the range.
+  const topBuyers = await many(
+    `SELECT st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            COUNT(*)::int quizzes, COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY 1,2,3 ORDER BY quizzes DESC, avg_score DESC LIMIT 10`);
+
+  // Does a quick quiz lead to a plan? The funnel question this product exists for.
+  const conversion = await one(
+    `WITH iq AS (SELECT DISTINCT st.parent_id FROM quizpe_tracker t
+                   JOIN students st ON st.id=t.student_id
+                  WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO})
+     SELECT COUNT(*)::int instant_parents,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM parents_quizpe_subscriptions s
+                JOIN quizpe_plans pl ON pl.id=s.plan_id
+               WHERE s.parent_id=iq.parent_id AND s.is_active AND NOT pl.is_trial
+                 AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date))::int now_subscribed
+       FROM iq`);
+
+  const status = await many(
+    `SELECT qs.status_code status, COUNT(*)::int n
+       FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id=t.status_id
+      WHERE t.is_instant AND t.quiz_date BETWEEN ${FROM} AND ${TO}
+      GROUP BY qs.status_code ORDER BY n DESC`);
+
+  const recent = await many(
+    `SELECT t.id tracker_id, st.id student_id, st.student_name,
+            p.parent_name, p.parent_mobile_number mobile,
+            b.board_code, g.grade_name,
+            qs.status_code status, r.id report_id, r.score_correct, r.score_total, r.score_pct,
+            t.question_count,
+            (SELECT COUNT(*)::int FROM student_quizpe_histories h
+              WHERE h.tracker_id=t.id AND h.answered_option IS NOT NULL) answered,
+            (SELECT COUNT(*)::int FROM quizpe_tracker t2
+              WHERE t2.is_instant AND t2.student_id=t.student_id AND t2.id<=t.id) nth,
+            to_char(t.created_at AT TIME ZONE '${TZ}','DD Mon HH24:MI') started_at,
+            to_char(t.modified_at AT TIME ZONE '${TZ}','DD Mon HH24:MI') at
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+       JOIN quizpe_status qs ON qs.id=t.status_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant
+      ORDER BY t.modified_at DESC LIMIT 50`);
+
+  // Instant-quiz invoices, for the download/view buttons on the Quick Quiz page.
+  // An instant sale is the only invoice with NO subscription behind it, which is
+  // exactly what makes it identifiable without a tracker->invoice join (there
+  // isn't one: the payment happens before the quiz exists).
+  const invoices = await many(
+    `SELECT i.id, i.invoice_id, i.amount_base::numeric, i.cgst::numeric, i.sgst::numeric,
+            i.igst::numeric, i.total::numeric,
+            to_char(i.created_at AT TIME ZONE '${TZ}','DD Mon YYYY HH24:MI') at,
+            p.payment_id rzp_payment_id, p.contact mobile,
+            COALESCE(pa.parent_name,'—') parent_name
+       FROM invoices i
+       JOIN payments p ON p.id = i.payment_id
+       LEFT JOIN parents pa ON pa.parent_mobile_number = p.contact
+      WHERE i.is_active AND i.subscription_id IS NULL AND p.description = 'Instant Quiz'
+      ORDER BY i.id DESC LIMIT 50`);
+
+  // Every child who has ever taken an instant quiz, with their totals. This is
+  // the index the admin drills into: one row per child, not per quiz, because
+  // "who keeps coming back" is the question the per-quiz list cannot answer.
+  const children = await many(
+    `SELECT st.id student_id, st.student_name, p.parent_name, p.parent_mobile_number mobile,
+            b.board_code, g.grade_name,
+            COUNT(*)::int quizzes,
+            COUNT(*) FILTER (WHERE qs.status_code='completed')::int completed,
+            COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score,
+            MAX(r.score_pct)::int best_score,
+            to_char(MIN(t.created_at) AT TIME ZONE '${TZ}','DD Mon YYYY') first_at,
+            to_char(MAX(t.created_at) AT TIME ZONE '${TZ}','DD Mon YYYY') last_at
+       FROM quizpe_tracker t
+       JOIN students st ON st.id=t.student_id
+       JOIN parents p ON p.id=st.parent_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+       JOIN quizpe_status qs ON qs.id=t.status_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant
+      GROUP BY 1,2,3,4,5,6 ORDER BY quizzes DESC, last_at DESC LIMIT 200`);
+
+  return {
+    range, range_label: R.label,
+    ranges: Object.entries(QQ_RANGES).map(([k, v]) => ({ key: k, label: v.label })),
+    today, yesterday, this_week, last_week, trend, status, recent, totals, invoices,
+    live, rangeStats, repeat, byHour, byGrade, topBuyers, conversion, children,
+  };
+}
+
+/**
+ * Every instant quiz one child has taken, newest first — the drill-down behind
+ * a row in the children list. Carries the report id so the PDF the parent
+ * received can be opened from the panel, and per-question counts so an
+ * abandoned quiz is visibly different from a completed one.
+ */
+async function quickQuizStudent(studentId) {
+  const { rows: [who] } = await db.query(
+    `SELECT st.id, st.student_name, st.school_name, p.parent_name, p.parent_mobile_number mobile,
+            b.board_code, g.grade_name, m.medium_code
+       FROM students st
+       JOIN parents p ON p.id=st.parent_id
+       JOIN boards b ON b.id=st.board_id
+       JOIN grades g ON g.id=st.grade_id
+       JOIN mediums m ON m.id=st.medium_id
+      WHERE st.id=$1`, [studentId]);
+  if (!who) return null;
+
+  const { rows: quizzes } = await db.query(
+    `SELECT t.id tracker_id, qs.status_code status, t.question_count,
+            r.id report_id, r.score_correct, r.score_total, r.score_pct, r.grade,
+            (SELECT COUNT(*)::int FROM student_quizpe_histories h
+              WHERE h.tracker_id=t.id AND h.answered_option IS NOT NULL) answered,
+            to_char(t.created_at AT TIME ZONE '${TZ}','DD Mon YYYY HH24:MI') started_at,
+            to_char(t.modified_at AT TIME ZONE '${TZ}','DD Mon YYYY HH24:MI') finished_at,
+            t.quiz_date::text quiz_date,
+            EXTRACT(EPOCH FROM (t.modified_at - t.created_at))::int seconds
+       FROM quizpe_tracker t
+       JOIN quizpe_status qs ON qs.id=t.status_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant AND t.student_id=$1
+      ORDER BY t.id DESC`, [studentId]);
+
+  const { rows: [totals] } = await db.query(
+    `SELECT COUNT(*)::int quizzes,
+            COUNT(*) FILTER (WHERE qs.status_code='completed')::int completed,
+            COALESCE(ROUND(AVG(r.score_pct))::int,0) avg_score,
+            COALESCE(MAX(r.score_pct),0)::int best_score,
+            (SELECT COALESCE(SUM(pay.amount),0)::numeric FROM payments pay
+              WHERE pay.description='Instant Quiz' AND pay.status IN ('captured','authorized')
+                AND pay.contact LIKE '%'||(SELECT p2.parent_mobile_number FROM students s2
+                                             JOIN parents p2 ON p2.id=s2.parent_id WHERE s2.id=$1)) spent
+       FROM quizpe_tracker t
+       JOIN quizpe_status qs ON qs.id=t.status_id
+       LEFT JOIN quiz_reports r ON r.tracker_id=t.id
+      WHERE t.is_instant AND t.student_id=$1`, [studentId]);
+
+  return { student: who, totals, quizzes };
+}
+
+module.exports = { overview, daily, comparisons, planSplit, enrolmentFeed, engagement, cohort, participationDaily, delta, boardGradeBreakdown, boardTotals, briefing, celebrations, funnel, retention, activityCalendar, slotBreakdown, quickQuiz, quickQuizStudent };

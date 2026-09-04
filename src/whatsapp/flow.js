@@ -515,6 +515,10 @@ async function processInbound(msg, contactName) {
   const text = extractText(msg);
   const id = extractId(msg);
 
+  // One clean line per conversation turn, so `pm2 logs` reads like a chat log:
+  //   [wa] 9198xxxxxx state=active ← "▶️ Start quiz now"
+  console.log(`[wa] ${mobile} state=${session.state || 'new'} ← ${String(text || id || msg.type || '').slice(0, 60)}`);
+
   // DEMO number: run the demo's own taps and the word "demo"; force a GREETING
   // to start from the WELCOME message (a school pitch wants the fresh first-time
   // journey, not the returning-user menu — the number keeps a deactivated parent
@@ -610,6 +614,27 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     return;
   }
 
+  // ---------------------------------------------------------------- free quiz
+  // An admin-granted free quiz is delivered on ANY inbound message, not only a
+  // "Start Quiz" tap. None of our approved templates pairs the right wording
+  // with a start-quiz button — the closest ones blame the child for missing a
+  // quiz that was actually our fault — so the notification is plain text and
+  // whatever the parent replies brings them here.
+  //
+  // Skipped while the session owns the message: mid-quiz answers, a feedback
+  // reply and the signup questions must reach their own handlers first, or a
+  // grant would hijack them. Those states are short-lived, and the grant keeps
+  // for 7 days, so nothing is lost by waiting.
+  {
+    const owned = session.state === 'in_quiz'
+      || session.state === 'awaiting_feedback_text'
+      || String(session.state || '').startsWith('ask_');
+    const ownedTap = id.startsWith('ans_') || id.startsWith('fb_') || id.startsWith('qt_');
+    if (!owned && !ownedTap && !id.startsWith('freeq_child_')) {
+      if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
+    }
+  }
+
   // Feedback rating tap — valid from ANY state (the prompt arrives after a
   // quiz, but the parent may tap it much later).
   if (id.startsWith('fb_')) {
@@ -672,12 +697,41 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
   // message. Tapping it reopens the 24h window AND starts today's quiz, from
   // whatever state the session is in.
   if (isStartQuiz(msg, text, id)) {
+    // An admin-granted FREE quiz outranks the subscription check: the grant is
+    // attached to the NUMBER precisely so it can reach a lapsed or brand-new
+    // parent, who would otherwise be told their subscription isn't active. It
+    // is consumed once, then this branch stops applying.
+    if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
+
     if (ctx.isSubscribed) {
       await handleMenuChoice(session, mobile, ctx, 'start_quiz');
     } else {
       await wa.sendText(session.id, mobile,
         `Your subscription isn't active. Type *menu* to subscribe. 💎`);
     }
+    return;
+  }
+
+  // The child picker for a granted quiz (premium families with several children).
+  if (id && id.startsWith('freeq_child_')) {
+    const gid = Number(id.slice('freeq_child_'.length).split('_')[0]);
+    const sid = Number(id.slice('freeq_child_'.length).split('_')[1]);
+    await startGrantedQuizFor(session, mobile, gid, sid);
+    return;
+  }
+
+  // Instant Quiz buttons work from ANY state: the "Take another (₹9)" button sent
+  // after a quiz, the menu row, and the child picker.
+  //
+  // Matched on the TITLE as well as the id. A list tap normally carries its row
+  // id, but some clients (and a template quick-reply) deliver only the label —
+  // the id then arrives empty, the choice falls through to the default branch,
+  // and the parent gets a silently-deduped menu instead of their quiz. Reading
+  // the visible text too makes the tap work whichever way WhatsApp sends it.
+  const wantsInstant = /instant\s*quiz|take another/i.test(text);
+  if (id === 'instant_again' || id === 'instant_quiz' || (id && id.startsWith('instant_child_'))
+      || (!id && wantsInstant)) {
+    await handleMenuChoice(session, mobile, ctx, id || 'instant_quiz');
     return;
   }
 
@@ -1064,6 +1118,113 @@ async function sendUnrecognized(session, mobile, ctx) {
   }
 }
 
+/**
+ * Instant Quiz purchase (₹9 + GST). Opens the web checkout (public/instant.html):
+ * the parent confirms the child's details there — pre-filled from the family on
+ * file, blank for a brand-new number — accepts the terms and pays through
+ * Razorpay's modal. On payment the invoice and the quiz link come back here.
+ *
+ * Open to EVERYONE: lapsed, premium, trial, and numbers with no child at all,
+ * since the form collects whatever we don't already know. No subscription is
+ * involved and nothing about the daily quiz changes.
+ */
+async function startInstantPurchase(session, mobile, ctx, students) {
+  const { createInstantCheckout } = require('../routers/paymentRouter');
+  const IQ = require('./instantQuiz');
+
+  // One at a time: an unfinished instant quiz must be completed before another
+  // is bought, so a parent never pays twice for a quiz already waiting.
+  for (const s of students) {
+    if (await IQ.openInstantTracker(s.id)) {
+      await wa.sendButtons(session.id, mobile,
+        `⚡ *${s.student_name}* already has an Instant Quiz waiting — please finish that one first.`,
+        [{ id: 'start_quiz', title: '▶️ Continue quiz' }]);
+      return;
+    }
+  }
+
+  const r = await createInstantCheckout({ sessionId: session.id, mobile });
+  if (r.error) { await wa.sendText(session.id, mobile, `😕 ${r.error}\n\nPlease try again in a moment, or type *menu*.`); return; }
+
+  const first = String(ctx.parentName || 'there').trim().split(/\s+/)[0] || 'there';
+  await wa.sendCtaUrl(session.id, mobile, {
+    header: '⚡ QuizPe — Instant Quiz',
+    body: `Hi ${first} 👋 One quick quiz — *12 questions*, just *₹9 + GST*.\n\n`
+      + `Tap below to confirm your child's details and pay *₹${r.amount}*.\n\n`
+      + `🔒 Secure payment by *Razorpay* (UPI · card · netbanking). Your invoice and the quiz come straight back here. 🚀`,
+    displayText: '⚡ Start — ₹' + r.amount,
+    url: r.url,
+    footer: 'ServerPe App Solutions (GST-registered)',
+  });
+}
+
+/**
+ * Deliver an admin-granted free quiz, if this number has one waiting.
+ *
+ * Returns true when it has handled the message, so the caller stops. Three
+ * cases, in the order they actually occur:
+ *
+ *   • no child on file  -> send the signup form; the grant stays pending and is
+ *     picked up automatically once the child exists
+ *   • exactly one child -> start it straight away
+ *   • several children  -> ask which one
+ */
+async function deliverFreeGrantIfAny(session, mobile, ctx) {
+  const FQ = require('./freeQuiz');
+  let grant;
+  try { grant = await FQ.pendingGrant(mobile); } catch { return false; }
+  if (!grant) return false;
+
+  const students = await getStudents(ctx.parentId);
+
+  if (!students.length) {
+    // Brand-new number: we cannot build a quiz without knowing the child's
+    // board, grade and medium. The form collects it; the grant is untouched, so
+    // nothing is lost if they close the page and come back later.
+    const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+    await wa.sendCtaUrl(session.id, mobile, {
+      header: '🎁 Your free quiz',
+      body: `🙏 *Sorry the quiz didn't reach you.*\n\n`
+          + `We've added a *free quiz* to your number. Just tell us a little about your child `
+          + `and it will start right away — no payment, nothing to cancel.`,
+      displayText: "📝 Enter child's details",
+      url: `${base}/trial.html?token=freequiz`,
+      footer: 'QuizPe by ServerPe App Solutions',
+    });
+    return true;
+  }
+
+  if (students.length === 1) {
+    await FQ.startFreeQuiz(session.id, mobile, students[0].id, grant);
+    return true;
+  }
+
+  await wa.sendList(session.id, mobile, {
+    header: '🎁 Your free quiz',
+    text: `🙏 *Sorry the quiz didn't reach you.*\n\nWhich child should take the free quiz?`,
+    buttonText: 'Choose child',
+    rows: students.slice(0, 10).map(s => ({
+      id: `freeq_child_${grant.id}_${s.id}`,
+      title: s.student_name.slice(0, 24),
+      description: `${s.board_code} · ${s.grade_name}`,
+    })),
+  });
+  return true;
+}
+
+/** A child was picked for a granted quiz. Re-checks the grant so a stale tap
+ *  from an old message can never mint a second free quiz. */
+async function startGrantedQuizFor(session, mobile, grantId, studentId) {
+  const FQ = require('./freeQuiz');
+  const grant = await FQ.pendingGrant(mobile);
+  if (!grant || Number(grant.id) !== Number(grantId)) {
+    await wa.sendText(session.id, mobile,
+      `That free quiz has already been used. Type *menu* to see your options. 😊`);
+    return;
+  }
+  await FQ.startFreeQuiz(session.id, mobile, studentId, grant);
+}
+
 async function handleMenuChoice(session, mobile, ctx, choice) {
   const students = await getStudents(ctx.parentId);
 
@@ -1078,27 +1239,38 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
     if (kid) { await beginQuizFor(session, mobile, kid, students.length); return; }
   }
 
+  // Older chats may still hold an 'instant_child_*' row from the previous
+  // child-picker. The web form now collects the child, so any of those simply
+  // reopens the checkout rather than dead-ending on an id nothing handles.
+  if (String(choice).startsWith('instant_child_')) {
+    await startInstantPurchase(session, mobile, ctx, students);
+    return;
+  }
+
   switch (choice) {
+    case 'instant_quiz':
+    case 'instant_again':
+      await startInstantPurchase(session, mobile, ctx, students);
+      break;
+
     case 'start_quiz': {
       if (!students.length) {
         await wa.sendText(session.id, mobile, 'No child enrolled yet. Type *menu* to get started.');
         break;
       }
-      // Hide any child who has ALREADY taken today's quiz (completed/closed, or
-      // every question answered) — no point offering to "start" a done quiz.
-      const doneRows = (await db.query(
-        `SELECT DISTINCT t.student_id FROM quizpe_tracker t
-          WHERE t.quiz_date = CURRENT_DATE AND t.student_id = ANY($1::bigint[])
-            AND ( EXISTS (SELECT 1 FROM quizpe_status qs WHERE qs.id = t.status_id AND qs.status_code IN ('completed','closed'))
-               OR ( EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id)
-                    AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h WHERE h.tracker_id = t.id AND h.answered_option IS NULL) ) )`,
-        [students.map(s => s.id)])).rows;
-      const done = new Set(doneRows.map(r => Number(r.student_id)));
-      const pending = students.filter(s => !done.has(Number(s.id)));
+      // A child is available if they still have a quiz left today — either
+      // something pending, or they're under their daily slot cap (2/day, or 3 on
+      // weekends for premium). This replaces the old "one quiz per day" check so
+      // 2nd/3rd quizzes are offered too.
+      const pending = [];
+      for (const s of students) {
+        const prog = await Q.dailyQuizProgress(s.id);
+        if (prog.hasNext) pending.push(s);
+      }
 
       if (!pending.length) {
         await wa.sendText(session.id, mobile,
-          "✅ Today's quiz is already complete. Your next quiz will be ready tomorrow evening — see you then! 🌙");
+          "✅ All of today's quizzes are complete — brilliant! Fresh quizzes arrive tomorrow. See you then! 🌙");
         break;
       }
       // Multiple children still pending -> let the parent choose whose quiz to take.
@@ -1271,21 +1443,21 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
         return;
       }
 
-      // The morning job already creates today's trackers; this is the safety net
-      // for anyone starting a quiz outside that path (menu, or a first quiz on
-      // signup day). Idempotent, so calling it twice costs nothing.
+      // The morning job already creates today's slot-1 trackers; this is the
+      // safety net for anyone starting a quiz outside that path (menu, or a first
+      // quiz on signup day). Idempotent, so calling it twice costs nothing.
       await Q.scheduleDailyQuizzes(st.id);
 
-      const pending = await Q.pendingTrackers(st.id);
-      if (!pending.length) {
-        const at = await quizTimeOf(st.id);
+      // Resolve the next quiz to run: a pending one, or (for the 2nd/3rd quiz of
+      // the day) unlock the next slot if still under the daily cap.
+      const maxSlots = await Q.entitledSlots(st.id);
+      const target = await Q.ensureNextTracker(st.id, maxSlots);
+      if (!target) {
         await wa.sendText(session.id, mobile,
-          `✅ ${st.student_name} has finished all of today's quizzes. ` +
-          `See you tomorrow${at ? ` at *${M.fmtTime(at)}*` : ''}! 🌙`);
+          `✅ ${st.student_name} has finished all of today's quizzes. See you tomorrow! 🌙`);
         return;
       }
-
-      const target = pending[0];
+      const prog = await Q.dailyQuizProgress(st.id);
       const r = await Q.startQuiz(target.id);
       if (r.error || !r.trackerId) {
         console.error(`[flow] startQuiz failed: ${r.error} (tracker=${target.id}, student=${st.id})`);
@@ -1303,8 +1475,9 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
       await setState(session, 'in_quiz', r.resumed ? 'quiz_resumed' : 'quiz_started',
         { tracker_id: r.trackerId, subject: target.subject_code });
 
-      const more = pending.length > 1
-        ? `\n_${pending.length - 1} more subject${pending.length > 2 ? 's' : ''} after this._` : '';
+      // "Quiz N of M today" so the child sees this is the 1st/2nd/3rd of the day.
+      const quizNo = Math.min(prog.done + 1, prog.total);
+      const more = prog.total > 1 ? `\n_Quiz ${quizNo} of ${prog.total} today._` : '';
       const isTest = target.quiz_type === 'test';
       const intro = r.resumed
         ? '_Resuming where you left off._'
@@ -1338,7 +1511,7 @@ async function nextQuizSignOff(ctx) {
       if (r?.quiz_time) t = M.fmtTime(r.quiz_time);
     }
   } catch { /* default time */ }
-  return `See you tomorrow at *${t}* for the next quiz! 🚀`;
+  return 'See you tomorrow! 🚀';
 }
 
 function safeJson(s) {

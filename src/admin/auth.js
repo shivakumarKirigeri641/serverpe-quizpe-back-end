@@ -167,6 +167,51 @@ async function login(rawMobile, credential, ip) {
   return { token, expiresIn: TOKEN_HOURS * 3600, mobile };
 }
 
+/* ---------------------------------------------------------------- password sign-in
+ * A single-password sign-in for the founder — no mobile, no OTP. It logs in AS the
+ * super admin (the first ADMIN_MOBILES number). Set ADMIN_PASSWORD_HASH (sha256 hex,
+ * preferred) or ADMIN_PASSWORD (plaintext) on the server. Rate-limited by IP.
+ *
+ * NOTE: this is a single shared secret (no second factor) — weaker than OTP for a
+ * panel holding payments + children's data. Use a long, unique password.
+ */
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const ADMIN_PASSWORD_HASH = (process.env.ADMIN_PASSWORD_HASH || '').toLowerCase();
+
+function checkPassword(input) {
+  const s = String(input || '');
+  if (!s) return false;
+  if (ADMIN_PASSWORD_HASH) {
+    const h = crypto.createHash('sha256').update(s).digest('hex');
+    const a = Buffer.from(h), b = Buffer.from(ADMIN_PASSWORD_HASH);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  if (ADMIN_PASSWORD) {
+    const a = Buffer.from(s), b = Buffer.from(ADMIN_PASSWORD);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  return false;
+}
+
+async function loginPassword(password, ip) {
+  // Production still needs a real JWT secret; SMS is NOT needed for password login.
+  if (IS_PROD && (!process.env.ADMIN_JWT_SECRET || process.env.ADMIN_JWT_SECRET.length < 32)) {
+    return { error: 'Admin auth is not configured on the server.' };
+  }
+  if (!ADMIN_PASSWORD && !ADMIN_PASSWORD_HASH) {
+    return { error: 'Password sign-in is not set up. Set ADMIN_PASSWORD (or ADMIN_PASSWORD_HASH) on the server.' };
+  }
+  const key = `pw|${ip}`;
+  const wait = throttled(key);
+  if (wait) return { error: `Too many attempts. Try again in ${Math.ceil(wait / 60)} minute(s).` };
+  if (!checkPassword(password)) { noteFailure(key); return { error: 'Incorrect password.' }; }
+  clearFailures(key);
+
+  const mobile = ENV_MOBILES[0] || '9886122415';   // sign in as the founder / super admin
+  const token = jwt.sign({ sub: mobile, role: 'admin', super: true }, SECRET, { expiresIn: `${TOKEN_HOURS}h` });
+  return { token, expiresIn: TOKEN_HOURS * 3600, mobile };
+}
+
 /** Express middleware — every admin route sits behind this. */
 function requireAdmin(req, res, next) {
   const raw = req.headers.authorization || '';
@@ -193,6 +238,6 @@ function requireSuperAdmin(req, res, next) {
 }
 
 module.exports = {
-  login, requestCode, requireAdmin, requireSuperAdmin, assertNotProductionPin,
+  login, loginPassword, requestCode, requireAdmin, requireSuperAdmin, assertNotProductionPin,
   adminMobiles, isSuperAdmin, MOBILES, TOKEN_HOURS,
 };

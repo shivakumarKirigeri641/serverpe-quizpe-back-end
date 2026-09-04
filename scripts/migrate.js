@@ -96,6 +96,120 @@ const STEPS = [
     ],
   },
   {
+    name: 'instant quiz plan',
+    // 'Instant Quiz' — a pay-per-quiz plan (₹9 ex-GST) with NO subscription and
+    // NO validity: pay, get 12 Maths questions, complete, pay again for another.
+    // Kept OUT of the public plans list (is_instant) so the existing trial/premium
+    // flow is untouched; it's reached only via its own menu entry. Invoices can now
+    // exist without a subscription (instant purchases have none).
+    check: `SELECT 1 FROM quizpe_plans WHERE plan_code='INSTANT'`,
+    apply: [
+      `ALTER TABLE quizpe_plans ADD COLUMN IF NOT EXISTS is_instant boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE invoices ALTER COLUMN subscription_id DROP NOT NULL`,
+      // Mark instant-quiz trackers so the daily engine + daily dashboards can
+      // ignore them (existing rows are all false → behaviour unchanged).
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS is_instant boolean NOT NULL DEFAULT false`,
+      // Instant quizzes are pay-per-use, so a child can have several in one day —
+      // widen the slot range so each gets a distinct slot (daily still caps at 3
+      // in code). Existing slots 1..3 stay valid.
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_slot_range`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_slot_range CHECK (quiz_slot BETWEEN 1 AND 999)`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_instant ON quizpe_tracker (student_id, quiz_date) WHERE is_instant`,
+      `INSERT INTO quizpe_plans
+         (plan_code, plan_name, plan_description, price, comparable_price, regular_price,
+          student_count, duration, is_trial, is_instant, is_active)
+       SELECT 'INSTANT', 'Instant Quiz',
+              'One quick 12-question quiz, anytime — pay per quiz, no subscription.',
+              9, 9, 9, 1, 0, false, true, true
+        WHERE NOT EXISTS (SELECT 1 FROM quizpe_plans WHERE plan_code='INSTANT')`,
+      // Admin-configurable Instant Quiz price (ex-GST) + question count.
+      `INSERT INTO app_settings (key, value) VALUES ('instant_quiz', '{"price":9,"questions":12}')
+         ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
+  {
+    name: 'tracker quiz_type allows instant',
+    // quizpe_tracker.quiz_type is guarded by a CHECK that predates Instant Quiz
+    // (daily/test/revision/practice). An instant tracker sets quiz_type='instant'
+    // and was being rejected at INSERT — the parent paid, got the invoice, and
+    // the quiz never started. Widen the list; every existing value stays valid.
+    //
+    // Kept as its OWN step because the 'instant quiz plan' step above is already
+    // applied on the live DB, so its check passes and it would never re-run.
+    check: `SELECT 1 FROM pg_constraint
+             WHERE conname='tracker_quiz_type_valid'
+               AND pg_get_constraintdef(oid) LIKE '%instant%'`,
+    apply: [
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_type_valid`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_type_valid
+         CHECK (quiz_type IN ('daily','test','revision','practice','instant'))`,
+    ],
+  },
+  {
+    name: 'free quiz grants',
+    // Admin-granted FREE quiz ("free quiz slot"). Used to make good when a quiz
+    // did not reach a family because of a fault on our side. A grant is a
+    // one-shot permission attached to a MOBILE NUMBER, consumed the moment the
+    // parent starts the quiz — so it works for a brand-new number that has no
+    // parent or student row yet, which is exactly the case a subscription-based
+    // permission cannot express.
+    //
+    // No payment and no invoice are involved. The quiz itself is an ordinary
+    // quiz: it feeds mastery, streaks and the usual report + feedback, because
+    // it stands in for the quiz they should have received.
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='free_quiz_grants'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS free_quiz_grants (
+         id             bigserial PRIMARY KEY,
+         mobile_number  text        NOT NULL,
+         student_id     bigint      REFERENCES students(id),
+         question_count smallint    NOT NULL DEFAULT 15,
+         reason         text,
+         granted_by     text,
+         status         text        NOT NULL DEFAULT 'pending',
+         tracker_id     bigint      REFERENCES quizpe_tracker(id),
+         notified_at    timestamptz,
+         consumed_at    timestamptz,
+         expires_at     timestamptz NOT NULL DEFAULT now() + interval '7 days',
+         created_at     timestamptz NOT NULL DEFAULT now(),
+         modified_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      // One PENDING grant per number at a time: re-granting the same number must
+      // top up rather than stack, or a single mistake hands out several quizzes.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_free_quiz_pending
+         ON free_quiz_grants (mobile_number) WHERE status = 'pending'`,
+      `CREATE INDEX IF NOT EXISTS idx_free_quiz_status ON free_quiz_grants (status, expires_at)`,
+      // Marks a tracker as an admin-granted freebie. Everything else about it
+      // behaves like a daily quiz; this only keeps revenue reporting honest.
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS is_free boolean NOT NULL DEFAULT false`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_free ON quizpe_tracker (student_id, quiz_date) WHERE is_free`,
+    ],
+  },
+  {
+    name: 'free quiz template row',
+    // Seeds the row for a purpose-built free-quiz template. It is inserted as
+    // PENDING because Meta must approve the real template first — nothing sends
+    // while it is pending, and the Broadcast picker only lists APPROVED rows.
+    //
+    // Once Meta approves it: flip approval_status to 'APPROVED' here (or from
+    // the admin templates page) and it becomes available BOTH to the Free Quiz
+    // Slot page (set FREE_QUIZ_TEMPLATE=qp_freequiz_v1) and to Broadcast.
+    check: `SELECT 1 FROM whatsapp_templates WHERE template_name='qp_freequiz_v1'`,
+    apply: [
+      `INSERT INTO whatsapp_templates
+         (template_name, approval_status, is_active, language, variables, body_text, buttons, send_context)
+       SELECT 'qp_freequiz_v1', 'PENDING', true, 'en',
+              '["parent_name"]'::jsonb,
+              'Hi {{1}} 👋' || chr(10) || chr(10) ||
+              '🎁 We owe you a free quiz.' || chr(10) || chr(10) ||
+              E'Sorry — your last quiz did not reach you, and that was our fault, not yours. We have added a free quiz to your number.' || chr(10) || chr(10) ||
+              'Tap the button below (or reply hi) and it will start right away. No payment, nothing to cancel. 🙏',
+              '[{"text":"▶️ Start Quiz now","type":"QUICK_REPLY"}]'::jsonb,
+              'Free quiz make-good'
+        WHERE NOT EXISTS (SELECT 1 FROM whatsapp_templates WHERE template_name='qp_freequiz_v1')`,
+    ],
+  },
+  {
     name: 'launch_offer settings',
     // Seat-capped launch offer. Stored in app_settings so it can be switched
     // off, re-capped or ended from the admin panel without a deploy.
@@ -294,6 +408,25 @@ const STEPS = [
          modified_at  timestamptz NOT NULL DEFAULT now(),
          CONSTRAINT expense_gst_within_amount CHECK (gst_amount <= amount))`,
       `CREATE INDEX IF NOT EXISTS expenses_date_idx ON expenses(expense_date) WHERE is_active`,
+    ],
+  },
+  {
+    name: 'quizpe_tracker.quiz_slot',
+    // Multiple quizzes per day: a per-day slot (1st/2nd/3rd) on each tracker row.
+    // Existing rows default to slot 1 — byte-for-byte identical to today's flow.
+    // Additive only; safe on the live DB.
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='quizpe_tracker' AND column_name='quiz_slot'`,
+    apply: [
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS quiz_slot smallint NOT NULL DEFAULT 1`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_quiz_slot_range`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_quiz_slot_range CHECK (quiz_slot BETWEEN 1 AND 3)`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_unique_student_subject_day`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_unique_student_subject_day_slot`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_unique_student_subject_day_slot
+         UNIQUE (student_id, subject_id, quiz_date, quiz_slot)`,
+      `CREATE INDEX IF NOT EXISTS idx_tracker_student_day_slot
+         ON quizpe_tracker (student_id, quiz_date, quiz_slot)`,
     ],
   },
 ];

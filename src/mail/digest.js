@@ -111,10 +111,12 @@ const istDate = () => new Date().toLocaleDateString('en-IN',
   { timeZone: 'Asia/Kolkata', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
 
 const fmtDay = (d) => {
-  try {
-    return new Date(String(d) + 'T00:00:00').toLocaleDateString('en-IN',
-      { day: '2-digit', month: 'short', weekday: 'short' });
-  } catch { return String(d); }
+  if (!d) return '—';
+  // A bare YYYY-MM-DD needs a time to parse as local; a Date or full timestamp
+  // is used as-is. An unparseable value must NOT render "Invalid Date".
+  const dt = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? `${d}T00:00:00` : d);
+  if (Number.isNaN(dt.getTime())) return '—';
+  return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', weekday: 'short' });
 };
 
 /**

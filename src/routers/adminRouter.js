@@ -15,7 +15,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const db = require('../database/connectDB');
-const { login, requestCode, requireAdmin, requireSuperAdmin, adminMobiles, isSuperAdmin } = require('../admin/auth');
+const { login, loginPassword, requestCode, requireAdmin, requireSuperAdmin, adminMobiles, isSuperAdmin } = require('../admin/auth');
 const otp = require('../admin/otp');
 const metrics = require('../admin/metrics');
 
@@ -33,6 +33,8 @@ router.use(require('../admin/inboxRoutes'));
 // first-party site-visitor analytics + inbox toggle
 router.use(require('../admin/visitorRoutes'));
 router.use(require('../admin/broadcastRoutes'));
+// "Free quiz slot" — grant a no-charge quiz when one failed to reach a family.
+router.use(require('../admin/freeQuizRoutes'));
 // reserve holidays (quiz open all day + scheduler nudge) from a calendar
 router.use(require('../admin/holidayRoutes'));
 
@@ -81,6 +83,19 @@ router.post('/login', express.json(), async (req, res) => {
   } catch (e) {
     console.error('[admin] login failed:', e.message);
     fail(res, 500, e.message.startsWith('ADMIN AUTH') ? e.message : 'Could not sign in.');
+  }
+});
+
+/** Single-password sign-in (no mobile, no OTP) — logs in as the super admin. */
+router.post('/login-password', express.json(), async (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'local';
+  try {
+    const r = await loginPassword(req.body?.password, ip);
+    if (r.error) return fail(res, 401, r.error);
+    ok(res, r);
+  } catch (e) {
+    console.error('[admin] password login failed:', e.message);
+    fail(res, 500, 'Could not sign in.');
   }
 });
 
@@ -147,6 +162,53 @@ router.get('/analytics/retention', requireAdmin, async (req, res) => {
 router.get('/analytics/activity', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.activityCalendar(clamp(req.query.weeks, 12, 53)) }); }
   catch (e) { console.error('[admin] activity:', e.message); fail(res, 500, 'Could not load activity.'); }
+});
+
+/** 1st/2nd/3rd-quiz engagement — is the multi-quiz feature being used? */
+router.get('/analytics/slots', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await metrics.slotBreakdown() }); }
+  catch (e) { console.error('[admin] slots:', e.message); fail(res, 500, 'Could not load slot breakdown.'); }
+});
+
+/** Instant "Quick Quiz" analytics — counts, revenue, day/week comparisons, trend. */
+router.get('/quick-quiz', requireAdmin, async (req, res) => {
+  try { ok(res, await metrics.quickQuiz(String(req.query.range || '7d'))); }
+  catch (e) { console.error('[admin] quick-quiz:', e.message); fail(res, 500, 'Could not load Quick Quiz analytics.'); }
+});
+
+/** One child's complete instant-quiz history — the drill-down behind a row. */
+router.get('/quick-quiz/student/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return fail(res, 400, 'Which child?');
+  try {
+    const d = await metrics.quickQuizStudent(id);
+    if (!d) return fail(res, 404, 'Child not found.');
+    ok(res, d);
+  } catch (e) {
+    console.error('[admin] quick-quiz student:', e.message);
+    fail(res, 500, 'Could not load that child.');
+  }
+});
+
+/** Instant Quiz config — the ex-GST price and question count (admin-editable). */
+router.get('/instant-config', requireAdmin, async (req, res) => {
+  try { const { instantConfig } = require('../get/instantConfig'); ok(res, await instantConfig()); }
+  catch (e) { console.error('[admin] instant-config get:', e.message); fail(res, 500, 'Could not load Instant Quiz config.'); }
+});
+router.put('/instant-config', requireAdmin, express.json(), async (req, res) => {
+  const price = Number(req.body?.price);
+  const questions = Number(req.body?.questions);
+  if (!(price > 0) || !Number.isInteger(questions) || questions < 4 || questions > 50) {
+    return fail(res, 400, 'Price must be greater than 0 and questions between 4 and 50.');
+  }
+  try {
+    await db.query(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES ('instant_quiz', $1, now())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, [JSON.stringify({ price, questions })]);
+    // keep the plan row's price in sync (display/fallback only — the invoice/link read app_settings)
+    try { await db.query(`UPDATE quizpe_plans SET price=$1, regular_price=$1, comparable_price=$1 WHERE plan_code='INSTANT'`, [price]); } catch (_) {}
+    ok(res, { price, questions });
+  } catch (e) { console.error('[admin] instant-config set:', e.message); fail(res, 500, 'Could not save Instant Quiz config.'); }
 });
 
 /** Cohort health as percentages — participation, scoring spread, movement. */
@@ -403,14 +465,14 @@ router.get('/students/:id/quizzes', requireAdmin, async (req, res) => {
   if (!id) return fail(res, 400, 'Bad student id.');
   try {
     const { rows } = await db.query(`
-      SELECT t.id, t.quiz_date::text, t.quiz_type, t.question_count,
+      SELECT t.id, t.quiz_date::text, t.quiz_type, t.question_count, t.quiz_slot,
              qs.status_code, sub.subject_name,
              r.score_correct, r.score_total, r.score_pct, r.grade, r.id AS report_id
         FROM quizpe_tracker t
         JOIN quizpe_status qs ON qs.id=t.status_id
         JOIN subjects sub ON sub.id=t.subject_id
         LEFT JOIN quiz_reports r ON r.tracker_id=t.id
-       WHERE t.student_id=$1 ORDER BY t.quiz_date DESC, t.id DESC`, [id]);
+       WHERE t.student_id=$1 ORDER BY t.quiz_date DESC, t.quiz_slot, t.id DESC`, [id]);
     ok(res, { rows });
   } catch (e) { console.error('[admin] student quizzes:', e.message); fail(res, 500, 'Could not load quizzes.'); }
 });
@@ -424,7 +486,7 @@ router.get('/quizzes/:trackerId', requireAdmin, async (req, res) => {
   if (!id) return fail(res, 400, 'Bad quiz id.');
   try {
     const head = (await db.query(`
-      SELECT t.id, t.quiz_date::text, t.quiz_type, qs.status_code,
+      SELECT t.id, t.quiz_date::text, t.quiz_type, t.quiz_slot, qs.status_code,
              st.id AS student_id, st.student_name, st.school_name,
              b.board_code, g.grade_name, m.medium_code, sub.subject_name,
              p.parent_name, p.parent_mobile_number,
@@ -534,15 +596,28 @@ router.delete('/finance/expenses/:id', requireAdmin, async (req, res) => {
 router.get('/finance/invoices', requireAdmin, async (req, res) => {
   const limit = clamp(req.query.limit, 100, 500);
   try {
+    // LEFT JOINs, deliberately: an Instant Quiz sale has NO subscription, so the
+    // old inner join dropped those invoices from the ledger entirely — real,
+    // taxable revenue that never appeared in the list it is meant to reconcile.
+    // Where there is no subscription, the customer is resolved from the payment.
     const { rows } = await db.query(`
       SELECT i.id, i.invoice_id, i.amount_base::numeric, i.gst_pct, i.cgst::numeric,
              i.sgst::numeric, i.igst::numeric, i.total::numeric, i.created_at,
-             p.parent_name, p.parent_mobile_number, p.state_code,
-             pl.plan_name, pl.plan_code
+             COALESCE(p.parent_name, pp.parent_name, '—')                AS parent_name,
+             COALESCE(p.parent_mobile_number, pay.contact, '—')          AS parent_mobile_number,
+             COALESCE(p.state_code, pp.state_code)                       AS state_code,
+             COALESCE(pl.plan_name,
+                      CASE WHEN pay.description = 'Instant Quiz' THEN 'Instant Quiz' END,
+                      '—')                                              AS plan_name,
+             COALESCE(pl.plan_code,
+                      CASE WHEN pay.description = 'Instant Quiz' THEN 'INSTANT' END,
+                      '—')                                              AS plan_code
         FROM invoices i
-        JOIN parents_quizpe_subscriptions s ON s.id=i.subscription_id
-        JOIN parents p ON p.id=s.parent_id
-        JOIN quizpe_plans pl ON pl.id=s.plan_id
+        LEFT JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
+        LEFT JOIN parents p  ON p.id = s.parent_id
+        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
+        LEFT JOIN payments pay ON pay.id = i.payment_id
+        LEFT JOIN parents pp ON pp.parent_mobile_number = pay.contact
        WHERE i.is_active ORDER BY i.id DESC LIMIT $1`, [limit]);
     ok(res, { rows });
   } catch (e) { console.error('[admin] invoices:', e.message); fail(res, 500, 'Could not load invoices.'); }

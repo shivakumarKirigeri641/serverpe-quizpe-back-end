@@ -32,7 +32,7 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        -- a child finished a quiz
        SELECT 'quiz_completed'::text AS kind, t.modified_at AS at,
               st.student_name AS who, p.parent_name AS parent, p.parent_mobile_number AS mobile,
-              (r.score_correct || '/' || r.score_total || ' (' || r.score_pct || '%) grade ' || r.grade) AS detail,
+              ('Quiz ' || t.quiz_slot || ' · ' || r.score_correct || '/' || r.score_total || ' (' || r.score_pct || '%) grade ' || r.grade) AS detail,
               t.id AS ref_id, st.id AS student_id, p.id AS parent_id, NULL::numeric AS amount
          FROM quizpe_tracker t
          JOIN quizpe_status qs ON qs.id = t.status_id AND qs.status_code = 'completed'
@@ -45,7 +45,8 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        -- a child opened today's quiz but has not finished it
        SELECT 'quiz_started'::text, t.created_at,
               st.student_name, p.parent_name, p.parent_mobile_number,
-              ((SELECT COUNT(*) FROM student_quizpe_histories h
+              ('Quiz ' || t.quiz_slot || ' · ' ||
+               (SELECT COUNT(*) FROM student_quizpe_histories h
                  WHERE h.tracker_id = t.id AND h.answered_option IS NOT NULL)
                || ' of ' ||
                COALESCE((SELECT COUNT(*) FROM student_quizpe_histories h2
@@ -158,8 +159,10 @@ async function tonight() {
             p.id AS parent_id, p.parent_name, p.parent_mobile_number,
             to_char(sub.quiz_time, 'HH12:MI AM') AS quiz_time,
             sub.quiz_time AS quiz_time_raw,
+            sub.plan_end_date::text AS plan_end_date,
+            su.state_name,
             pl.plan_name, pl.is_trial,
-            t.id AS tracker_id, t.question_count, qs.status_code,
+            t.id AS tracker_id, t.question_count, t.quiz_slot, subj.subject_code, qs.status_code,
             COALESCE(h.answered, 0)::int AS answered,
             COALESCE(h.built, 0)::int AS built_count,
             r.id AS report_id, r.file_name, r.quiz_date::text AS report_date,
@@ -172,9 +175,12 @@ async function tonight() {
          ON sub.parent_id = p.id AND sub.is_active
         AND CURRENT_DATE BETWEEN sub.plan_start_date AND sub.plan_end_date
        JOIN quizpe_plans pl ON pl.id = sub.plan_id
+       LEFT JOIN states_unions su ON su.state_code = p.state_code
        JOIN boards b ON b.id = st.board_id
        JOIN grades g ON g.id = st.grade_id
        LEFT JOIN quizpe_tracker t ON t.student_id = st.id AND t.quiz_date = CURRENT_DATE
+                                 AND NOT COALESCE(t.is_instant, false)
+       LEFT JOIN subjects subj ON subj.id = t.subject_id
        LEFT JOIN quizpe_status qs ON qs.id = t.status_id
        LEFT JOIN LATERAL (
          SELECT COUNT(*) FILTER (WHERE answered_option IS NOT NULL) AS answered,
@@ -182,7 +188,7 @@ async function tonight() {
            FROM student_quizpe_histories WHERE tracker_id = t.id) h ON true
        LEFT JOIN quiz_reports r ON r.tracker_id = t.id
       WHERE st.is_active
-      ORDER BY sub.quiz_time, st.student_name`);
+      ORDER BY sub.quiz_time, st.student_name, t.quiz_slot NULLS FIRST, subj.subject_code`);
 
   return rows.map((r) => {
     let state = 'waiting';
