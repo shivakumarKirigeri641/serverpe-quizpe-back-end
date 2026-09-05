@@ -255,4 +255,82 @@ router.post('/broadcast/direct', requireAdmin, express.json(), async (req, res) 
   } catch (e) { console.error('[admin] broadcast direct:', e.message); fail(res, 500, 'Direct send failed.'); }
 });
 
+/**
+ * People in a segment, with enough context to decide who to tick.
+ *
+ * The segment send is all-or-nothing; this backs the "pick your recipients"
+ * screen instead — choose a category, then choose the individuals. Each row
+ * carries why you might include or exclude them: which child, what plan, when
+ * it expired, how engaged they have been, and whether a message can even reach
+ * them (STOP, or no WhatsApp session).
+ *
+ *   GET /admin/api/broadcast/segment-people?segment=lapsed
+ */
+router.get('/broadcast/segment-people', requireAdmin, async (req, res) => {
+  const segment = String(req.query.segment || '');
+  if (!SEGMENTS[segment]) return fail(res, 400, 'Pick a valid segment.');
+  try {
+    await ensureSchema();
+    const base = await recipients(segment);
+    if (!base.length) return ok(res, { segment, rows: [] });
+
+    const mobiles = base.map((r) => r.mobile_number);
+
+    // Everything that helps the decision, in one pass.
+    const { rows: detail } = await db.query(`
+      SELECT p.parent_mobile_number AS mobile,
+             p.parent_name, p.service_paused, p.state_code,
+             (SELECT string_agg(st.student_name, ', ' ORDER BY st.id)
+                FROM students st WHERE st.parent_id=p.id AND st.is_active) AS children,
+             s.plan_end_date::text AS expiry,
+             pl.plan_name, pl.is_trial,
+             (SELECT COUNT(*)::int FROM quizpe_tracker t
+                JOIN students st2 ON st2.id=t.student_id
+                JOIN quizpe_status qs ON qs.id=t.status_id
+               WHERE st2.parent_id=p.id AND qs.status_code='completed') AS quizzes_done,
+             (SELECT MAX(t.quiz_date)::text FROM quizpe_tracker t
+                JOIN students st3 ON st3.id=t.student_id
+               WHERE st3.parent_id=p.id) AS last_quiz
+        FROM parents p
+        LEFT JOIN LATERAL (SELECT * FROM parents_quizpe_subscriptions x
+                            WHERE x.parent_id=p.id ORDER BY x.plan_end_date DESC, x.id DESC LIMIT 1) s ON true
+        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
+       WHERE p.parent_mobile_number = ANY($1::text[])`, [mobiles]);
+    const byMobile = Object.fromEntries(detail.map((d) => [d.mobile, d]));
+
+    // When each number last received a marketing broadcast — the cooldown check,
+    // shown per row so an over-messaged parent is visible before you tick them.
+    const { rows: lastSent } = await db.query(
+      `SELECT mobile_number, MAX(created_at) AS last_sent
+         FROM marketing_broadcasts WHERE status='sent' AND mobile_number = ANY($1::text[])
+        GROUP BY 1`, [mobiles]);
+    const bySent = Object.fromEntries(lastSent.map((r) => [r.mobile_number, r.last_sent]));
+
+    const rows = base.map((r) => {
+      const d = byMobile[r.mobile_number] || {};
+      return {
+        mobile: r.mobile_number,
+        name: d.parent_name || r.name,
+        children: d.children || null,
+        state: d.state_code || null,
+        plan: d.plan_name || null,
+        is_trial: d.is_trial ?? null,
+        expiry: d.expiry || null,
+        quizzes_done: d.quizzes_done ?? 0,
+        last_quiz: d.last_quiz || null,
+        paused: !!d.service_paused,
+        reachable: !!r.session_id,
+        last_broadcast: bySent[r.mobile_number] || null,
+      };
+    });
+    // Least recently messaged first — the fairest default order to pick from.
+    rows.sort((a, b) => (a.last_broadcast ? new Date(a.last_broadcast) : 0)
+                      - (b.last_broadcast ? new Date(b.last_broadcast) : 0));
+    ok(res, { segment, label: SEGMENTS[segment], rows });
+  } catch (e) {
+    console.error('[admin] broadcast segment-people:', e.message);
+    fail(res, 500, 'Could not load the people in that segment.');
+  }
+});
+
 module.exports = router;

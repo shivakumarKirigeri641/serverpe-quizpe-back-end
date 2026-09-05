@@ -302,9 +302,16 @@ router.get('/parents', requireAdmin, async (req, res) => {
       : filter === 'expiring'
         ? 'AND s.is_active AND s.plan_end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7'
         : '';
+  // Sorted by expiry by default: the list is worked for renewals, so when a
+  // plan ends is the column that decides who to contact. Parents with no
+  // subscription at all sort last either way — there is no date to act on.
+  // 'sort' is a fixed keyword (never user text), so it is safe to inline.
+  const sort = ['expiry_desc', 'expiry_asc', 'newest'].includes(req.query.sort)
+    ? req.query.sort : 'expiry_desc';
   const orderBy = filter === 'expiring' ? 's.plan_end_date ASC'
-    : filter === 'lapsed' ? 's.plan_end_date DESC'
-      : 'p.id DESC';
+    : sort === 'newest'     ? 'p.id DESC'
+      : sort === 'expiry_asc' ? 's.plan_end_date ASC NULLS LAST, p.id DESC'
+        : 's.plan_end_date DESC NULLS LAST, p.id DESC';
   try {
     const { rows } = await db.query(`
       SELECT p.id, p.parent_name, p.parent_mobile_number, p.state_code, p.reminders_enabled,
