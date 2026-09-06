@@ -15,8 +15,24 @@
 const express = require('express');
 const db = require('../database/connectDB');
 const { handleInbound } = require('../whatsapp/flow');
+const { checkSignature } = require('../utils/metaSignature');
 
 const router = express.Router();
+
+/* Webhook authenticity.
+ *
+ * The callback URL is discoverable (it is returned by Meta's own phone-number
+ * API), and nothing else proves a POST came from Meta — WHATSAPP_VERIFY_TOKEN
+ * only guards the one-time GET handshake. Unverified, anyone who knows the URL
+ * could forge a "hi" from any number and start quizzes for children who never
+ * asked.
+ *
+ * Deliberately WARN-ONLY by default: a wrong App Secret would otherwise drop
+ * every real parent message silently. Watch the logs until only "ok" appears,
+ * then set WHATSAPP_SIGNATURE_ENFORCE=true. */
+const APP_SECRET = process.env.WHATSAPP_APP_SECRET || '';
+const ENFORCE_SIGNATURE = process.env.WHATSAPP_SIGNATURE_ENFORCE === 'true';
+let warnedNoSecret = false;
 
 // Our own WhatsApp number. Meta may deliver a webhook for any number under the
 // same App/WABA (e.g. the sibling ChallanAlerts number). We only act on events
@@ -40,7 +56,22 @@ router.get('/whatsapp/webhook', (req, res) => {
 // --- POST: inbound events ----------------------------------------------------
 router.post('/whatsapp/webhook', (req, res) => {
   // ACK immediately so Meta does not retry; process the payload afterwards.
+  // The 200 goes out before the signature check on purpose — a rejected event
+  // should be dropped silently, not retried by Meta for hours.
   res.sendStatus(200);
+
+  const sig = checkSignature(req.rawBody, req.headers['x-hub-signature-256'], APP_SECRET);
+  if (sig === 'unset') {
+    if (!warnedNoSecret) {
+      console.warn('[whatsapp] WHATSAPP_APP_SECRET not set — inbound webhook signatures are NOT verified');
+      warnedNoSecret = true;      // once per process, not once per message
+    }
+  } else if (sig !== 'ok') {
+    console.warn(`[whatsapp] webhook signature ${sig} — `
+      + `${ENFORCE_SIGNATURE ? 'REJECTING' : 'log-only, processing anyway'} `
+      + '(not from Meta, or wrong App Secret)');
+    if (ENFORCE_SIGNATURE) return;
+  }
 
   const change = req.body?.entry?.[0]?.changes?.[0]?.value;
   if (!change) return;

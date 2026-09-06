@@ -164,7 +164,13 @@ app.post('/pay/webhook', express.raw({ type: '*/*' }), (req, res) =>
 
 // Body parsers — WhatsApp posts JSON.
 app.use(require('cookie-parser')());
-app.use(express.json());
+// The `verify` hook keeps the exact bytes Meta sent. Its X-Hub-Signature-256 is
+// an HMAC over those bytes, and re-serialising the parsed object produces
+// different bytes (key order, spacing) that would never match — so the raw
+// buffer has to be captured here, before parsing.
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // Static pages (public/trial.html — the free-trial signup form).
