@@ -814,6 +814,16 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
     return;
   }
 
+  /* A tap on 'Invite a friend' can arrive long after the quiz that offered it,
+     by which time the session has moved on to another state — where a menu id
+     would fall through to "I didn't quite catch that". The button we send is
+     the menu's own row id, so it is routed to the menu's own handler from
+     wherever the conversation happens to be. */
+  if (id === 'refer_friend' && ctx.exists) {
+    await handleMenuChoice(session, mobile, ctx, 'refer_friend');
+    return;
+  }
+
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
     if (ctx.exists && session.state !== 'new') { await showMainMenu(session, mobile, ctx); return; }

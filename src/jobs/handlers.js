@@ -186,7 +186,10 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
   const { rows } = await db.query(
     `SELECT t.student_id, st.student_name, b.board_code, g.grade_name,
             (SELECT r.score_correct = r.score_total FROM quiz_reports r
-              WHERE r.tracker_id = t.id AND r.is_active LIMIT 1) AS was_perfect
+              WHERE r.tracker_id = t.id AND r.is_active LIMIT 1) AS was_perfect,
+            (SELECT ROUND(r.score_correct * 100.0 / NULLIF(r.score_total, 0))::int
+               FROM quiz_reports r
+              WHERE r.tracker_id = t.id AND r.is_active LIMIT 1) AS pct
        FROM quizpe_tracker t
        JOIN students st ON st.id = t.student_id
        LEFT JOIN boards b ON b.id = st.board_id
@@ -210,6 +213,7 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
   // A milestone worth forwarding gets a square image the parent can drop
   // straight into a family or school group. Sent before the text so the
   // picture is what catches the eye in the chat list.
+  let sentCard = false;
   try {
     const share = require('../share/card');
     const stats = await rewards.stats(studentId);
@@ -235,10 +239,21 @@ async function awardBadges({ trackerId, sessionId, mobile }) {
         caption: `🎉 Share ${share.shortName(name)}'s achievement!${invite}`,
       });
     }
+    sentCard = !!spec;
   } catch (e) {
     // The badge and streak are already recorded; a card is a bonus, not a
     // result, so a rendering or send failure must not fail the job.
     console.error('[jobs] share card skipped:', e.message);
+  }
+
+  /* The invite ask, for a good quiz that earned no card.
+     Deliberately in the same block as the card: the card's caption already
+     carries the invite link, so asking again in the next message would be the
+     same request twice in one evening. One decision, one message, or neither. */
+  if (!sentCard) {
+    await require('../referrals/prompt').maybeAsk({
+      sessionId, mobile, studentId, childName: name, pct: rows[0].pct,
+    });
   }
 
   if (!earned.length && streak.current < 3) return;      // nothing worth saying
@@ -307,14 +322,28 @@ async function weeklyReport({ studentId, weekStart, weekEnd, sessionId, mobile }
   // Meta, so the links can't ride along there. SOCIAL_INVITE=0 turns it off.
   const social = process.env.SOCIAL_INVITE === '0' ? '' : require('../whatsapp/messages').socialInvite();
 
+  /* The weekly report is the other moment worth asking on: it shows a week of
+     progress, and it lands in-window roughly once a week. The line rides along
+     on the caption rather than as a message of its own — a report is a good
+     thing to receive, and a second message asking for a favour would sour it.
+     Only on the in-window send: the document template's copy is fixed by Meta,
+     so nothing can be appended to it. */
+  const prompt = require('../referrals/prompt');
+  const { rows: [wp] } = await db.query(
+    `SELECT pa.id FROM students st JOIN parents pa ON pa.id = st.parent_id WHERE st.id = $1`,
+    [studentId]);
+  const invite = inWindow && wp && !(await prompt.askedRecently(wp.id))
+    ? await prompt.inviteLine(wp.id) : '';
+
   if (inWindow) {
     await wa.sendDocument(sessionId, mobile, {
       filePath: rep.filePath, filename,
       caption: `📊 *${rep.head.student_name}'s weekly report*\n`
         + `🗓️ ${range}\n`
         + `${s.days}/7 days active · Avg ${s.avgPct}% · *${s.grade}*${trend}\n`
-        + `_Trends, chapter mastery, strengths and what to revise — all inside._${social}`,
+        + `_Trends, chapter mastery, strengths and what to revise — all inside._${social}${invite}`,
     });
+    if (invite) await prompt.markAsked(wp.id, studentId, mobile);
   } else {
     const parent = String(rep.head.parent_name || 'there').trim().split(/\s+/)[0] || 'there';
     await wa.sendDocumentTemplate(sessionId, mobile, TPL, {
