@@ -33,7 +33,18 @@ async function post(payload) {
     body: JSON.stringify(payload),
   });
   const json = await res.json();
-  if (!res.ok) throw new Error(json?.error?.message || `WhatsApp API ${res.status}`);
+  if (!res.ok) {
+    /* Meta's numeric code rides along on the error. The message alone cannot
+       tell "this one number is not on WhatsApp" apart from "your token has
+       expired" — and a broadcast needs exactly that distinction to decide
+       whether to try the next recipient or stop. Existing callers only read
+       .message, so adding fields here changes nothing for them. */
+    const err = new Error(json?.error?.message || `WhatsApp API ${res.status}`);
+    err.code = json?.error?.code;
+    err.subcode = json?.error?.error_subcode;
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 

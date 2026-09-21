@@ -26,6 +26,38 @@ const router = express.Router();
 const ok = (res, data) => res.json({ success: true, ...data });
 const fail = (res, code, error) => res.status(code).json({ success: false, error });
 
+/*
+ * Meta errors after which no further send in this run can succeed, so the
+ * broadcast stops at once instead of failing every remaining parent in turn.
+ *
+ * Deliberately NOT here: codes about one recipient — not on WhatsApp (131026),
+ * Meta declining to deliver marketing to that person (131049), a per-pair rate
+ * limit (131056). Those fail one row and the run carries on, which is right.
+ *
+ * The list does not need to be complete. Anything systemic it misses is caught
+ * by MAX_CONSECUTIVE_FAILURES below; this only makes the common cases stop on
+ * the first failure and say plainly why.
+ */
+const FATAL_CODES = {
+  190:    'WhatsApp access token expired or invalid — renew it before sending',
+  10:     'Permission denied for this WhatsApp number',
+  200:    'Permission denied for this WhatsApp number',
+  368:    'Number temporarily blocked by Meta for a policy violation',
+  131031: 'WhatsApp business account is locked',
+  131042: 'Payment problem on the WhatsApp account — check the payment method',
+  131048: 'Spam rate limit hit — too many messages flagged; stop and let quality recover',
+  130429: 'Throughput rate limit hit — retry the remainder later',
+  132000: 'Template variable count does not match the approved template',
+  132001: 'Template does not exist in this language',
+  132015: 'Template paused by Meta for low quality',
+  132016: 'Template disabled by Meta',
+};
+
+/* Five failures in a row means something is wrong with the run, not with five
+   parents. Low enough to protect the quality rating; high enough that a few
+   old numbers no longer on WhatsApp do not halt a healthy broadcast. */
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 let schemaReady = false;
 async function ensureSchema() {
   if (schemaReady) return;
@@ -102,6 +134,78 @@ async function applyCooldown(list, cooldownDays) {
   return { keep, skippedCooldown: list.length - keep.length };
 }
 
+/**
+ * Send a template to a list, strictly one after another.
+ *
+ * ONLY ON TO THE NEXT WHEN THIS ONE IS CONFIRMED. Each send is awaited to
+ * completion before the next begins, and "confirmed" means Meta accepted it and
+ * handed back a message id. No id, no success — however quietly the call
+ * returned. Previously a send with no id was still logged as 'sent'.
+ *
+ * It does NOT wait for "delivered". Delivery arrives later through the webhook
+ * and can take hours for a phone that is switched off; waiting for it would let
+ * one parent's flat battery hold up everyone after them. Acceptance is the last
+ * thing that can actually be known at send time.
+ *
+ * It STOPS rather than fail every remaining parent in turn — on an error that
+ * means nothing after it can succeed, or on MAX_CONSECUTIVE_FAILURES in a row.
+ * No row is written for anyone not attempted, so the cooldown guard will not
+ * block them when the run is repeated after the cause is fixed.
+ *
+ * Shared by the segment send and the pasted-list send, so the two cannot drift
+ * into behaving differently.
+ */
+async function sendOneByOne(list, { template, extra, label, mobileOf }) {
+  let sent = 0, failed = 0, consecutive = 0, stopped = null;
+
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i];
+    const mobile = mobileOf(r);
+    let id = null, err = null;
+    try {
+      id = await wa.sendTemplate(r.session_id, mobile, template, [r.name, ...extra]);
+    } catch (e) { err = e; }
+
+    if (id) {
+      await db.query(
+        `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
+         VALUES ($1,$2,$3,'sent',$4)`, [mobile, template, label, id]);
+      sent++;
+      consecutive = 0;
+    } else {
+      const why = err ? `${err.code ? `(#${err.code}) ` : ''}${err.message}`
+        : 'Meta returned no message id — not confirmed as sent';
+      await db.query(
+        `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, error_message)
+         VALUES ($1,$2,$3,'failed',$4)`, [mobile, template, label, why]);
+      failed++;
+      consecutive++;
+
+      const fatal = err && FATAL_CODES[Number(err.code)];
+      if (fatal) stopped = fatal;
+      else if (consecutive >= MAX_CONSECUTIVE_FAILURES) {
+        stopped = `${MAX_CONSECUTIVE_FAILURES} sends failed in a row — last error: ${why}`;
+      }
+      if (stopped) {
+        console.error(`[broadcast] STOPPED after ${i + 1} of ${list.length}: ${stopped}`);
+        break;
+      }
+    }
+    await new Promise((res2) => setTimeout(res2, 250));   // pace under Meta's throughput limit
+  }
+
+  const notAttempted = list.length - sent - failed;
+  console.log(`[broadcast] ${template} -> ${label}: ${sent} sent, ${failed} failed`
+    + (stopped ? `, ${notAttempted} not attempted` : ''));
+
+  /* The exact numbers never tried, so a resend after the fix reaches only them.
+     A segment send would skip the already-messaged anyway through its cooldown,
+     but the pasted-list send has no cooldown — without this list, re-pasting
+     the original numbers would message the first half a second time. */
+  const remaining = stopped ? list.slice(sent + failed).map(mobileOf) : [];
+  return { sent, failed, not_attempted: notAttempted, stopped, remaining };
+}
+
 /** Options for the compose screen: approved templates + segment counts. */
 router.get('/broadcast/options', requireAdmin, async (req, res) => {
   try {
@@ -162,24 +266,10 @@ router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) =>
     const { keep } = await applyCooldown(withSession, cooldownDays);
     if (!keep.length) return ok(res, { sent: 0, failed: 0, note: 'No eligible recipients after the guardrails.' });
 
-    let sent = 0, failed = 0;
-    for (const r of keep) {
-      try {
-        const id = await wa.sendTemplate(r.session_id, r.mobile_number, template, [r.name, ...extra]);
-        await db.query(
-          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
-           VALUES ($1,$2,$3,'sent',$4)`, [r.mobile_number, template, segment, id || null]);
-        sent++;
-      } catch (e) {
-        await db.query(
-          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, error_message)
-           VALUES ($1,$2,$3,'failed',$4)`, [r.mobile_number, template, segment, e.message]);
-        failed++;
-      }
-      await new Promise((res2) => setTimeout(res2, 250));   // stay under Meta's rate limit
-    }
-    console.log(`[broadcast] ${template} -> ${segment}: ${sent} sent, ${failed} failed`);
-    ok(res, { sent, failed });
+    const out = await sendOneByOne(keep, {
+      template, extra, label: segment, mobileOf: (r) => r.mobile_number,
+    });
+    ok(res, out);
   } catch (e) { console.error('[admin] broadcast send:', e.message); fail(res, 500, 'Broadcast failed.'); }
 });
 
@@ -233,25 +323,12 @@ router.post('/broadcast/direct', requireAdmin, express.json(), async (req, res) 
       });
     }
 
-    let sent = 0, failed = 0, skipped = 0;
-    for (const r of recips) {
-      if (r.service_paused) { skipped++; continue; }     // never message someone who sent STOP
-      try {
-        const id = await wa.sendTemplate(r.session_id, r.mobile, template, [r.name, ...extra]);
-        await db.query(
-          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, wa_message_id)
-           VALUES ($1,$2,'direct','sent',$3)`, [r.mobile, template, id || null]);
-        sent++;
-      } catch (e) {
-        await db.query(
-          `INSERT INTO marketing_broadcasts (mobile_number, template_name, segment, status, error_message)
-           VALUES ($1,$2,'direct','failed',$3)`, [r.mobile, template, e.message]);
-        failed++;
-      }
-      await new Promise((r2) => setTimeout(r2, 250));      // stay under Meta's rate limit
-    }
-    console.log(`[broadcast] ${template} -> direct(${recips.length}): ${sent} sent, ${failed} failed, ${skipped} skipped(STOP)`);
-    ok(res, { sent, failed, skipped });
+    // Never message someone who sent STOP — removed before the run, and counted.
+    const skipped = recips.filter((r) => r.service_paused).length;
+    const out = await sendOneByOne(recips.filter((r) => !r.service_paused), {
+      template, extra, label: 'direct', mobileOf: (r) => r.mobile,
+    });
+    ok(res, { ...out, skipped });
   } catch (e) { console.error('[admin] broadcast direct:', e.message); fail(res, 500, 'Direct send failed.'); }
 });
 
