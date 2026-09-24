@@ -54,7 +54,7 @@ router.get('/free-access/search', requireAdmin, async (req, res) => {
               (SELECT pl.plan_name FROM parents_quizpe_subscriptions s
                  JOIN quizpe_plans pl ON pl.id = s.plan_id
                 WHERE s.parent_id = p.id ORDER BY s.plan_end_date DESC LIMIT 1) AS last_plan,
-              (SELECT s.plan_end_date FROM parents_quizpe_subscriptions s
+              (SELECT s.plan_end_date::text FROM parents_quizpe_subscriptions s
                 WHERE s.parent_id = p.id ORDER BY s.plan_end_date DESC LIMIT 1) AS plan_ends,
               EXISTS (SELECT 1 FROM free_quiz_campaigns c
                        WHERE c.parent_id = p.id AND c.is_active
@@ -80,7 +80,13 @@ router.get('/free-access/search', requireAdmin, async (req, res) => {
 router.get('/free-access/campaigns', requireAdmin, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT c.id, c.parent_id, c.student_id, c.start_date, c.end_date,
+      /* Dates go out as TEXT, never as a pg DATE.
+         A DATE comes back from node-postgres as a JS Date at local midnight,
+         which JSON.stringify turns into the PREVIOUS day at 18:30Z for IST —
+         so a window starting today renders as yesterday. Casting here fixes it
+         once, for every reader, instead of asking each one to parse carefully. */
+      `SELECT c.id, c.parent_id, c.student_id,
+              c.start_date::text AS start_date, c.end_date::text AS end_date,
               c.slots_per_day, c.reason, c.granted_by, c.is_active, c.created_at,
               p.parent_name, p.parent_mobile_number AS mobile,
               st.student_name,
@@ -150,7 +156,8 @@ router.post('/free-access/grant', requireAdmin, express.json(), async (req, res)
        and which one won would depend on row order. Cancel and re-grant is the
        honest way to change a window. */
     const { rows: clash } = await db.query(
-      `SELECT id, start_date, end_date FROM free_quiz_campaigns
+      `SELECT id, start_date::text AS start_date, end_date::text AS end_date
+         FROM free_quiz_campaigns
         WHERE is_active AND parent_id = $1
           AND (student_id IS NULL OR $2::bigint IS NULL OR student_id = $2)
           AND daterange(start_date, end_date, '[]') && daterange($3::date, $4::date, '[]')
