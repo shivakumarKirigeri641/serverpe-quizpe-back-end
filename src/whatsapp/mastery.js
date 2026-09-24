@@ -15,6 +15,7 @@
  */
 
 const db = require('../database/connectDB');
+const DIFF = require('./difficulty');
 
 const CFG = {
   MASTERY_ACCURACY: 0.80,     // accuracy needed to call a chapter "mastered"
@@ -190,9 +191,23 @@ async function perChapterStats(studentId, subjectId, chapters, exec = db) {
  * So a child stuck on Ch2 keeps getting Ch2 to reinforce, WHILE also seeing
  * the newer chapters their class has moved on to. Empty buckets reflow.
  */
-async function selectQuestions(studentId, subjectId, count, exec = db) {
+async function selectQuestions(studentId, subjectId, count, exec = db, difficulty = null) {
   // Never aim below the hard floor — a grade must always get at least this many.
   count = Math.max(Number(count) || 0, CFG.MIN_QUESTIONS);
+
+  /* The chosen difficulty narrows WHICH questions are eligible; it changes
+     nothing about how they are spread across chapters, shapes or concepts.
+     `band` is a let, not a const, because the relaxation ladder below drops it
+     as its last resort before repeating a question — a quiz of the right size
+     at the wrong difficulty beats a short quiz at the right one. */
+  let band = DIFF.band(difficulty);
+  /* Within the band, PREFER the level the parent actually chose.
+     The bands overlap on level 2 by design, and level 2 is 60% of the bank, so
+     a plain draw inside {2,3} hands back ten level-2 questions and "hard" is
+     indistinguishable from "medium" — the feature looks fake even though the
+     filter worked. This tips each draw towards the distinctive level first and
+     falls back to the shared one, so the three buttons feel like three things. */
+  const prefer = DIFF.clamp(difficulty);
   const { progress, chapters } = await getProgress(studentId, subjectId, exec);
   if (!chapters.length) return { ids: [], progress, chapters };
 
@@ -253,6 +268,7 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     const { rows } = await exec.query(
       `WITH pool AS (
          SELECT qb.id,
+                ${band ? 'CASE WHEN qb.difficulty_level = $10 THEN 0 ELSE 1 END' : '0'} AS pref,
                 ${CONCEPT_SQL} AS concept,
                 -- The SENTENCE FRAME, not the opening words.
                 --
@@ -285,13 +301,14 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
           WHERE qb.board_id = st.board_id AND qb.grade_id = st.grade_id
             AND qb.medium_id = st.medium_id AND qb.subject_id = $2 AND qb.is_active
             ${anyMonth ? '' : 'AND qb.revision = qb.current_month'}
+            ${band ? 'AND qb.difficulty_level = ANY($9::smallint[])' : ''}
             AND qb.chapter = ANY($3)
             AND NOT ( qb.id = ANY($5::bigint[]) )
             AND NOT EXISTS (SELECT 1 FROM student_quizpe_histories h
                               JOIN quizpe_tracker t ON t.id = h.tracker_id
                              WHERE t.student_id = $1 AND h.question_id = qb.id)
        ), ranked AS (
-         SELECT id, concept,
+         SELECT id, concept, pref,
                 row_number() OVER (PARTITION BY stem    ORDER BY random()) AS rn_shape,
                 row_number() OVER (PARTITION BY concept ORDER BY random()) AS rn_concept
            FROM pool
@@ -305,12 +322,16 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
        --               spread across skills rather than clustered.
        -- Returning FEWER than asked is deliberate: the caller tops up from
        -- other unlocked chapters, a better quiz than repetition.
-       SELECT id, concept FROM ranked
+       SELECT id, concept, pref FROM ranked
         WHERE rn_shape <= $6 AND rn_concept <= $7
           AND concept <> ALL($8::text[])
-        ORDER BY rn_concept, rn_shape, random() LIMIT $4`,
-      [studentId, subjectId, chapterList, n, exclude, maxPerShape, maxPerConcept, bannedConcepts]);
-    return rows;   // [{ id, concept }]
+        -- rn_concept FIRST keeps the one-of-each-skill spread that matters most;
+        -- pref only decides WHICH question is taken for that skill.
+        ORDER BY rn_concept, pref, rn_shape, random() LIMIT $4`,
+      band
+        ? [studentId, subjectId, chapterList, n, exclude, maxPerShape, maxPerConcept, bannedConcepts, band, prefer]
+        : [studentId, subjectId, chapterList, n, exclude, maxPerShape, maxPerConcept, bannedConcepts]);
+    return rows;   // [{ id, concept, pref }]
   };
 
   // ---- assembly with a GLOBAL concept budget --------------------------------
@@ -322,6 +343,7 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   const ids = [];
   const seen = new Set();
   const conceptCount = {};
+  let atChosenLevel = 0;         // how many questions are the level the parent picked
   const bannedConcepts = () => Object.keys(conceptCount).filter(k => conceptCount[k] >= CFG.MAX_PER_CONCEPT);
 
   const take = async (chapterList, n, opts = {}) => {
@@ -340,6 +362,7 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
       // over-supplied it (a concept sitting at 2 is not yet banned in SQL).
       if (!ignoreCap && (conceptCount[r.concept] || 0) >= CFG.MAX_PER_CONCEPT) continue;
       ids.push(r.id); seen.add(r.id); added.push(r.id);
+      if (band && Number(r.pref) === 0) atChosenLevel += 1;
       conceptCount[r.concept] = (conceptCount[r.concept] || 0) + 1;
     }
     return added;
@@ -367,6 +390,23 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
   if (ids.length < count) await take(taughtChapters, count - ids.length, { anyMonth: true });
   if (ids.length < count) await take(taughtChapters, count - ids.length, { anyMonth: true, relax: true });
 
+  // LAST RUNG BEFORE REPEATING: drop the difficulty band.
+  //
+  // Everything above draws only unseen questions inside the chosen band, so a
+  // child who has worked through most of a thin band can come up short even
+  // though plenty of unseen questions remain outside it. Widening to the whole
+  // bank costs the parent the exact level they picked; the alternative costs
+  // them questions, or re-asks something already answered. Questions win.
+  if (ids.length < count && band) {
+    const wanted = count - ids.length;
+    band = null;
+    const added = await take(taughtChapters, wanted, { anyMonth: true, relax: true });
+    if (added.length) {
+      console.warn(`[mastery] student ${studentId} subject ${subjectId}: difficulty ${difficulty} `
+        + `ran ${wanted} short, topped up from outside the band`);
+    }
+  }
+
   // Absolute floor (MIN_QUESTIONS): everything above only ever draws questions
   // the child has NEVER seen, so a thin grade — or a child who has already seen
   // almost the whole bank — can still fall short. Rather than send fewer than
@@ -391,8 +431,23 @@ async function selectQuestions(studentId, subjectId, count, exec = db) {
     for (const r of rows) { if (!seen.has(r.id)) { ids.push(r.id); seen.add(r.id); } }
   }
 
+  /* A CONTENT signal, not an error. When a parent picks "hard" and the taught
+     chapters hold no level-3 questions at all, the quiz is built entirely from
+     the shared middle band and is indistinguishable from "medium". Nothing is
+     broken — the bank simply has nothing harder for this child yet (Grade 7 is
+     1% level-3 across everything taught so far). Reaching into untaught
+     chapters to find harder questions is NOT the answer: asking about work the
+     school has not covered was a real complaint, and the calendar gate exists
+     to prevent exactly that. So this is logged for whoever writes questions. */
+  if (prefer && prefer !== 2 && ids.length && atChosenLevel === 0) {
+    console.warn(`[mastery] student ${studentId} subject ${subjectId}: nothing at level `
+      + `${prefer} in the taught chapters — quiz built from the shared band instead`);
+  }
+
   return { ids: ids.slice(0, count), progress, chapters, frontierChapter,
-           weakChapters: weakRevision, currentMonth: cal.month, taughtChapters };
+           weakChapters: weakRevision, currentMonth: cal.month, taughtChapters,
+           difficulty: DIFF.clamp(difficulty), bandHeld: band !== null,
+           atChosenLevel };
 }
 
 /**

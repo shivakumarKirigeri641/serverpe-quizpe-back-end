@@ -35,6 +35,7 @@ router.use(require('../admin/visitorRoutes'));
 router.use(require('../admin/broadcastRoutes'));
 // "Free quiz slot" — grant a no-charge quiz when one failed to reach a family.
 router.use(require('../admin/freeQuizRoutes'));
+router.use(require('../admin/freeAccessRoutes'));
 // reserve holidays (quiz open all day + scheduler nudge) from a calendar
 router.use(require('../admin/holidayRoutes'));
 

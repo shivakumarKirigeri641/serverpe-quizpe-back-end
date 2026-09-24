@@ -18,6 +18,7 @@ const db = require('../database/connectDB');
 const wa = require('./client');
 const M = require('./messages');
 const { getUserContext, getStudents, buildMainMenu, normaliseMobile } = require('./userContext');
+const DIFF = require('./difficulty');
 const Q = require('./quiz');
 
 /* ------------------------------------------------------------------ session */
@@ -629,7 +630,8 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     const owned = session.state === 'in_quiz'
       || session.state === 'awaiting_feedback_text'
       || String(session.state || '').startsWith('ask_');
-    const ownedTap = id.startsWith('ans_') || id.startsWith('fb_') || id.startsWith('qt_');
+    const ownedTap = id.startsWith('ans_') || id.startsWith('fb_') || id.startsWith('qt_')
+      || id.startsWith('qd_');   // a difficulty tap starts a quiz; a grant must not hijack it
     if (!owned && !ownedTap && !id.startsWith('freeq_child_')) {
       if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
     }
@@ -652,6 +654,27 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     } else {
       await wa.sendText(session.id, mobile, `${ack}\n\n${await nextQuizSignOff(ctx)}`);
     }
+    return;
+  }
+
+  /* Difficulty tap — `qd_<level>_<studentId>`.
+     Valid from ANY state, like the feedback and quiz-time taps: the buttons sit
+     in the chat and a parent may come back to them minutes later, by which time
+     the session has moved on. The student id travels in the button so a late tap
+     still starts the right child's quiz, and the level is remembered on the
+     child as the value we pre-select next time — never as a filter of its own. */
+  if (id && /^qd_[123]_\d+$/.test(id)) {
+    const [, lvl, sid] = id.split('_');
+    const level = DIFF.clamp(lvl);
+    const students = await getStudents(ctx.parentId);
+    const st = students.find((x) => Number(x.id) === Number(sid));
+    if (!st) {
+      await wa.sendText(session.id, mobile, 'That quiz is no longer available. Type *menu* to start a new one.');
+      return;
+    }
+    await db.query(`UPDATE students SET difficulty_level=$2, modified_at=now() WHERE id=$1`,
+      [st.id, level]).catch((e) => console.error('[flow] difficulty preference not saved:', e.message));
+    await beginQuizFor(session, mobile, { ...st, difficulty_level: level }, students.length, level);
     return;
   }
 
@@ -1430,8 +1453,33 @@ async function quizNotYetOpen(studentId) {
   return nowHHMM() < opensAt ? opensAt : null;
 }
 
+/**
+ * Ask which level today's quiz should be, as the START button itself.
+ *
+ * Not an extra step: this REPLACES the single "Start quiz" tap rather than
+ * preceding it, so a parent still taps once. The choice is free because
+ * WhatsApp allows exactly three reply buttons and the scheme has exactly three
+ * levels.
+ *
+ * Only reached when the quiz is genuinely about to be built — after the window,
+ * entitlement and "all done for today" checks — so nobody is asked to choose a
+ * level for a quiz that then does not happen.
+ */
+async function askDifficulty(session, mobile, st, last) {
+  const body = `🎯 *${st.student_name}'s quiz* — how hard should today be?`
+    + (last ? `
+
+_Last time: ${DIFF.label(last)}._` : '')
+    + `
+
+_About 5 minutes either way._`;
+  await wa.sendButtons(session.id, mobile, body,
+    DIFF.buttons().map((b) => ({ ...b, id: `${b.id}_${st.id}` })));
+  await setState(session, session.state, 'difficulty_asked', { difficulty_student: st.id });
+}
+
 /** Schedule + start today's quiz for one specific child. */
-async function beginQuizFor(session, mobile, st, siblingCount) {
+async function beginQuizFor(session, mobile, st, siblingCount, difficulty = null) {
   try {
       // The quiz is open ALL DAY (06:00–23:45); a child may answer any time in
       // that window. Nothing is created before it opens — an early tap would
@@ -1467,8 +1515,19 @@ async function beginQuizFor(session, mobile, st, siblingCount) {
           `✅ ${st.student_name} has finished all of today's quizzes. See you tomorrow! 🌙`);
         return;
       }
+      /* The level has to be settled BEFORE startQuiz, because startQuiz is
+         where the ten questions are chosen and frozen. Asked only for a fresh
+         quiz in a grade that has more than one level of content — a resume
+         keeps whatever it was built with, and Grades 1-2 have only level-1
+         questions, so there is nothing to choose between. */
+      if (difficulty === null && DIFF.gradeAllows(st.grade_code)
+          && !(await Q.trackerFilled(target.id))) {
+        await askDifficulty(session, mobile, st, st.difficulty_level);
+        return;
+      }
+
       const prog = await Q.dailyQuizProgress(st.id);
-      const r = await Q.startQuiz(target.id);
+      const r = await Q.startQuiz(target.id, difficulty);
       if (r.error || !r.trackerId) {
         console.error(`[flow] startQuiz failed: ${r.error} (tracker=${target.id}, student=${st.id})`);
         await wa.sendText(session.id, mobile,

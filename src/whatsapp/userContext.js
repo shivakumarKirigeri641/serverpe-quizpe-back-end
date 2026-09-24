@@ -19,6 +19,7 @@
  */
 
 const db = require('../database/connectDB');
+const freeAccess = require('./freeAccess');
 
 /** '23:45' -> '11:45 PM', for menu descriptions. */
 function fmtHour(hhmm) {
@@ -91,6 +92,7 @@ async function getUserContext(rawMobile, exec = db) {
   }
 
   const r = rows[0];
+  const freeWindow = await freeAccess.forParent(r.parent_id, exec);
   let status;
   if (r.student_count_actual === 0) status = 'INCOMPLETE';
   else if (!r.subscription_id) status = 'NO_SUBSCRIPTION';
@@ -124,7 +126,13 @@ async function getUserContext(rawMobile, exec = db) {
     canStartTrial: isDemoMobile(mobile)
       ? trialOffered
       : trialOffered && !r.trial_used && ['INCOMPLETE', 'NO_SUBSCRIPTION'].includes(status),
-    isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status),
+    /* A live free-access window opens the quiz without a subscription — but it
+       does NOT change `status`. The status drives the menu, the renewal
+       reminders and the finance figures, and a family on free access has not
+       subscribed; saying otherwise would put them in the paying counts and stop
+       the reminders that should still reach them when the window closes. */
+    isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status) || !!freeWindow,
+    freeAccess: freeWindow || null,
   };
 }
 
@@ -132,7 +140,8 @@ async function getUserContext(rawMobile, exec = db) {
 async function getStudents(parentId, exec = db) {
   if (!parentId) return [];
   const { rows } = await exec.query(
-    `SELECT st.id, st.student_name, st.school_name, b.board_code, g.grade_name
+    `SELECT st.id, st.student_name, st.school_name, st.difficulty_level,
+            b.board_code, g.grade_code, g.grade_name
        FROM students st
        JOIN boards b ON b.id = st.board_id
        JOIN grades g ON g.id = st.grade_id

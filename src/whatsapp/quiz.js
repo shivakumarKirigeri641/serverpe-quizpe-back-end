@@ -12,6 +12,8 @@ const db = require('../database/connectDB');
 const wa = require('./client');
 const mastery = require('./mastery');
 const jobs = require('../jobs/jobQueue');
+const DIFF = require('./difficulty');
+const freeAccess = require('./freeAccess');
 
 const QUESTIONS_PER_QUIZ = 15;   // default; per-quiz count lives on quizpe_tracker.question_count
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -91,6 +93,15 @@ async function scheduleDailyQuizzes(studentId, exec = db, opts = {}) {
  */
 async function entitledSlots(studentId, exec = db) {
   const W = require('./quizWindow');
+
+  /* A free-access window sets its own quizzes-per-day, and it WINS over the
+     weekday/weekend rule in both directions. An admin who granted 1 a day for a
+     school demo means 1, including on Saturday; one who granted 3 means 3 on a
+     Tuesday. Guessing around the admin's number would make the field on the
+     page a suggestion rather than a setting. */
+  const free = await freeAccess.forStudent(studentId, exec);
+  if (free) return Math.max(1, Number(free.slots_per_day) || 1);
+
   if (!W.isWeekend()) return SLOTS_DEFAULT;
   const { rows } = await exec.query(
     `SELECT COALESCE(bool_or(
@@ -186,17 +197,27 @@ async function pendingTrackers(studentId) {
  * Step 3 — fill a scheduled tracker with QUESTIONS_PER_QUIZ questions the
  * student has NEVER been asked before, all at status 'scheduled'.
  */
-async function startQuiz(trackerId) {
+async function startQuiz(trackerId, difficulty = null) {
   const c = await db.getClient();
   try {
     await c.query('BEGIN');
 
     const t = (await c.query(
-      `SELECT t.id, t.student_id, t.subject_id, t.question_count, t.quiz_type, s.subject_code
+      `SELECT t.id, t.student_id, t.subject_id, t.question_count, t.quiz_type,
+              t.difficulty_level, s.subject_code
          FROM quizpe_tracker t JOIN subjects s ON s.id = t.subject_id
         WHERE t.id = $1 FOR UPDATE`, [trackerId])).rows[0];
     if (!t) { await c.query('ROLLBACK'); return { error: 'NO_TRACKER' }; }
     const wanted = t.question_count || QUESTIONS_PER_QUIZ;
+
+    /* Which level this quiz is built at, decided ONCE and written down.
+       A tracker that already carries a level keeps it: startQuiz is idempotent
+       and will not re-pick questions, so a resume must not pretend the quiz was
+       built at some newly chosen level. The caller's choice wins only on a
+       fresh start; with no choice at all we fall back to the child's remembered
+       preference, and then to medium — which is what the unfiltered bank has
+       always behaved like. */
+    const level = DIFF.clamp(t.difficulty_level) || DIFF.clamp(difficulty) || null;
 
     const existing = (await c.query(
       `SELECT COUNT(*)::int n FROM student_quizpe_histories WHERE tracker_id=$1`, [trackerId])).rows[0].n;
@@ -204,7 +225,8 @@ async function startQuiz(trackerId) {
     if (existing === 0) {
       // Adaptive selection: mostly the child's current (frontier) chapter, plus
       // spaced revision of mastered chapters — all unseen, no repeats ever.
-      const { ids, frontierChapter } = await mastery.selectQuestions(t.student_id, t.subject_id, wanted, c);
+      const { ids, frontierChapter } = await mastery.selectQuestions(
+        t.student_id, t.subject_id, wanted, c, level);
       if (!ids.length) { await c.query('ROLLBACK'); return { error: 'NO_QUESTIONS' }; }
 
       await c.query(
@@ -221,8 +243,9 @@ async function startQuiz(trackerId) {
 
     await c.query(
       `UPDATE quizpe_tracker
-          SET status_id=(SELECT id FROM quizpe_status WHERE status_code='in_progress'), modified_at=now()
-        WHERE id=$1`, [trackerId]);
+          SET status_id=(SELECT id FROM quizpe_status WHERE status_code='in_progress'),
+              difficulty_level = COALESCE(difficulty_level, $2), modified_at=now()
+        WHERE id=$1`, [trackerId, level]);
 
     await c.query('COMMIT');
 
@@ -236,7 +259,7 @@ async function startQuiz(trackerId) {
       } catch (e) { console.error('[quiz] could not queue quiz-start alert:', e.message); }
     }
 
-    return { trackerId, resumed: existing > 0 };
+    return { trackerId, resumed: existing > 0, difficulty: level };
   } catch (e) {
     await c.query('ROLLBACK');
     throw e;
@@ -555,9 +578,23 @@ async function saveFeedback(trackerId, rating, userName) {
   return { id, rating };
 }
 
+/**
+ * Has this tracker already had its questions chosen?
+ *
+ * The only honest way to ask "is this a resume?" BEFORE calling startQuiz —
+ * which is where the questions are frozen. The difficulty prompt needs to know,
+ * because offering a choice for a quiz that is already built would let a parent
+ * pick a level that then quietly does nothing.
+ */
+async function trackerFilled(trackerId) {
+  const { rows } = await db.query(
+    `SELECT COUNT(*)::int n FROM student_quizpe_histories WHERE tracker_id=$1`, [trackerId]);
+  return rows[0].n > 0;
+}
+
 module.exports = {
   scheduleDailyQuizzes, subjectsForStudent, pendingTrackers, saveFeedback,
-  startQuiz, nextQuestion, sendQuestion, submitAnswer, finishQuiz,
+  startQuiz, nextQuestion, sendQuestion, submitAnswer, finishQuiz, trackerFilled,
   entitledSlots, dailyQuizProgress, ensureNextTracker,
   QUESTIONS_PER_QUIZ, BASE_SUBJECT, servingMonth, academicYear,
 };

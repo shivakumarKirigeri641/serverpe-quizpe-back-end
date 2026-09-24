@@ -429,6 +429,106 @@ const STEPS = [
          ON quizpe_tracker (student_id, quiz_date, quiz_slot)`,
     ],
   },
+  {
+    name: 'question_bank.difficulty_level',
+    // 1 easier / 2 medium / 3 hard, so a parent can pick how hard today is.
+    //
+    // DEFAULT 2 is what makes this safe to apply to a live table of a million
+    // rows: every existing question lands in the middle band, which is the band
+    // the unfiltered quiz already behaved like, so nothing changes until the
+    // real values are loaded by scripts/apply-difficulty.js.
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='question_bank' AND column_name='difficulty_level'`,
+    apply: [
+      // Metadata-only on PostgreSQL 11+ (production is 16), so a million rows
+      // are NOT rewritten and the lock is momentary.
+      `ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS difficulty_level smallint NOT NULL DEFAULT 2`,
+      `ALTER TABLE question_bank DROP CONSTRAINT IF EXISTS question_bank_difficulty_level_chk`,
+      // NOT VALID, then VALIDATE. A plain ADD CONSTRAINT scans every row while
+      // holding ACCESS EXCLUSIVE — on this table that is every quiz in the
+      // country waiting. NOT VALID takes the lock only for an instant, and
+      // VALIDATE then scans under SHARE UPDATE EXCLUSIVE, which blocks neither
+      // reads nor writes. The end state is identical: a validated constraint.
+      `ALTER TABLE question_bank ADD CONSTRAINT question_bank_difficulty_level_chk
+         CHECK (difficulty_level = ANY (ARRAY[1,2,3])) NOT VALID`,
+      `ALTER TABLE question_bank VALIDATE CONSTRAINT question_bank_difficulty_level_chk`,
+      // CONCURRENTLY: a plain CREATE INDEX holds a write lock for the whole
+      // build, which on a million rows is long enough for a child tapping
+      // "Start quiz" to sit staring at nothing.
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_question_bank_difficulty_level
+         ON question_bank (difficulty_level)`,
+      // Extends the existing lookup key with difficulty on the end, so the
+      // banded selection uses one index instead of filtering after the fetch.
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_qb_scope_difficulty
+         ON question_bank (board_id, grade_id, subject_id, medium_id,
+                           academic_year, current_month, difficulty_level)`,
+    ],
+  },
+  {
+    name: 'quizpe_tracker.difficulty_level',
+    // The level a quiz was actually BUILT with. Nullable on purpose: every quiz
+    // taken before today has no level, and must never be reported as if it had
+    // one. Written once, when the questions are chosen; a resumed quiz keeps it,
+    // because startQuiz will not re-pick questions for a tracker already filled.
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='quizpe_tracker' AND column_name='difficulty_level'`,
+    apply: [
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS difficulty_level smallint`,
+      `ALTER TABLE quizpe_tracker DROP CONSTRAINT IF EXISTS tracker_difficulty_range`,
+      `ALTER TABLE quizpe_tracker ADD CONSTRAINT tracker_difficulty_range
+         CHECK (difficulty_level IS NULL OR difficulty_level BETWEEN 1 AND 3)`,
+    ],
+  },
+  {
+    name: 'free_quiz_campaigns',
+    // Free access for a DATE RANGE, with its own quizzes-per-day.
+    //
+    // Distinct from free_quiz_grants, which is a single make-good quiz consumed
+    // once. This is a window: "this family gets 3 quizzes a day, free, from the
+    // 1st to the 15th" — a school trial, a demo, an apology, a festival offer.
+    //
+    // Keyed on parent_id rather than the mobile number because it grants an
+    // ENTITLEMENT, and everything downstream (slots, scheduling, reports) works
+    // from the parent and their children. A number with no parent row has no
+    // child to give quizzes to, so there would be nothing to grant.
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='free_quiz_campaigns'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS free_quiz_campaigns (
+         id            bigserial PRIMARY KEY,
+         parent_id     bigint NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
+         student_id    bigint REFERENCES students(id) ON DELETE CASCADE,  -- NULL = every child
+         start_date    date NOT NULL,
+         end_date      date NOT NULL,
+         slots_per_day smallint NOT NULL DEFAULT 1,
+         reason        text,
+         granted_by    varchar(15),
+         is_active     boolean NOT NULL DEFAULT true,
+         created_at    timestamptz NOT NULL DEFAULT now(),
+         modified_at   timestamptz NOT NULL DEFAULT now(),
+         CONSTRAINT fqc_range CHECK (end_date >= start_date),
+         CONSTRAINT fqc_slots CHECK (slots_per_day BETWEEN 1 AND 5))`,
+      // The lookup every quiz start performs: "is this child inside a live
+      // window today?" Partial, because a cancelled or finished campaign is
+      // never asked about.
+      `CREATE INDEX IF NOT EXISTS fqc_live_idx
+         ON free_quiz_campaigns (parent_id, start_date, end_date) WHERE is_active`,
+      `CREATE INDEX IF NOT EXISTS fqc_student_idx
+         ON free_quiz_campaigns (student_id) WHERE is_active`,
+    ],
+  },
+  {
+    name: 'students.difficulty_level',
+    // The child's remembered preference — only ever the PRE-SELECTED value on
+    // the three buttons, never a filter on its own. NULL means "never chosen".
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='students' AND column_name='difficulty_level'`,
+    apply: [
+      `ALTER TABLE students ADD COLUMN IF NOT EXISTS difficulty_level smallint`,
+      `ALTER TABLE students DROP CONSTRAINT IF EXISTS students_difficulty_range`,
+      `ALTER TABLE students ADD CONSTRAINT students_difficulty_range
+         CHECK (difficulty_level IS NULL OR difficulty_level BETWEEN 1 AND 3)`,
+    ],
+  },
 ];
 
 (async () => {
