@@ -94,26 +94,34 @@ async function scheduleDailyQuizzes(studentId, exec = db, opts = {}) {
 async function entitledSlots(studentId, exec = db) {
   const W = require('./quizWindow');
 
-  /* A free-access window sets its own quizzes-per-day, and it WINS over the
-     weekday/weekend rule in both directions. An admin who granted 1 a day for a
-     school demo means 1, including on Saturday; one who granted 3 means 3 on a
-     Tuesday. Guessing around the admin's number would make the field on the
-     page a suggestion rather than a setting. */
-  const free = await freeAccess.forStudent(studentId, exec);
-  if (free) return Math.max(1, Number(free.slots_per_day) || 1);
-
-  if (!W.isWeekend()) return SLOTS_DEFAULT;
   const { rows } = await exec.query(
     `SELECT COALESCE(bool_or(
               NOT COALESCE(pl.is_trial, false) AND s.is_active
               AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
-            ), false) AS paid_active
+            ), false) AS paid_active,
+            COALESCE(bool_or(
+              s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date
+            ), false) AS any_active
        FROM students st
        JOIN parents p ON p.id = st.parent_id
        LEFT JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
       WHERE st.id = $1`, [studentId]);
-  return rows[0]?.paid_active ? SLOTS_PREMIUM_WEEKEND : SLOTS_DEFAULT;
+  const normal = W.isWeekend() && rows[0]?.paid_active ? SLOTS_PREMIUM_WEEKEND : SLOTS_DEFAULT;
+
+  /* A free-access window sets its own quizzes-per-day.
+     For a family with NO live plan the window IS their entitlement, so the
+     admin's number stands exactly as typed — 1 means 1, including at the
+     weekend. For a family who are already paying or on trial it may only ever
+     RAISE the ceiling: a window is a gift, and a gift that quietly halved a
+     paying family's quizzes would be a bug dressed as generosity. */
+  const free = await freeAccess.forStudent(studentId, exec);
+  if (free) {
+    const granted = Math.max(1, Number(free.slots_per_day) || 1);
+    return rows[0]?.any_active ? Math.max(normal, granted) : granted;
+  }
+
+  return normal;
 }
 
 /**

@@ -83,6 +83,38 @@ const check = (ok, msg) => { console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${msg}`); i
       console.log('  SKIP  sibling check — this family has one child');
     }
 
+    /* A window must never TAKE quizzes away. For a family with no live plan the
+       admin's number is the whole entitlement; for one already paying or on
+       trial it may only raise the ceiling — a gift that quietly halved a paying
+       family's quizzes would be a bug dressed as generosity. */
+    const Q = require('../src/whatsapp/quiz');
+    await c.query(`UPDATE free_quiz_campaigns SET is_active=true, student_id=NULL,
+                      start_date=CURRENT_DATE, end_date=CURRENT_DATE, slots_per_day=1
+                    WHERE id=$1`, [live.id]);
+    const granted = await Q.entitledSlots(fam.student_id, c);
+    check(granted === 1, `no live plan: the admin's 1/day stands exactly as typed (got ${granted})`);
+
+    /* Reactivate the family's EXISTING subscription rather than inserting a
+       second one: production carries a unique-active-subscription-per-parent
+       constraint that the repo's migrations never created, so an INSERT here
+       passes locally and fails on a restored copy of live. */
+    const { rows: [plan] } = await c.query(
+      `SELECT id FROM quizpe_plans WHERE NOT COALESCE(is_trial,false) AND is_active LIMIT 1`);
+    const { rows: [existing] } = await c.query(
+      `SELECT id FROM parents_quizpe_subscriptions WHERE parent_id=$1
+        ORDER BY plan_end_date DESC LIMIT 1`, [fam.parent_id]);
+    if (plan && existing) {
+      await c.query(
+        `UPDATE parents_quizpe_subscriptions
+            SET plan_id=$2, plan_start_date=CURRENT_DATE - 1,
+                plan_end_date=CURRENT_DATE + 20, is_active=true
+          WHERE id=$1`, [existing.id, plan.id]);
+      const paid = await Q.entitledSlots(fam.student_id, c);
+      check(paid >= 2, `a PAYING family is NOT cut to 1 by a 1/day window (got ${paid})`);
+    } else {
+      console.log('  SKIP  paying-family check — this family has never had a subscription');
+    }
+
     await c.query('ROLLBACK');
     console.log(`\n  rolled back — nothing written\n`);
   } catch (e) {
