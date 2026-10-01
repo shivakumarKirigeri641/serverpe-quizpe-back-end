@@ -208,7 +208,17 @@ app.use('/support', supportWebRouter);
 
 // Admin panel API (serverpe-quizpe-admin-front-end). Everything except
 // /admin/api/login requires a bearer token.
-app.use('/admin/api', adminRouter);
+/*
+ * The encrypted channel for the admin panel - and for the admin panel ONLY.
+ * Mounted on this prefix, so it can never see /serverpe/platform/... , which
+ * is where WhatsApp delivers a parent's message. Express dispatches by
+ * prefix, so that isolation is structural rather than careful. Inert unless
+ * ADMIN_TUNNEL=1; see src/security/tunnel.js for the two switches.
+ *
+ * Files stay plain: a PDF report is a file, not an envelope.
+ */
+const isFileRoute = (req) => /\/(file|download|pdf|invoice|export)/i.test(req.path);
+app.use('/admin/api', require('./security/tunnel').tunnel({ exempt: isFileRoute }), adminRouter);
 
 // Policies — public so a parent can read them before signing up, and so the
 // WhatsApp consent links resolve for someone with no account.
