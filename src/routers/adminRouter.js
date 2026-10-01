@@ -283,6 +283,52 @@ router.get('/tonight', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] tonight:', e.message); fail(res, 500, 'Could not load tonight.'); }
 });
 
+
+/* --------------------------------------------------- live quiz (read-only) */
+/*
+ * The Live Quiz Monitor, the dials and the question analytics. Every one of
+ * these runs inside a read-only transaction with a statement timeout — see
+ * src/admin/quizLive.js. A failure returns empty rather than 500: a blank
+ * gauge is a fair outcome on a screen watched while children are mid-quiz,
+ * and an error banner across the whole page is not.
+ */
+router.get('/quiz-live/pulse', requireAdmin, async (req, res) => {
+  try { ok(res, { pulse: await require('../admin/quizLive').pulse() }); }
+  catch (e) { console.error('[admin] quiz-live pulse:', e.message); ok(res, { pulse: null }); }
+});
+
+router.get('/quiz-live/series', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/quizLive').minuteSeries(clamp(req.query.minutes, 120, 360)) }); }
+  catch (e) { console.error('[admin] quiz-live series:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/quiz-live/slots', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/quizLive').slotFunnel() }); }
+  catch (e) { console.error('[admin] quiz-live slots:', e.message); ok(res, { rows: [] }); }
+});
+
+/** Who is mid-quiz right now, and on which question. */
+router.get('/quiz-live/in-flight', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/quizLive').inFlight({ staleMinutes: clamp(req.query.stale, 30, 240) }) }); }
+  catch (e) { console.error('[admin] quiz-live in-flight:', e.message); ok(res, { rows: [] }); }
+});
+
+/** One child's quiz, question by question. */
+router.get('/quiz-live/timeline/:trackerId', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/quizLive').timeline(req.params.trackerId) }); }
+  catch (e) { console.error('[admin] quiz-live timeline:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/question-analytics', requireAdmin, async (req, res) => {
+  try {
+    ok(res, { rows: await require('../admin/quizLive').questionAccuracy({
+      days: clamp(req.query.days, 30, 180),
+      limit: clamp(req.query.limit, 40, 200),
+      minAttempts: clamp(req.query.minAttempts, 5, 500),
+    }) });
+  } catch (e) { console.error('[admin] question-analytics:', e.message); ok(res, { rows: [] }); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }
