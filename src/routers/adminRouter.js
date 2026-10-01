@@ -124,7 +124,20 @@ router.get('/branding', async (req, res) => {
   }
 });
 
-router.get('/me', requireAdmin, (req, res) => ok(res, { mobile: req.admin.sub, super: !!req.admin.super }));
+/*
+ * Who is signed in, and what they may do. The panel asks before drawing
+ * anything, so a screen this admin has no capability for is never offered.
+ * Advisory until ADMIN_CAPS_ENFORCE=1 — see src/admin/capabilities.js.
+ */
+router.get('/me', requireAdmin, (req, res) => {
+  const caps = require('../admin/capabilities');
+  ok(res, {
+    mobile: req.admin.sub,
+    super: !!req.admin.super,
+    can: caps.forAdmin({ isSuper: !!req.admin.super }),
+    enforcing: caps.ENFORCE,
+  });
+});
 
 /* --------------------------------------------------------------- dashboard */
 router.get('/dashboard', requireAdmin, async (req, res) => {
