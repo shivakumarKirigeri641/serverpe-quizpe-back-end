@@ -329,6 +329,45 @@ router.get('/question-analytics', requireAdmin, async (req, res) => {
   } catch (e) { console.error('[admin] question-analytics:', e.message); ok(res, { rows: [] }); }
 });
 
+
+/* ---------------------------------------------- delivery health (read-only) */
+/*
+ * Whether WhatsApp is landing, and which numbers are costing us the account's
+ * quality rating. Read-only under a READ ONLY transaction; empty on failure.
+ */
+router.get('/delivery/summary', requireAdmin, async (req, res) => {
+  try { ok(res, { summary: await require('../admin/deliveryHealth').summary(clamp(req.query.days, 7, 90)) }); }
+  catch (e) { console.error('[admin] delivery summary:', e.message); ok(res, { summary: null }); }
+});
+
+router.get('/delivery/daily', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/deliveryHealth').daily(clamp(req.query.days, 14, 90)) }); }
+  catch (e) { console.error('[admin] delivery daily:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/delivery/templates', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/deliveryHealth').byTemplate(clamp(req.query.days, 14, 90)) }); }
+  catch (e) { console.error('[admin] delivery templates:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/delivery/undeliverable', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/deliveryHealth').undeliverable({ days: clamp(req.query.days, 90, 365) }) }); }
+  catch (e) { console.error('[admin] undeliverable:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/delivery/unanswered', requireAdmin, async (req, res) => {
+  try {
+    ok(res, { rows: await require('../admin/deliveryHealth').unanswered({
+      days: clamp(req.query.days, 30, 180), minSends: clamp(req.query.minSends, 3, 50),
+    }) });
+  } catch (e) { console.error('[admin] unanswered:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/delivery/jobs', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/deliveryHealth').jobsToday() }); }
+  catch (e) { console.error('[admin] delivery jobs:', e.message); ok(res, { rows: [] }); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }

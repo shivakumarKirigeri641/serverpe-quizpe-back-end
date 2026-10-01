@@ -29,6 +29,7 @@
 require('dotenv').config();
 const db = require('../src/database/connectDB');
 const live = require('../src/admin/quizLive');
+const delivery = require('../src/admin/deliveryHealth');
 
 const TABLES = [
   'quizpe_tracker',
@@ -96,6 +97,13 @@ async function main() {
     await run('timeline', () => live.timeline(flight[0].tracker_id));
   }
 
+  const dsum = await run('delivery.summary',       () => delivery.summary(7));
+  await run('delivery.daily',         () => delivery.daily(14));
+  await run('delivery.byTemplate',    () => delivery.byTemplate(14));
+  const dead = await run('delivery.undeliverable', () => delivery.undeliverable({}));
+  await run('delivery.unanswered',    () => delivery.unanswered({}));
+  await run('delivery.jobsToday',     () => delivery.jobsToday());
+
   const after = await counts();
   let drift = 0;
   for (const t of TABLES) {
@@ -146,6 +154,17 @@ async function main() {
       `   #${q.question_id}  ${String(q.accuracy_pct).padStart(5)}%  n=${String(q.attempts).padStart(3)}`
       + `  wrong->${q.top_wrong_option || '-'} ${q.top_wrong_pct || 0}%  (key ${q.correct_option})`));
   }
+
+  if (dsum) {
+    console.log('');
+    console.log('Delivery, last 7 days');
+    console.log(`  sent         ${dsum.sent} to ${dsum.numbers} numbers`);
+    console.log(`  delivered    ${dsum.delivered}  (${dsum.delivery_pct ?? '-'}%)`);
+    console.log(`  failed       ${dsum.failed}  (${dsum.failure_pct ?? '-'}%)`);
+    console.log(`  dead numbers ${dsum.dead_numbers}`);
+    console.log(`  replied      ${dsum.replied_numbers}  (${dsum.reply_pct ?? '-'}%)`);
+  }
+  if (dead?.length) console.log(`  ${dead.length} number(s) cannot receive anything`);
 
   console.log(
     failures
