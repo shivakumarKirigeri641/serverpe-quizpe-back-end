@@ -1104,8 +1104,40 @@ Plan price (incl. GST): ₹${gross}
 Tap below to enter your child${plan.student_count > 1 ? 'ren\'s' : "'s"} details, accept the terms and pay securely.`,
     displayText: `💳 Pay ₹${gross}`,
     url,
-    footer: 'Secure checkout via Razorpay · valid 30 minutes',
+    footer: 'Secure checkout via Razorpay · link valid 48 hours',
   });
+
+  /*
+   * THE SECOND MESSAGE IS FOR THE PERSON WHO IS NOT HOLDING THIS PHONE.
+   *
+   * A real customer: the mother holds the QuizPe number, the father pays. The
+   * checkout was never locked to her device — it resolves on the token alone,
+   * so a forwarded link has always worked — but nothing ever told her that,
+   * and the link died in thirty minutes before she could use it.
+   *
+   * It has to be a SEPARATE, PLAIN TEXT message. WhatsApp's cta_url type takes
+   * exactly one button and allows no others, so "Copy link" cannot sit beside
+   * "Pay" on the message above. Plain text, though, is selectable, copyable
+   * and forwardable by long-press — which is the share button, built in.
+   *
+   * Sent after, not before, so the parent paying normally sees the pay button
+   * first and is never made to read about a case that is not theirs. If this
+   * send fails the checkout is unaffected; the pay button has already arrived.
+   */
+  try {
+    await wa.sendText(session.id, mobile,
+`💡 *Is someone else paying?*
+
+Forward this message to them 👇
+
+${url}
+
+They fill in the details and pay there. The quiz activates on *your* number, not theirs — you do not have to do anything else.
+
+This link works for 48 hours.`);
+  } catch (e) {
+    console.warn('[pay] share-link note not sent:', e.message);
+  }
 }
 
 /** Send the "raise a request" support form link. */

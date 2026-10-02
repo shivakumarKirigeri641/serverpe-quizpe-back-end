@@ -18,7 +18,20 @@ const crypto = require('crypto');
 const db = require('../database/connectDB');
 
 const router = express.Router();
-const TTL_MIN = 30;
+/*
+ * How long a plan checkout link stays alive.
+ *
+ * It was 30 minutes, which assumed the person reading the message is the
+ * person paying. A real customer broke that: the mother holds the QuizPe
+ * number, the father pays. She forwards the link, he opens it after work, and
+ * it is dead — he thinks QuizPe is broken, she thinks he ignored her.
+ *
+ * 48 hours. Every other checkout in this file (instant quiz, add-a-child)
+ * already uses three days, so 30 minutes was the outlier rather than the rule.
+ * The link is a long random token, single-use, and tied to the plan and the
+ * mobile it was created for, so a longer life costs nothing in safety.
+ */
+const TTL_MIN = Number(process.env.CHECKOUT_TTL_MIN) || 48 * 60;
 
 const RZP = 'https://api.razorpay.com/v1';
 
