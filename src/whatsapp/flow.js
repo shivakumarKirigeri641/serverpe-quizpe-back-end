@@ -1085,7 +1085,8 @@ async function startCheckout(session, mobile, planCode) {
   // The parent fills in their children, accepts the terms and pays there via
   // Razorpay Standard Checkout, which verifies in-browser — so activation never
   // waits on the webhook. A single link in the chat, no double-link confusion.
-  const { createCheckoutLink } = require('../routers/paymentRouter');
+  const { createCheckoutLink, checkoutTtlLabel } = require('../routers/paymentRouter');
+  const validFor = checkoutTtlLabel();
   const { url } = await createCheckoutLink(session.id, mobile, planCode);
   await setState(session, 'awaiting_payment', 'chose_plan', { plan_code: planCode });
 
@@ -1104,7 +1105,7 @@ Plan price (incl. GST): ₹${gross}
 Tap below to enter your child${plan.student_count > 1 ? 'ren\'s' : "'s"} details, accept the terms and pay securely.`,
     displayText: `💳 Pay ₹${gross}`,
     url,
-    footer: 'Secure checkout via Razorpay · link valid 48 hours',
+    footer: `Secure checkout via Razorpay · link valid ${validFor}`,
   });
 
   /*
@@ -1134,7 +1135,7 @@ ${url}
 
 They fill in the details and pay there. The quiz activates on *your* number, not theirs — you do not have to do anything else.
 
-This link works for 48 hours.`);
+This link works for ${validFor}.`);
   } catch (e) {
     console.warn('[pay] share-link note not sent:', e.message);
   }

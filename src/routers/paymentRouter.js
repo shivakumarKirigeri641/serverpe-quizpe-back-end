@@ -33,6 +33,21 @@ const router = express.Router();
  */
 const TTL_MIN = Number(process.env.CHECKOUT_TTL_MIN) || 48 * 60;
 
+/*
+ * How long the link lasts, in words, for the messages that promise it.
+ *
+ * The wording used to be typed next to the number — "valid 48 hours" — which
+ * meant changing CHECKOUT_TTL_MIN silently turned every message into a lie.
+ * One source, so the sentence cannot drift from the setting.
+ */
+function checkoutTtlLabel() {
+  const h = TTL_MIN / 60;
+  if (h < 1) return `${TTL_MIN} minutes`;
+  if (h < 48) return `${Math.round(h)} hours`;
+  const d = Math.round(h / 24);
+  return `${d} day${d === 1 ? '' : 's'}`;
+}
+
 const RZP = 'https://api.razorpay.com/v1';
 
 /**
@@ -1539,3 +1554,4 @@ module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;
 module.exports.createInstantLink = createInstantLink;
 module.exports.createInstantCheckout = createInstantCheckout;
+module.exports.checkoutTtlLabel = checkoutTtlLabel;
