@@ -105,6 +105,50 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          ) f
          LEFT JOIN parents p ON p.parent_mobile_number = f.mobile
         ORDER BY f.first_at DESC LIMIT 40
+     ), bc AS (
+       -- a broadcast finished.
+       -- marketing_broadcasts holds ONE ROW PER RECIPIENT, not per run, so a
+       -- run has to be reassembled: rows of the same template and segment are
+       -- one run until a gap of ten minutes breaks them apart. Only FINISHED
+       -- runs are emitted (nothing new for three minutes), because a run still
+       -- in flight would move its own timestamp on every poll and pop again
+       -- and again while it sent.
+       SELECT 'broadcast'::text, g.finished,
+              -- whatsapp_templates holds the copy, so the pop-up can say what
+              -- was actually sent rather than printing a template code at an
+              -- administrator and expecting them to remember which is which.
+              COALESCE(NULLIF(wt.send_context, ''), g.template_name),
+              g.template_name, NULL::varchar,
+              (g.sent || ' sent' || CASE WHEN g.failed > 0 THEN ', ' || g.failed || ' failed' ELSE '' END
+                 || ' · ' || g.segment
+                 || COALESCE(' · ' || NULLIF(left(regexp_replace(wt.body_text, '[[:space:]]+', ' ', 'g'), 60), ''), '')),
+              g.ref_id, NULL::bigint, NULL::bigint, NULL::numeric
+         FROM (
+           SELECT template_name, segment, run_no,
+                  min(id)          AS ref_id,
+                  max(created_at)  AS finished,
+                  count(*)::int                                  AS total,
+                  count(*) FILTER (WHERE status = 'sent')::int    AS sent,
+                  count(*) FILTER (WHERE status = 'failed')::int  AS failed
+             FROM (
+               SELECT b.*,
+                      sum(gap) OVER (PARTITION BY b.template_name, b.segment
+                                     ORDER BY b.created_at ROWS UNBOUNDED PRECEDING) AS run_no
+                 FROM (
+                   SELECT m.id, m.template_name, m.segment, m.status, m.created_at,
+                          CASE WHEN lag(m.created_at) OVER w IS NULL
+                                 OR m.created_at - lag(m.created_at) OVER w > interval '10 minutes'
+                               THEN 1 ELSE 0 END AS gap
+                     FROM marketing_broadcasts m
+                    WHERE m.created_at > now() - interval '120 days'
+                   WINDOW w AS (PARTITION BY m.template_name, m.segment ORDER BY m.created_at)
+                 ) b
+             ) runs
+            GROUP BY template_name, segment, run_no
+           HAVING max(created_at) < now() - interval '3 minutes'
+         ) g
+         LEFT JOIN whatsapp_templates wt ON wt.template_name = g.template_name
+        ORDER BY g.finished DESC LIMIT 20
      ), fb AS (
        SELECT 'feedback'::text, f.created_at,
               COALESCE(st.student_name, '—'), p.parent_name, p.parent_mobile_number,
@@ -131,6 +175,7 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          SELECT * FROM events UNION ALL SELECT * FROM started UNION ALL
          SELECT * FROM orphan_reports UNION ALL
          SELECT * FROM subs   UNION ALL SELECT * FROM hi      UNION ALL
+         SELECT * FROM bc     UNION ALL
          SELECT * FROM fb     UNION ALL SELECT * FROM tick
        ) all_events
       WHERE ($1::timestamptz IS NULL OR at > $1::timestamptz)
