@@ -85,6 +85,26 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          JOIN quizpe_plans pl ON pl.id = s.plan_id
          JOIN parents p ON p.id = s.parent_id
         ORDER BY s.created_at DESC LIMIT 40
+     ), hi AS (
+       -- someone wrote to us for the very first time.
+       -- The event the founder most wants to see live, and the only one the
+       -- feed was missing: a number appearing for the first time ever. Keyed
+       -- on the first INBOUND message, so it fires when a person speaks, not
+       -- when a record happens to be created.
+       SELECT 'said_hi'::text, f.first_at,
+              COALESCE(p.parent_name, '—'), COALESCE(p.parent_name, ''), f.mobile,
+              COALESCE(NULLIF(left(f.body, 80), ''), 'said hello'),
+              f.id, NULL::bigint, p.id, NULL::numeric
+         FROM (
+           SELECT DISTINCT ON (right(m.mobile_number, 10))
+                  right(m.mobile_number, 10) AS mobile,
+                  m.created_at AS first_at, m.body, m.id
+             FROM whatsapp_messages m
+            WHERE m.direction = 'inbound'
+            ORDER BY right(m.mobile_number, 10), m.created_at
+         ) f
+         LEFT JOIN parents p ON p.parent_mobile_number = f.mobile
+        ORDER BY f.first_at DESC LIMIT 40
      ), fb AS (
        SELECT 'feedback'::text, f.created_at,
               COALESCE(st.student_name, '—'), p.parent_name, p.parent_mobile_number,
@@ -110,7 +130,8 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        FROM (
          SELECT * FROM events UNION ALL SELECT * FROM started UNION ALL
          SELECT * FROM orphan_reports UNION ALL
-         SELECT * FROM subs   UNION ALL SELECT * FROM fb      UNION ALL SELECT * FROM tick
+         SELECT * FROM subs   UNION ALL SELECT * FROM hi      UNION ALL
+         SELECT * FROM fb     UNION ALL SELECT * FROM tick
        ) all_events
       WHERE ($1::timestamptz IS NULL OR at > $1::timestamptz)
         AND ($2::text[] IS NULL OR kind = ANY($2::text[]))
