@@ -529,6 +529,34 @@ const STEPS = [
          CHECK (difficulty_level IS NULL OR difficulty_level BETWEEN 1 AND 3)`,
     ],
   },
+  {
+    name: 'admin_audit_log',
+    // The ONLY table this admin work adds, and the only place any of it
+    // writes. Everything else reads. Additive, nullable throughout, and
+    // referenced by nothing - dropping it would remove the audit history and
+    // break nothing else, which is what makes it reversible.
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='admin_audit_log'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS admin_audit_log (
+         id            bigserial PRIMARY KEY,
+         admin_mobile  varchar(15),
+         action        varchar(64)  NOT NULL,
+         target_type   varchar(48),
+         target_id     varchar(64),
+         summary       text,
+         before_state  jsonb,
+         after_state   jsonb,
+         ip            varchar(64),
+         user_agent    text,
+         status        smallint,
+         created_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log (created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_admin   ON admin_audit_log (admin_mobile, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_action  ON admin_audit_log (action, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_target  ON admin_audit_log (target_type, target_id)`,
+    ],
+  },
 ];
 
 (async () => {

@@ -18,6 +18,7 @@
  */
 
 const express = require('express');
+const { audit } = require('./audit');
 const db = require('../database/connectDB');
 const wa = require('../whatsapp/client');
 const { requireAdmin } = require('./auth');
@@ -240,7 +241,7 @@ router.post('/broadcast/preview', requireAdmin, express.json(), async (req, res)
 });
 
 /** Send the template to the segment, respecting the guardrails. */
-router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) => {
+router.post('/broadcast/send', requireAdmin, audit('broadcast.send', (req) => ({ targetType: 'segment', targetId: req.body?.segment, summary: `template ${req.body?.template || '?'} to ${req.body?.segment || '?'}` })), express.json(), async (req, res) => {
   const { template, segment, cooldownDays = 7, params = [] } = req.body || {};
   if (!SEGMENTS[segment]) return fail(res, 400, 'Pick a valid segment.');
   if (!template) return fail(res, 400, 'Pick a template.');
@@ -282,7 +283,7 @@ router.post('/broadcast/send', requireAdmin, express.json(), async (req, res) =>
  */
 const normMobile = (m) => String(m || '').replace(/\D/g, '').slice(-10);
 
-router.post('/broadcast/direct', requireAdmin, express.json(), async (req, res) => {
+router.post('/broadcast/direct', requireAdmin, audit('broadcast.direct', (req) => ({ targetType: 'mobile', targetId: req.body?.mobile, summary: 'direct message' })), express.json(), async (req, res) => {
   const { template, params = [], mobiles, dryRun } = req.body || {};
   if (!template) return fail(res, 400, 'Pick a template.');
   const uniq = [...new Set(String(mobiles || '').split(/[\s,;]+/).map(normMobile).filter((m) => m.length === 10))];

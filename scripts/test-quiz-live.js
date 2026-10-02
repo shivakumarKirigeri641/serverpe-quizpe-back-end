@@ -31,6 +31,8 @@ const db = require('../src/database/connectDB');
 const live = require('../src/admin/quizLive');
 const delivery = require('../src/admin/deliveryHealth');
 const ops = require('../src/admin/opsHealth');
+const curriculum = require('../src/admin/curriculum');
+const auditLog = require('../src/admin/audit');
 
 const TABLES = [
   'quizpe_tracker',
@@ -40,6 +42,7 @@ const TABLES = [
   'students',
   'parents',
   'whatsapp_messages',
+  'admin_audit_log',      // the one table the panel writes to — reads must not
 ];
 
 let failures = 0;
@@ -111,6 +114,12 @@ async function main() {
   const errs = await run('ops.errorCenter', () => ops.errorCenter(90));
   await run('ops.webhookActivity', () => ops.webhookActivity(7));
 
+  await run('curriculum.byGrade',    () => curriculum.byGrade({}));
+  await run('curriculum.bySubject',  () => curriculum.bySubject({}));
+  const pool = await run('curriculum.poolHealth', () => curriculum.poolHealth({ days: 180 }));
+  await run('audit.list',            () => auditLog.list({}));
+  await run('audit.summary',         () => auditLog.summary({}));
+
   const after = await counts();
   let drift = 0;
   for (const t of TABLES) {
@@ -178,6 +187,15 @@ async function main() {
     console.log('Error center - top faults by shape');
     errs.slice(0, 4).forEach((e) => console.log(
       `  ${String(e.occurrences).padStart(4)}x  ${e.source.padEnd(12)} ${String(e.example).slice(0, 56)}`));
+  }
+
+  if (pool?.length) {
+    console.log('');
+    console.log('Question pool - days before it starts repeating');
+    pool.slice(0, 5).forEach((r) => console.log(
+      `  ${String(r.grade_code).padEnd(4)} ${String(r.subject_code).padEnd(6)}`
+      + ` pool ${String(r.pool).padStart(7)}  used ${String(r.used).padStart(4)}`
+      + `  ${r.per_day}/day  ${r.days_left ?? '-'} days left`));
   }
 
   console.log(

@@ -21,6 +21,7 @@
  */
 
 const express = require('express');
+const { audit } = require('./audit');
 const db = require('../database/connectDB');
 const { requireAdmin } = require('./auth');
 
@@ -117,7 +118,7 @@ router.get('/free-access/campaigns', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/free-access/grant', requireAdmin, express.json(), async (req, res) => {
+router.post('/free-access/grant', requireAdmin, audit('freeaccess.grant', (req) => ({ targetType: 'parent', targetId: req.body?.parentId, after: req.body, summary: 'granted free access' })), express.json(), async (req, res) => {
   const { parent_id, student_id, start_date, end_date, reason } = req.body || {};
   const slots = Number(req.body?.slots_per_day);
   try {
@@ -184,7 +185,7 @@ router.post('/free-access/grant', requireAdmin, express.json(), async (req, res)
 });
 
 /** Close a window early. The row stays, so the record of what was given stays. */
-router.post('/free-access/cancel', requireAdmin, express.json(), async (req, res) => {
+router.post('/free-access/cancel', requireAdmin, audit('freeaccess.cancel', (req) => ({ targetType: 'campaign', targetId: req.body?.id, summary: 'cancelled free access' })), express.json(), async (req, res) => {
   try {
     const { rowCount } = await db.query(
       `UPDATE free_quiz_campaigns SET is_active = false, modified_at = now()

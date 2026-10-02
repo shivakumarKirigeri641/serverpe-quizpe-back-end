@@ -412,6 +412,43 @@ router.get('/ops/webhook', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] ops webhook:', e.message); ok(res, { rows: [] }); }
 });
 
+
+/* ------------------------------------------ curriculum & audit (read-only) */
+router.get('/curriculum/grades', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/curriculum').byGrade({ days: clamp(req.query.days, 30, 365) }) }); }
+  catch (e) { console.error('[admin] grades:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/curriculum/subjects', requireAdmin, async (req, res) => {
+  try {
+    ok(res, { rows: await require('../admin/curriculum').bySubject({
+      days: clamp(req.query.days, 30, 365), gradeId: req.query.gradeId || null,
+    }) });
+  } catch (e) { console.error('[admin] subjects:', e.message); ok(res, { rows: [] }); }
+});
+
+/** How long before a grade starts repeating itself. */
+router.get('/curriculum/pool', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/curriculum').poolHealth({ days: clamp(req.query.days, 30, 180) }) }); }
+  catch (e) { console.error('[admin] pool:', e.message); ok(res, { rows: [] }); }
+});
+
+/** What administrators did. Empty, not an error, before the migration runs. */
+router.get('/audit', requireAdmin, async (req, res) => {
+  try {
+    ok(res, { rows: await require('../admin/audit').list({
+      days: clamp(req.query.days, 30, 365),
+      admin: req.query.admin || null,
+      action: req.query.action || null,
+    }) });
+  } catch (e) { console.error('[admin] audit:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/audit/summary', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/audit').summary({ days: clamp(req.query.days, 30, 365) }) }); }
+  catch (e) { console.error('[admin] audit summary:', e.message); ok(res, { rows: [] }); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }
