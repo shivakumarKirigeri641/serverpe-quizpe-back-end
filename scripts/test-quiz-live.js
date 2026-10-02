@@ -30,6 +30,7 @@ require('dotenv').config();
 const db = require('../src/database/connectDB');
 const live = require('../src/admin/quizLive');
 const delivery = require('../src/admin/deliveryHealth');
+const ops = require('../src/admin/opsHealth');
 
 const TABLES = [
   'quizpe_tracker',
@@ -104,6 +105,12 @@ async function main() {
   await run('delivery.unanswered',    () => delivery.unanswered({}));
   await run('delivery.jobsToday',     () => delivery.jobsToday());
 
+  await run('ops.health',          () => ops.health());
+  await run('ops.jobSummary',      () => ops.jobSummary(30));
+  await run('ops.stuck',           () => ops.stuck({}));
+  const errs = await run('ops.errorCenter', () => ops.errorCenter(90));
+  await run('ops.webhookActivity', () => ops.webhookActivity(7));
+
   const after = await counts();
   let drift = 0;
   for (const t of TABLES) {
@@ -165,6 +172,13 @@ async function main() {
     console.log(`  replied      ${dsum.replied_numbers}  (${dsum.reply_pct ?? '-'}%)`);
   }
   if (dead?.length) console.log(`  ${dead.length} number(s) cannot receive anything`);
+
+  if (errs?.length) {
+    console.log('');
+    console.log('Error center - top faults by shape');
+    errs.slice(0, 4).forEach((e) => console.log(
+      `  ${String(e.occurrences).padStart(4)}x  ${e.source.padEnd(12)} ${String(e.example).slice(0, 56)}`));
+  }
 
   console.log(
     failures

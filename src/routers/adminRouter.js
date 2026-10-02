@@ -381,6 +381,37 @@ router.get('/delivery/jobs', requireAdmin, async (req, res) => {
   catch (e) { console.error('[admin] delivery jobs:', e.message); ok(res, { rows: [] }); }
 });
 
+
+/* ------------------------------------------------- operations (read-only) */
+/*
+ * Did the background jobs run, what is stuck, and what has been failing.
+ * All read-only; empty on failure rather than 500.
+ */
+router.get('/ops/health', requireAdmin, async (req, res) => {
+  try { ok(res, { health: await require('../admin/opsHealth').health() }); }
+  catch (e) { console.error('[admin] ops health:', e.message); ok(res, { health: null }); }
+});
+
+router.get('/ops/jobs', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/opsHealth').jobSummary(clamp(req.query.days, 7, 90)) }); }
+  catch (e) { console.error('[admin] ops jobs:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/ops/stuck', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/opsHealth').stuck({ lockMinutes: clamp(req.query.lockMinutes, 15, 1440) }) }); }
+  catch (e) { console.error('[admin] ops stuck:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/ops/errors', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/opsHealth').errorCenter(clamp(req.query.days, 14, 180)) }); }
+  catch (e) { console.error('[admin] ops errors:', e.message); ok(res, { rows: [] }); }
+});
+
+router.get('/ops/webhook', requireAdmin, async (req, res) => {
+  try { ok(res, { rows: await require('../admin/opsHealth').webhookActivity(clamp(req.query.days, 7, 90)) }); }
+  catch (e) { console.error('[admin] ops webhook:', e.message); ok(res, { rows: [] }); }
+});
+
 /** The "watching view" — newest enrolments first. */
 router.get('/feed', requireAdmin, async (req, res) => {
   try { ok(res, { rows: await metrics.enrolmentFeed(clamp(req.query.limit, 50, 200)) }); }
