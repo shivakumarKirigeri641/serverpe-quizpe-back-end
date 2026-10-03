@@ -58,7 +58,16 @@ console.log('\n\x1b[1mMUST NOT trigger — ordinary messages\x1b[0m\n');
 
 console.log('\n\x1b[1mSTART must stay forgiving\x1b[0m\n');
 [['start', true], ['START', true], ['resume', true], ['chalu karo', true],
- ['begin', true], ['hi', false], ['how do I start the quiz for my daughter', true]]
+ ['begin', true], ['unpause', true], ['hi', false],
+ // THE REGRESSION. These are real menu buttons. Reading them as "resume"
+ // broke the product: a paying parent tapped Start quiz now seven times
+ // and was told "Welcome back!" each time while no quiz ever came.
+ ['\u25b6\ufe0f Start quiz now', false],
+ ['Start quiz', false],
+ ['start quiz now', false],
+ ['\u26a1 Instant quiz @ \u20b99*', false],
+ ['\ud83d\udcc5 Quiz schedule', false],
+ ['how do I start the quiz for my daughter', false]]
   .forEach(([t, want]) => {
     const got = wantsToResume(t);
     if (got === want) ok(`${JSON.stringify(t).padEnd(42)} ${got ? 'RESUME' : 'pass'}`);

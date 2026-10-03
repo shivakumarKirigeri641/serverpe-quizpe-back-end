@@ -79,19 +79,34 @@ function wantsToStop(text) {
   return PHRASES.some((p) => t.includes(p));
 }
 
-/* "START" has to be forgiving for the opposite reason: someone who paused
-   everything has no other way back in. */
+/* "START" has to be forgiving for the opposite reason — someone who paused
+   everything has no other way back in — but NOT so forgiving that it eats the
+   product.
+
+   It did exactly that. Broadening this from an exact match caught the main
+   menu button, "▶️ Start quiz now": strip the emoji, three words, contains
+   "start" — resume. A paying parent tapped it seven times in fourteen minutes
+   and was told "Welcome back!" every time while no quiz ever arrived.
+
+   So: resume means a message that is ONLY a resume word, give or take a
+   please. Anything mentioning the quiz is someone trying to use the service,
+   never someone unpausing it. */
 const RESUME = new Set([
   'start', 'resume', 'unpause', 'begin', 'restart', 'continue',
-  'chalu', 'shuru', 'suru', 'on',
+  'chalu', 'shuru', 'suru',
 ]);
+
+const NEVER_RESUME = /(quiz|question|test|report|plan|pay|instant)/;
 
 function wantsToResume(text) {
   const t = normalise(text);
   if (!t) return false;
-  const words = t.split(' ');
-  if (words.length <= 3 && words.some((w) => RESUME.has(w))) return true;
-  return /\b(start|resume|chalu kar|shuru kar)\b/.test(t);
+  if (NEVER_RESUME.test(t)) return false;          // they want the product, not a resume
+
+  const words = t.split(' ').filter((w) => w !== 'please' && w !== 'karo' && w !== 'kar' && w !== 'do');
+  if (!words.length) return false;
+  // Only a bare command counts: "start", "resume", "chalu karo".
+  return words.length <= 2 && words.every((w) => RESUME.has(w));
 }
 
 module.exports = { wantsToStop, wantsToResume, normalise };
