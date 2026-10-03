@@ -8,7 +8,8 @@
  *   • Segments target the right people (trial / paid / lapsed / leads / all).
  *   • A FREQUENCY GUARD skips anyone who already got a marketing broadcast in
  *     the last N days (default 7) — the #1 way to protect the quality rating.
- *   • Parents who replied STOP (service_paused) are never included.
+ *   • Anyone who replied STOP is never included — parents via
+ *     service_paused, leads via whatsapp_sessions.opted_out.
  *   • Every send is logged, so the next broadcast's guard can see it.
  *
  * Marketing messages are business-initiated; keep them occasional and targeted.
@@ -98,6 +99,11 @@ async function recipients(segment) {
              w.id AS session_id
         FROM whatsapp_sessions w
        WHERE w.is_active
+         -- A lead who replied STOP. This filter did not exist, and leads have
+         -- no parents row to carry service_paused, so people who asked to be
+         -- left alone stayed in this segment for ever. COALESCE so the query
+         -- still runs on a database where the migration has not been applied.
+         AND NOT COALESCE(w.opted_out, false)
          AND NOT EXISTS (SELECT 1 FROM parents p WHERE p.parent_mobile_number = w.mobile_number)`);
     return rows;
   }

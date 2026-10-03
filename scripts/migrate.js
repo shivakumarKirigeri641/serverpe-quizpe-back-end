@@ -557,6 +557,22 @@ const STEPS = [
       `CREATE INDEX IF NOT EXISTS idx_audit_target  ON admin_audit_log (target_type, target_id)`,
     ],
   },
+  {
+    name: 'whatsapp_sessions.opted_out',
+    // A LEAD CANNOT OPT OUT TODAY. STOP sets parents.service_paused, but
+    // someone who only ever said hi has no parents row, so the handler found
+    // nothing to update and returned without even replying — while the
+    // broadcast's "leads" segment reads whatsapp_sessions with no opt-out
+    // filter at all. They stayed on the list for ever, with no way off it.
+    // One nullable column, defaulted false, is the whole fix.
+    check: `SELECT 1 FROM information_schema.columns
+             WHERE table_name='whatsapp_sessions' AND column_name='opted_out'`,
+    apply: [
+      `ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS opted_out boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS opted_out_at timestamptz`,
+      `CREATE INDEX IF NOT EXISTS idx_wa_sessions_optout ON whatsapp_sessions (mobile_number) WHERE opted_out`,
+    ],
+  },
 ];
 
 (async () => {

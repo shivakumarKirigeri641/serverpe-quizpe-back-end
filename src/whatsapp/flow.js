@@ -554,13 +554,47 @@ async function processInbound(msg, contactName) {
   // nudge. Because that means a paying parent stops receiving the service, the
   // reply has to say so plainly and name the date their plan still runs to —
   // otherwise silence looks like a fault rather than their own choice.
-  if (/^(stop|unsubscribe|stop reminders|pause)$/i.test(text.trim())) {
+  if (require('./optOut').wantsToStop(text)) {
+    /*
+     * EVERY opt-out is honoured, whether or not this number ever enrolled.
+     *
+     * It used to update `parents` and `return` if no row came back — so a lead,
+     * who has no parents row, was neither recorded nor replied to, and stayed
+     * in the broadcast list for ever with no way off it. Leads are most of the
+     * audience, so most people who asked us to stop could not.
+     *
+     * Now the session is flagged first (that always exists, since they are
+     * messaging us), the parent record is paused if there is one, and the
+     * acknowledgement goes out either way. Silence is not an acceptable answer
+     * to "stop".
+     */
+    await db.query(
+      `UPDATE whatsapp_sessions
+          SET opted_out = true, opted_out_at = now(), modified_at = now()
+        WHERE mobile_number = $1`, [mobile]).catch((e) => {
+      // Before the migration runs this column does not exist. A parent asking
+      // to stop must still be paused, so the failure is logged, not thrown.
+      console.warn('[optout] could not flag session:', e.message);
+    });
+
     const { rows } = await db.query(
       `UPDATE parents SET service_paused = true, reminders_enabled = false,
               paused_at = now(), modified_at = now()
         WHERE parent_mobile_number = $1
         RETURNING id`, [mobile]);
-    if (!rows.length) return;
+
+    if (!rows.length) {
+      // A lead. Nothing to pause, but they asked, so they get an answer.
+      await wa.sendText(session.id, mobile,
+        `🔕 *Done — we have stopped messaging you.*
+
+` +
+        `You will not hear from QuizPe again unless you write to us.
+
+` +
+        `_If this was a mistake, reply *START*._`);
+      return;
+    }
 
     const till = (await db.query(
       `SELECT to_char(max(plan_end_date), 'DD Mon YYYY') AS d
@@ -580,7 +614,10 @@ async function processInbound(msg, contactName) {
   // START must be forgiving. A parent who paused everything has no other way
   // back in, so anything that plainly means "resume" is accepted — including a
   // bare START, which is what WhatsApp users are used to typing.
-  if (/^(start|start reminders|resume|unpause|begin)$/i.test(text.trim())) {
+  if (require('./optOut').wantsToResume(text)) {
+    await db.query(
+      `UPDATE whatsapp_sessions SET opted_out = false, opted_out_at = NULL, modified_at = now()
+        WHERE mobile_number = $1`, [mobile]).catch(() => { /* pre-migration */ });
     const { rows } = await db.query(
       `UPDATE parents SET service_paused = false, reminders_enabled = true,
               paused_at = NULL, modified_at = now()
