@@ -284,6 +284,19 @@ require('./jobs/jobQueue').start();
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
 
+// The admin revamp (2026-10-05). Separate from the quiz scheduler and never
+// touching it: every five minutes, the alerts centre checks for problems and
+// a due batch of a "broadcast in batches" plan goes out (none unless the
+// admin started one). Started a minute late so a restart settles first.
+setTimeout(() => {
+  const tick = () => {
+    require('./admin/hq/alerts').check().catch((e) => console.error('[hq] alerts:', e.message));
+    require('./admin/hq/plans').tick().catch((e) => console.error('[hq] plans:', e.message));
+  };
+  tick();
+  setInterval(tick, 5 * 60 * 1000).unref();
+}, 60 * 1000).unref();
+
 /* ---------------------------------------------------------------------------
  * Built front-ends, served from this same process in production.
  *

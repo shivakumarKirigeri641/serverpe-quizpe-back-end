@@ -445,3 +445,8 @@ router.get('/broadcast/segment-people', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+// Broadcast in batches (admin/hq/plans.js, 2026-10-05) sends each batch with
+// exactly this sender — same STOP rules, same stop-on-fatal behaviour.
+module.exports.sendOneByOne = sendOneByOne;
+module.exports.ensureSchema = ensureSchema;
+module.exports.SEGMENTS = SEGMENTS;

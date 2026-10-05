@@ -573,6 +573,74 @@ const STEPS = [
       `CREATE INDEX IF NOT EXISTS idx_wa_sessions_optout ON whatsapp_sessions (mobile_number) WHERE opted_out`,
     ],
   },
+  {
+    name: 'hq_tables',
+    // THE ADMIN REVAMP (user, 2026-10-05: "make it like GaadiPe's admin
+    // panel"). New tables only — nothing existing is altered — and every one
+    // is the admin panel's own: no quiz, parent or message table is touched.
+    //   hq_meta_seen        Meta account news (read from GaadiPe, read-only)
+    //                       the QuizPe admin has already clicked "Got it" on
+    //   hq_broadcast_plans  broadcast in batches under the shared WhatsApp limit
+    //   hq_alerts           the alerts centre: one open row per problem
+    //   hq_push             phone push subscriptions for the admin
+    // and the panel's settings, in app_settings (added only if absent).
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='hq_broadcast_plans'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS hq_meta_seen (
+         alert_id   text PRIMARY KEY,
+         seen_by    text,
+         seen_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE TABLE IF NOT EXISTS hq_broadcast_plans (
+         id            bigserial PRIMARY KEY,
+         admin_mobile  text,
+         template_name text        NOT NULL,
+         params        jsonb       NOT NULL DEFAULT '[]'::jsonb,
+         label         text,
+         mobiles       jsonb       NOT NULL DEFAULT '[]'::jsonb,
+         batch_size    integer     NOT NULL DEFAULT 100 CHECK (batch_size BETWEEN 1 AND 2000),
+         gap_hours     numeric     NOT NULL DEFAULT 24 CHECK (gap_hours >= 1),
+         reserve       integer     NOT NULL DEFAULT 50 CHECK (reserve >= 0),
+         status        text        NOT NULL DEFAULT 'running',
+         next_at       timestamptz NOT NULL DEFAULT now(),
+         batches       integer     NOT NULL DEFAULT 0,
+         last_note     text,
+         created_at    timestamptz NOT NULL DEFAULT now(),
+         modified_at   timestamptz NOT NULL DEFAULT now(),
+         finished_at   timestamptz
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_hq_plans_due ON hq_broadcast_plans (next_at) WHERE status = 'running'`,
+      `CREATE TABLE IF NOT EXISTS hq_alerts (
+         id           bigserial PRIMARY KEY,
+         key          text        NOT NULL,
+         severity     text        NOT NULL DEFAULT 'warning',
+         title        text        NOT NULL,
+         description  text,
+         status       text        NOT NULL DEFAULT 'open',
+         created_at   timestamptz NOT NULL DEFAULT now(),
+         resolved_at  timestamptz,
+         resolution   text
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_alerts_open ON hq_alerts (key) WHERE status = 'open'`,
+      `CREATE TABLE IF NOT EXISTS hq_push (
+         endpoint     text PRIMARY KEY,
+         keys         jsonb       NOT NULL,
+         admin_mobile text,
+         created_at   timestamptz NOT NULL DEFAULT now()
+       )`,
+      `INSERT INTO app_settings (key, value)
+       SELECT k, v FROM (VALUES
+         ('hq_messaging_limit', '250'),
+         ('hq_limit_reserve', '50'),
+         ('hq_ads_daily_paise', '10000'),
+         ('hq_fixed_monthly_paise', '0'),
+         ('hq_whatsapp_marketing_paise', '85'),
+         ('hq_whatsapp_utility_paise', '11'),
+         ('hq_digest_enabled', 'true')
+       ) AS s(k, v)
+       WHERE NOT EXISTS (SELECT 1 FROM app_settings a WHERE a.key = s.k)`,
+    ],
+  },
 ];
 
 (async () => {
