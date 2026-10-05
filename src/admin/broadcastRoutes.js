@@ -82,12 +82,21 @@ async function ensureSchema() {
   schemaReady = true;
 }
 
+/*
+ * "Lapsed" was one bucket, and it holds two entirely different people: a
+ * family whose free trial ran out without ever paying, and a family who DID
+ * pay and then stopped. The first has never valued it enough to spend; the
+ * second already did once. They deserve different messages, so they are now
+ * separate segments. `lapsed` stays, unchanged, as the sum of the two.
+ */
 const SEGMENTS = {
-  all:    'All active parents',
-  trial:  'On free trial (no payment)',
-  paid:   'Paying parents',
-  lapsed: 'Lapsed (no active plan)',
-  leads:  'Chatted, never enrolled',
+  all:          'All active parents',
+  trial:        'On free trial (no payment)',
+  paid:         'Paying parents',
+  lapsed:       'Lapsed (no active plan)',
+  trial_lapsed: 'Free trial ended, never paid',
+  paid_lapsed:  'Was paying, now lapsed',
+  leads:        'Chatted, never enrolled',
 };
 
 /** Recipients for a segment: {mobile_number, name, session_id}. */
@@ -116,9 +125,27 @@ async function recipients(segment) {
   } else if (segment === 'paid') {
     cond += ` AND EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s JOIN quizpe_plans pl ON pl.id=s.plan_id
                  WHERE s.parent_id=p.id AND s.is_active AND NOT pl.is_trial AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date)`;
-  } else if (segment === 'lapsed') {
+  } else if (segment === 'lapsed' || segment === 'trial_lapsed' || segment === 'paid_lapsed') {
+    // Nothing running today — true of all three.
     cond += ` AND NOT EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s
                  WHERE s.parent_id=p.id AND s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date)`;
+
+    // Then split on whether they ever paid. "Ever" is the right test, not
+    // "most recently": a family who paid once and later drifted through a
+    // trial is still someone who has spent money here.
+    const everPaid = `EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s3
+                                JOIN quizpe_plans pl3 ON pl3.id = s3.plan_id
+                               WHERE s3.parent_id = p.id AND NOT COALESCE(pl3.is_trial, false))`;
+    if (segment === 'trial_lapsed') {
+      // Trial ended and never paid. They must have HAD a trial — a parent who
+      // signed up and never started anything is a lead, not a lapsed trial.
+      cond += ` AND NOT ${everPaid}
+                AND EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s4
+                              JOIN quizpe_plans pl4 ON pl4.id = s4.plan_id
+                             WHERE s4.parent_id = p.id AND COALESCE(pl4.is_trial, false))`;
+    } else if (segment === 'paid_lapsed') {
+      cond += ` AND ${everPaid}`;
+    }
   }
   const { rows } = await db.query(`
     SELECT p.parent_mobile_number AS mobile_number,
