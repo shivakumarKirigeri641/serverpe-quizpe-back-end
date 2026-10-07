@@ -94,7 +94,25 @@ if (SEND_ALLOWLIST.size) {
   console.warn(`[wa] ⚠️  TEST MODE — outbound restricted to: ${[...SEND_ALLOWLIST].join(', ')}. All other numbers are BLOCKED.`);
 }
 
+/*
+ * WHATSAPP IS RETIRED (user, 2026-10-07: "there is no more WhatsApp now"). Meta
+ * disabled the account for good. Nothing leaves for WhatsApp — whatever .env
+ * says: every send is a no-op (as a blocked test-mode send always was) and no
+ * media is uploaded. Set back to false only if WhatsApp ever returns.
+ */
+const RETIRED = true;
+let retiredSkips = 0;
+function retired(what) {
+  if (!RETIRED) return false;
+  retiredSkips += 1;
+  if (retiredSkips === 1 || retiredSkips % 50 === 0) {
+    console.log(`[wa] WhatsApp is retired — not sending ${what} (${retiredSkips} skipped since start)`);
+  }
+  return true;
+}
+
 async function send(sessionId, to, payload, bodyForLog, type) {
+  if (retired(type || 'message')) return null;   // nothing goes to Meta; treated as a no-op
   // Hard block: in test mode, only allowlisted numbers may receive anything.
   if (SEND_ALLOWLIST.size && !SEND_ALLOWLIST.has(toLocalNumber(to))) {
     console.warn(`[wa] BLOCKED send to ${toLocalNumber(to)} — not in WA_SEND_ALLOWLIST (test mode)`);
@@ -244,6 +262,7 @@ const path = require('path');
  */
 async function uploadMedia(filePath, mimeType = 'application/pdf') {
   if (DRY_RUN) return 'media.DRYRUN' + Date.now();
+  if (retired('media upload')) return 'media.RETIRED';   // the send that follows is a no-op too
   if (!fs.existsSync(filePath)) throw new Error(`media file not found: ${filePath}`);
 
   const form = new FormData();
