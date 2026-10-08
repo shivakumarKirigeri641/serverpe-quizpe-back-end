@@ -641,6 +641,53 @@ const STEPS = [
        WHERE NOT EXISTS (SELECT 1 FROM app_settings a WHERE a.key = s.k)`,
     ],
   },
+  {
+    name: 'parent_web',
+    // QUIZPE ON THE WEB (user, 2026-10-08: WhatsApp is gone, "start QuizPe the
+    // same way" as GaadiPe). Parents sign in at quizpe.in/app with their mobile
+    // and an SMS code; reminders reach them by phone push and email.
+    //   parent_web_codes     the sign-in codes (hashed, single use)
+    //   parent_web_sessions  one row per sign-in: device, IP, terms accepted
+    //   parent_push          phone push subscriptions, per mobile
+    //   parents.email        optional, for reminders and reports by email
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='parent_web_sessions'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS parent_web_codes (
+         id            bigserial PRIMARY KEY,
+         mobile_number varchar(15) NOT NULL,
+         code_hash     varchar(64) NOT NULL,
+         expires_at    timestamptz NOT NULL,
+         attempts      smallint    NOT NULL DEFAULT 0,
+         consumed_at   timestamptz,
+         request_ip    varchar(64),
+         provider_ref  text,
+         created_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_parent_web_codes_live
+         ON parent_web_codes (mobile_number, created_at DESC) WHERE consumed_at IS NULL`,
+      `CREATE TABLE IF NOT EXISTS parent_web_sessions (
+         id              bigserial PRIMARY KEY,
+         token_hash      varchar(64) NOT NULL UNIQUE,
+         mobile_number   varchar(15) NOT NULL,
+         ip              varchar(64),
+         user_agent      text,
+         terms_accepted_at timestamptz NOT NULL,
+         created_at      timestamptz NOT NULL DEFAULT now(),
+         last_seen_at    timestamptz NOT NULL DEFAULT now(),
+         expires_at      timestamptz NOT NULL,
+         ended_at        timestamptz
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_parent_web_sessions_mobile ON parent_web_sessions (mobile_number, created_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS parent_push (
+         endpoint      text PRIMARY KEY,
+         keys          jsonb       NOT NULL,
+         mobile_number varchar(15) NOT NULL,
+         created_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_parent_push_mobile ON parent_push (mobile_number)`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS email text`,
+    ],
+  },
 ];
 
 (async () => {

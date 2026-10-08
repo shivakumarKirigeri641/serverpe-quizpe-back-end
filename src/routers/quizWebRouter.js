@@ -23,13 +23,11 @@ const { claimOrVerify } = require('./deviceLock');
 const router = express.Router();
 const TTL_HOURS = 14;                        // a day's quiz link
 const LETTERS = ['A', 'B', 'C', 'D'];
-const SPENT = 'This quiz has already been submitted. Your score and report are in WhatsApp.';
+const SPENT = 'This quiz has already been submitted. The score and report are in your QuizPe account.';
 const EXPIRED = 'This quiz link is no longer valid.';
-/** Every rejection carries a code so the page can show the right screen. */
-const waUrlOrNull = () => {
-  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-  return n ? `https://wa.me/${n}` : null;
-};
+/** Every rejection carries a code so the page can show the right screen.
+    The way back is quizpe.in/app now that WhatsApp is retired (2026-10-08). */
+const waUrlOrNull = () => require('../web/notify').APP_URL();
 const reject = (res, status, code, error) =>
   res.status(status).json({ success: false, code, error, whatsapp_url: waUrlOrNull() });
 
@@ -226,8 +224,7 @@ router.post('/api/finish', async (req, res) => {
 });
 
 function waLink() {
-  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-  return n ? `https://wa.me/${n}` : null;
+  return waUrlOrNull();
 }
 
 module.exports = router;

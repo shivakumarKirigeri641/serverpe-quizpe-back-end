@@ -176,8 +176,8 @@ router.post('/api/submit', async (req, res) => {
       console.error('[feedbackweb] thank-you message failed:', e.message);
     }
 
-    const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-    res.json({ success: true, rating: stars, whatsapp_url: n ? `https://wa.me/${n}` : null });
+    // WhatsApp is retired (2026-10-08): the page hands back to quizpe.in/app.
+    res.json({ success: true, rating: stars, whatsapp_url: require('../web/notify').APP_URL() });
   } catch (e) {
     console.error('[feedbackweb] submit failed:', e.message);
     // never leave a link spent on a feedback we failed to store

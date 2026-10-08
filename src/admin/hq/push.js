@@ -73,4 +73,4 @@ async function count() {
   return rows[0].n;
 }
 
-module.exports = { publicKey, subscribe, unsubscribe, send, count, available: () => Boolean(webpush) };
+module.exports = { publicKey, subscribe, unsubscribe, send, count, keys, available: () => Boolean(webpush) };

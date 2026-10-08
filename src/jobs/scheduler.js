@@ -289,10 +289,27 @@ async function runLifecycleJob(kind) {
 
   const lifecycle = require('../whatsapp/lifecycle');
   const templateName = lifecycle.TEMPLATES[kind];
-  if (!(await lifecycle.approved(templateName))) return;   // not cleared by Meta yet
+  const approved = await lifecycle.approved(templateName);   // false until cleared by Meta
 
   const due = await lifecycleDue(kind);
   for (const row of due) {
+    // Phone push / email first (WhatsApp is retired, 2026-10-08).
+    let web = false;
+    try { web = await reachableOnWeb(row.parent_mobile_number); } catch { web = false; }
+    if (web) {
+      if (!(await claimSend(row, kind, 'web'))) continue;
+      const days = Number(row.days_left);
+      const when = days <= 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+      const msg = kind === 'expiring'
+        ? { title: `Your QuizPe plan ends ${when}`, body: `Renew ${row.plan_name} to keep ${row.student_name}'s daily quizzes going.` }
+        : { title: 'Your QuizPe plan has ended', body: `Renew to continue ${row.student_name}'s daily quizzes — the progress so far is kept.` };
+      try {
+        const r = await require('../web/notify').toMobile(row.parent_mobile_number, { ...msg, tag: `plan-${kind}` });
+        await finishSend(row, kind, null, r.reached ? null : 'not reached (push/email)');
+      } catch (e) { await finishSend(row, kind, null, e.message); }
+      continue;
+    }
+    if (!approved) continue;
     if (!(await claimSend(row, kind, templateName))) continue;   // already sent today
     try {
       const res = kind === 'expiring'
@@ -459,6 +476,10 @@ async function runQuizNudge(kind, atHHMM, variant) {
       try { await Q.scheduleDailyQuizzes(row.student_id); }
       catch (e) { console.error(`[scheduler] tracker setup failed for student ${row.student_id}: ${e.message}`); }
     }
+    // WhatsApp is retired (2026-10-08): the nudge goes as a phone push / email
+    // to a parent who allowed them on quizpe.in/app. Claimed first, like every
+    // send here, so a family hears it once a day whatever else runs.
+    if (await webNudge(row, kind, variant, close)) { sent++; continue; }
     if (!row.session_id) continue;                     // no session → unreachable
     if (!row.in_window && !tmpl) continue;             // out of window, no template → skip
     if (!(await claimSend(row, kind, row.in_window ? null : tmpl.template_name))) continue;
@@ -481,6 +502,37 @@ async function runQuizNudge(kind, atHHMM, variant) {
     await new Promise((r) => setTimeout(r, 250));      // stay under Meta's rate limit
   }
   if (sent) console.log(`[scheduler] ${kind}: ${sent} sent`);
+}
+
+/**
+ * The same nudge as a phone push / email, for a parent who can be reached that
+ * way (allowed push, or gave an email, on quizpe.in/app). Returns true when it
+ * was claimed and sent, so the WhatsApp path below is skipped for the family.
+ */
+const WEB_NUDGE = {
+  morning: (n, close) => ({ title: `☀️ ${n}'s quiz is ready`, body: `Take it any time before ${close} — about 5 minutes.` }),
+  evening: (n, close) => ({ title: `⏰ ${n} hasn't taken today's quiz`, body: `It's open until ${close} — just 5 minutes.` }),
+  night:   (n, close) => ({ title: '🌙 Last chance for today', body: `${n}'s quiz closes at ${close}. There's still time for a quick round.` }),
+};
+async function reachableOnWeb(mobile) {
+  const { rows } = await db.query(
+    `SELECT EXISTS (SELECT 1 FROM parent_push WHERE mobile_number = $1)
+         OR EXISTS (SELECT 1 FROM parents WHERE parent_mobile_number = $1 AND email IS NOT NULL) AS ok`, [mobile]);
+  return rows[0].ok;
+}
+async function webNudge(row, kind, variant, close) {
+  try {
+    if (!(await reachableOnWeb(row.parent_mobile_number))) return false;
+    if (!(await claimSend(row, kind, 'web'))) return true;     // already nudged today
+    const msg = (WEB_NUDGE[variant] || WEB_NUDGE.morning)(row.student_name, close);
+    const r = await require('../web/notify').toMobile(row.parent_mobile_number, { ...msg, tag: `quiz-${variant}` });
+    await finishSend(row, kind, null, r.reached ? null : 'not reached (push/email)');
+    return true;
+  } catch (e) {
+    // e.g. the parent_web tables not migrated yet — fall back to the old path
+    console.error(`[scheduler] web ${kind} failed for ${row.parent_mobile_number}: ${e.message}`);
+    return false;
+  }
 }
 
 /** '23:45' -> '11:45 PM' for weekend-nudge copy (kept local; messages.fmtTime needs no db). */

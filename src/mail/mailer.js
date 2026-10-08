@@ -70,6 +70,27 @@ async function sendAdminMail({ subject, html, text }) {
   }
 }
 
+/**
+ * A message to ONE parent, at the email they gave on quizpe.in/app — quiz
+ * reminders and plan notices, never marketing (user, 2026-10-08: WhatsApp is
+ * gone). Same never-throw contract as sendAdminMail.
+ */
+async function sendParentMail({ to, subject, html, text }) {
+  if (!HOST || !SEND_USER || !SEND_PASS) return { sent: false, reason: 'not_configured' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(to || ''))) return { sent: false, reason: 'no_address' };
+  try {
+    const info = await getTransport().sendMail({
+      from: `"${FROM_NAME}" <${SEND_USER}>`,
+      to, subject, html,
+      text: text || String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+    });
+    return { sent: true, messageId: info.messageId };
+  } catch (e) {
+    console.error('[mail] parent send failed:', e.message);
+    return { sent: false, reason: e.message };
+  }
+}
+
 /** Verify SMTP credentials without sending anything. */
 async function verify() {
   if (!isConfigured()) return { ok: false, reason: 'not_configured' };
@@ -77,4 +98,4 @@ async function verify() {
   catch (e) { return { ok: false, reason: e.message }; }
 }
 
-module.exports = { sendAdminMail, verify, isConfigured, ADMIN_TO, SEND_USER };
+module.exports = { sendAdminMail, sendParentMail, verify, isConfigured, ADMIN_TO, SEND_USER };

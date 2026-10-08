@@ -82,9 +82,9 @@
     <div class="tick">🎉</div>
     <h2>Payment successful!</h2>
     <p id="doneMsg"></p>
-    <p><b>Your invoice and confirmation are already in your WhatsApp chat.</b></p>
-    <p style="color:#667781;font-size:13px;">Tap the button below, or just close this window to go back to the conversation.</p>
-    <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
+    <p><b>Your plan and GST invoice are in your QuizPe account.</b></p>
+    <p style="color:#667781;font-size:13px;">Tap the button below to go back to QuizPe.</p>
+    <a class="wa-btn" id="waBtn" href="#">🏠 Back to QuizPe</a>
   </div>
 
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
@@ -290,7 +290,7 @@
               const v = await (await fetch("/pay/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ token, students, state,
                   razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature }) })).json();
-              if (v.success) showDone(v.already_paid ? "This plan is already active. 🎉" : "Payment successful! Your invoice is on its way to WhatsApp. 🎉");
+              if (v.success) showDone(v.already_paid ? "This plan is already active. 🎉" : "Payment successful! Your plan is active. 🎉");
               else { $("wrap").style.display = "block"; $("err").textContent = v.error || "We couldn't confirm the payment. If money was deducted, contact support."; reset(); }
             } catch { $("wrap").style.display = "block"; $("err").textContent = "Payment taken but confirmation failed. If money was deducted, contact support."; reset(); }
           },
@@ -304,26 +304,21 @@
     function reset(){ $("payBtn").disabled = false; recompute(); }
     function showDone(msg){
       $("doneMsg").textContent = msg;
-      const wa = "https://wa.me/918618592876";
-      $("waBtn").href = wa;
+      // Back to the parent's page, quizpe.in/app (WhatsApp is retired, 2026-10-08).
+      const back = /quizpe\.in$/.test(location.hostname) ? "https://quizpe.in/app" : "http://localhost:5174/app";
+      $("waBtn").href = back;
       $("wrap").style.display = "none"; $("done").style.display = "block";
 
-      // Auto-return to the WhatsApp chat after a short countdown. Try closing the
-      // in-app browser first — that drops straight back into the conversation —
-      // then fall back to the wa.me deep link. The invoice is already delivered,
-      // so this step only navigates; nothing is lost if the user leaves sooner.
-      let n = 3;
+      // Auto-return after a short countdown. The plan is already active, so
+      // this step only navigates; nothing is lost if the user leaves sooner.
+      let n = 5;
       const note = document.createElement("p");
       note.style.cssText = "font-size:12px;color:#667781;margin-top:10px;";
       $("done").appendChild(note);
       const t = setInterval(() => {
         n -= 1;
-        note.textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : "Opening WhatsApp…";
-        if (n <= 0) {
-          clearInterval(t);
-          try { window.close(); } catch (e) {}
-          location.href = wa;      // fallback if the window did not close
-        }
+        note.textContent = n > 0 ? `Back to QuizPe in ${n}…` : "Opening QuizPe…";
+        if (n <= 0) { clearInterval(t); location.href = back; }
       }, 1000);
     }
 

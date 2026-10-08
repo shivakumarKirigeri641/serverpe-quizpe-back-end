@@ -41,10 +41,9 @@ async function createSignupLink(sessionId, mobile, parentName) {
  * Deep link back into the WhatsApp chat with our business number.
  * wa.me works on mobile and desktop; the prefilled text is optional.
  */
-function waDeepLink(prefill) {
-  const num = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-  if (!num) return null;
-  return `https://wa.me/${num}${prefill ? `?text=${encodeURIComponent(prefill)}` : ''}`;
+function waDeepLink() {
+  // WhatsApp is retired (2026-10-08): after signing up, back to quizpe.in/app.
+  return require('../web/notify').APP_URL();
 }
 
 async function loadToken(token) {
@@ -87,10 +86,19 @@ router.get('/api/context', async (req, res) => {
         { medium_code: m.medium_code, label: m.native_name || m.medium_name });
     }
 
+    // The email the parent gave on quizpe.in/app (kept on the session), or the
+    // one already on file — prefilled, and required (user, 2026-10-08).
+    const known = (await db.query(
+      `SELECT COALESCE(
+         (SELECT NULLIF(context->>'email', '') FROM whatsapp_sessions WHERE id = $1),
+         (SELECT email FROM parents WHERE parent_mobile_number = $2)) AS email`,
+      [link.session_id, link.mobile_number])).rows[0];
+
     res.json({
       success: true,
       parentName: link.parent_name,
       mobile: link.mobile_number,
+      email: known?.email || '',
       // content-driven: a parent can only pick something we can deliver
       availability: avail.availability,
       boards: avail.boards,
@@ -110,7 +118,7 @@ router.get('/api/context', async (req, res) => {
 /* ------------------------------------------------------------------- submit */
 
 router.post('/api/submit', async (req, res) => {
-  const { token, student_name, school_name, board, medium, grade, state, accept_terms } = req.body || {};
+  const { token, student_name, school_name, board, medium, grade, state, accept_terms, email } = req.body || {};
   try {
     const link = await loadToken(token);
     if (!link) return res.status(410).json({ success: false, error: 'This link has expired or was already used.' });
@@ -118,6 +126,12 @@ router.post('/api/submit', async (req, res) => {
 
     const name = String(student_name || '').trim().slice(0, 60);
     if (name.length < 2) return res.status(400).json({ success: false, error: "Please enter your child's name." });
+    // Email is required: quiz reminders, reports and plan notices go there
+    // now that WhatsApp is retired (user, 2026-10-08).
+    const mail = String(email || '').trim().toLowerCase().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid email address — reminders and reports are sent there.' });
+    }
 
     // validate every choice against the DB rather than trusting the form
     const checks = await Promise.all([
@@ -146,15 +160,15 @@ router.post('/api/submit', async (req, res) => {
     try {
       await c.query('BEGIN');
       const parentId = (await c.query(
-        `INSERT INTO parents (parent_name, parent_mobile_number, state_code)
-         VALUES ($1,$2,$3)
+        `INSERT INTO parents (parent_name, parent_mobile_number, state_code, email)
+         VALUES ($1,$2,$3,$4)
          ON CONFLICT (parent_mobile_number) DO UPDATE
            -- starting a trial (re)activates the family so the scheduler resumes;
            -- this is also what lets the deactivated demo number come alive again
-           SET state_code=EXCLUDED.state_code, is_active=true, service_paused=false,
+           SET state_code=EXCLUDED.state_code, email=EXCLUDED.email, is_active=true, service_paused=false,
                reminders_enabled=true, paused_at=NULL, modified_at=now()
          RETURNING id`,
-        [link.parent_name || 'Parent', link.mobile_number, state])).rows[0].id;
+        [link.parent_name || 'Parent', link.mobile_number, state, mail])).rows[0].id;
 
       await c.query(
         `INSERT INTO students (parent_id, board_id, grade_id, medium_id, student_name, school_name)

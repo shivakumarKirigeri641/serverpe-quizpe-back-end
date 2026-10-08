@@ -13,6 +13,11 @@
  *   • the Grievance Officer appointment under IT Rules 2021
  *   • refund terms under the Consumer Protection (E-Commerce) Rules 2020
  *
+ * ⚠️ SUPERSEDED IN PART (2026-10-08): WhatsApp is retired, and the sections
+ * describing it were rewritten for quizpe.in/app by scripts/legal-web-v2.js.
+ * After any --replace run here, run `node scripts/legal-web-v2.js --yes`
+ * again, or the old WhatsApp wording comes back.
+ *
  * Placeholders like {{company_name}} are substituted from business_details at
  * read time, so changing the business row updates every policy at once and the
  * text can never contradict the invoice.

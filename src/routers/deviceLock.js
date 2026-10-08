@@ -84,8 +84,7 @@ async function claimOrVerify(table, row, req, res) {
     ok: false,
     code: 'WRONG_DEVICE',
     error: 'This quiz was already opened on another device. For your child\'s score to mean anything, '
-         + 'a quiz can only be answered on the phone it was sent to. If this is your quiz, open it from '
-         + 'the button in your own WhatsApp chat.',
+         + 'a quiz can only be answered on the device it was started on. Please finish it there.',
   };
 }
 

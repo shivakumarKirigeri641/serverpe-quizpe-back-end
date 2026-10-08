@@ -33,6 +33,16 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
                `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · *${rep.score.grade}* — ${rep.score.label}\n` +
                `_Includes every question, the correct answer and why._`,
     });
+    // WhatsApp is retired (2026-10-08): the report is in the parent's account
+    // on quizpe.in/app — tell their phone it is ready. Push only; never throws.
+    if (mobile) {
+      const m10 = String(mobile).replace(/\D/g, '').slice(-10);
+      await require('../web/notify').toMobile(m10, {
+        title: `📄 ${rep.head.student_name}'s report is ready`,
+        body: `${rep.head.subject_name}: ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) — every question explained.`,
+        tag: `report-${trackerId}`, email: false,
+      });
+    }
   } catch (e) {
     console.error(`[jobs] report for tracker ${trackerId} failed:`, e.message);
     reportError = e;

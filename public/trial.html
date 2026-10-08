@@ -81,10 +81,19 @@
       <div class="perk"><span>✓</span><span>A fresh <b>10-question quiz</b> every day</span></div>
       <div class="perk"><span>✓</span><span>Answers &amp; explanations <b>after</b> each quiz</span></div>
       <div class="perk"><span>✓</span><span>Daily summary &amp; weekly progress PDFs</span></div>
-      <div class="perk"><span>✓</span><span>Delivered on WhatsApp at <b>8:00 PM</b> daily</span></div>
+      <div class="perk"><span>✓</span><span>Open <b>all day</b> in your QuizPe account at quizpe.in/app</span></div>
       <div class="disclaimer">
         <b>No payment needed.</b> We never ask for card or UPI details and the trial ends on its own.
         <br />Please read the <a id="termsLink" href="#" target="_blank" rel="noopener">Terms &amp; Disclaimer</a> before continuing.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Your details</h2>
+      <div class="field">
+        <label for="email">Your email *</label>
+        <input id="email" type="email" maxlength="120" placeholder="you@example.com" autocomplete="email" />
+        <small class="hint">Quiz reminders, reports and plan notices are sent here.</small>
       </div>
     </div>
 
@@ -138,8 +147,8 @@
     <h2>Trial activated!</h2>
     <p class="hi" id="doneStudent"></p>
     <p id="doneDates"></p>
-    <p>We've sent a confirmation on WhatsApp.</p>
-    <a class="wa-btn" id="waBtn" href="#">💬 Back to WhatsApp</a>
+    <p>Today's quiz is ready in your QuizPe account.</p>
+    <a class="wa-btn" id="waBtn" href="#">🏠 Back to QuizPe</a>
     <p class="redirect" id="redirectNote">Taking you back in 3…</p>
   </div>
 
@@ -154,7 +163,8 @@
   };
 
   const validate = () => {
-    const ok = $("student_name").value.trim().length >= 2 &&
+    const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test($("email").value.trim()) &&
+      $("student_name").value.trim().length >= 2 &&
       $("board").value && $("medium").value && $("grade").value && $("state").value && $("accept").checked;
     $("submitBtn").disabled = !ok;
   };
@@ -168,6 +178,7 @@
       ctx = data;
 
       $("sub").textContent = data.parentName ? `Hi ${data.parentName} · ${data.mobile}` : data.mobile;
+      if (data.email) $("email").value = data.email;
       $("planName").textContent = `${data.plan.plan_name} — ${data.plan.duration}-day free trial`;
       const url = data.policy?.url || "#";
       $("termsLink").href = url; $("termsLink2").href = url;
@@ -207,7 +218,7 @@
     validate();
   });
 
-  ["student_name", "medium", "grade", "state", "accept"].forEach(id =>
+  ["email", "student_name", "medium", "grade", "state", "accept"].forEach(id =>
     $(id).addEventListener(id === "accept" ? "change" : "input", validate));
   $("medium").addEventListener("change", validate);
   $("grade").addEventListener("change", validate);
@@ -223,6 +234,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           token,
+          email: $("email").value.trim(),
           student_name: $("student_name").value.trim(),
           school_name: $("school_name").value.trim(),
           board: $("board").value,
@@ -242,12 +254,12 @@
       const d = new Date(data.end_date).toLocaleDateString("en-IN",
         { day: "2-digit", month: "short", year: "numeric" });
       $("doneStudent").textContent = `${data.student_name} is all set!`;
-      $("doneDates").textContent = `Daily quiz at 8:00 PM · valid till ${d}`;
+      $("doneDates").textContent = `A fresh quiz every day · valid till ${d}`;
       $("wrap").style.display = "none";
       document.querySelector(".head p").textContent = "Activated";
       $("done").style.display = "block";
 
-      // hand the parent straight back to the WhatsApp chat
+      // hand the parent straight back to quizpe.in/app (WhatsApp is retired)
       const waUrl = data.whatsapp_url;
       if (waUrl) {
         $("waBtn").href = waUrl;
@@ -256,7 +268,7 @@
           n -= 1;
           if (n <= 0) {
             clearInterval(tick);
-            $("redirectNote").textContent = "Opening WhatsApp…";
+            $("redirectNote").textContent = "Opening QuizPe…";
             location.href = waUrl;
           } else {
             $("redirectNote").textContent = `Taking you back in ${n}…`;

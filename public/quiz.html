@@ -127,8 +127,8 @@
       <div class="big">🎉</div>
       <h2>Quiz complete!</h2>
       <div class="score" id="score"></div>
-      <p id="doneMsg">Your report is on its way to WhatsApp.</p>
-      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <p id="doneMsg">The full report will be in your QuizPe account in a minute.</p>
+      <a class="wa" id="waBtn" href="#">🏠 Back to QuizPe</a>
       <p id="redir" style="font-size:12px;"></p>
     </div>
 
@@ -139,7 +139,7 @@
       <h2 id="stTitle">Something went wrong</h2>
       <p id="stBody"></p>
       <div class="note" id="stNote" style="display:none"></div>
-      <a class="wa" id="stBtn" href="#" style="display:none">💬 Back to WhatsApp</a>
+      <a class="wa" id="stBtn" href="#" style="display:none">🏠 Back to QuizPe</a>
     </div>
   </div>
 
@@ -164,11 +164,11 @@
   };
   const STATES = {
     SUBMITTED: { ico: '✅', title: 'Already submitted',
-                 note: 'Your score and the full report — with every question, the correct answer and why — are waiting in WhatsApp.' },
+                 note: 'Your score and the full report — with every question, the correct answer and why — are in your QuizPe account.' },
     EXPIRED:   { ico: '⏳', title: 'This quiz link has expired',
-                 note: "Quiz links close at the end of the day. Your next quiz arrives on WhatsApp at your usual quiz time." },
+                 note: "Quiz links close at the end of the day. Open QuizPe tomorrow for the next quiz." },
     INVALID:   { ico: '🔗', title: 'Link not recognised',
-                 note: 'Please open the quiz from the button in your WhatsApp message.' },
+                 note: 'Please start the quiz from your QuizPe account at quizpe.in/app.' },
     NETWORK:   { ico: '📶', title: 'Connection problem', note: null },
   };
 
@@ -358,7 +358,7 @@
     if (!r.success) {
       if (!firstTry) {
         $('score').textContent = '';
-        $('doneMsg').textContent = 'Already submitted — your score and report are in WhatsApp.';
+        $('doneMsg').textContent = 'Already submitted — your score and report are in your QuizPe account.';
         $('waBtn').style.display = 'none'; $('redir').textContent = '';
         show('done');
         return;
@@ -372,9 +372,9 @@
     show('done');
     if (waUrl) {
       $('waBtn').href = waUrl;
-      let n = 3;
+      let n = 5;
       const t = setInterval(() => {
-        n--; $('redir').textContent = n > 0 ? `Returning to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+        n--; $('redir').textContent = n > 0 ? `Back to QuizPe in ${n}…` : 'Opening QuizPe…';
         if (n <= 0) { clearInterval(t); location.href = waUrl; }
       }, 1000);
     } else { $('waBtn').style.display = 'none'; }

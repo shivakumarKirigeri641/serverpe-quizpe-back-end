@@ -67,9 +67,17 @@ async function deliver(mobile, code) {
     console.warn(`[admin-otp] FIXED code active — no SMS sent for ${mobile}. Clear ADMIN_OTP_FIXED before scaling.`);
     return null;
   }
+  return smsCode(mobile, code, TTL_MIN);
+}
+
+/**
+ * The SMS itself, on the approved DLT template — shared with the parents'
+ * sign-in on quizpe.in/app (src/web/auth.js), which has its own rules.
+ */
+async function smsCode(mobile, code, validMin) {
   if (!API_KEY) {
-    if (IS_PROD) throw new Error('FAST2SMSAPIKEY is not set — cannot send admin OTP.');
-    console.warn(`[admin-otp] no FAST2SMS_API_KEY — dev fallback, code for ${mobile} is ${code}`);
+    if (IS_PROD) throw new Error('FAST2SMSAPIKEY is not set — cannot send a sign-in code.');
+    console.warn(`[sms-code] no FAST2SMS_API_KEY — dev fallback, code for ${mobile} is ${code}`);
     return null;
   }
 
@@ -80,7 +88,7 @@ async function deliver(mobile, code) {
   url.searchParams.set('route', ROUTE);
   url.searchParams.set('sender_id', SENDER_ID);
   url.searchParams.set('message', TEMPLATE);
-  url.searchParams.set('variables_values', `${code}|${TTL_MIN}`);
+  url.searchParams.set('variables_values', `${code}|${validMin}`);
   url.searchParams.set('numbers', mobile);
   url.searchParams.set('flash', '0');
 
@@ -183,4 +191,4 @@ async function verify(mobile, code) {
   }
 }
 
-module.exports = { request, verify, TTL_MIN, generate };
+module.exports = { request, verify, TTL_MIN, generate, smsCode };

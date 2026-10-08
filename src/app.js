@@ -110,6 +110,15 @@ app.use('/public', limiter(60 * 1000, 120, 'Too many requests. Please slow down.
 // everything under the admin API, once signed in
 app.use('/admin/api', limiter(60 * 1000, 300, 'Too many requests. Please slow down.'));
 
+// Parents' sign-in codes cost an SMS each: 6 per 15 min and 20 per hour from
+// one IP (the body is not parsed yet here, so the IP is the key), plus one
+// code per number every 30 s in src/web/auth.js — nobody can burn credits or
+// flood a stranger's phone.
+app.use('/app/api/code', limiter(15 * 60 * 1000, 6, 'Too many codes asked for. Please wait 15 minutes and try again.'));
+app.use('/app/api/code', limiter(60 * 60 * 1000, 20, 'Too many codes asked for from here. Please try again later.'));
+app.use('/app/api/verify', limiter(15 * 60 * 1000, 15, 'Too many tries. Please wait 15 minutes and try again.'));
+app.use('/app/api', limiter(60 * 1000, 120, 'Too many requests. Please slow down.'));
+
 /* ---------------------------------------------------------------------------
  * CORS.
  *
@@ -143,6 +152,9 @@ const guard = (allowed, credentials) => cors({
 
 app.use('/admin', guard(ADMIN_ORIGINS, true));
 app.use(['/public', '/legal'], guard([...SITE_ORIGINS, ...ADMIN_ORIGINS], false));
+// The parents' page on quizpe.in/app (2026-10-08) — signed in by a bearer
+// token, so no cookies cross origins and credentials stay off.
+app.use('/app/api', guard(SITE_ORIGINS, false));
 
 // A blocked origin is a refusal, not a server fault. Without this it surfaces
 // as a 500, which reads like the API is broken and sends you debugging the
@@ -223,6 +235,10 @@ app.use('/admin/api', require('./security/tunnel').tunnel({ exempt: isFileRoute 
 // Policies — public so a parent can read them before signing up, and so the
 // WhatsApp consent links resolve for someone with no account.
 app.use('/legal', legalRouter);
+
+// The parents' page, quizpe.in/app — sign in by SMS code; replaces the
+// WhatsApp menu (2026-10-08).
+app.use('/app/api', require('./routers/appRouter'));
 
 // Aggregate-only figures for the parent-facing website. Never per-person data.
 app.use('/public', publicRouter);

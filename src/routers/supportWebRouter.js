@@ -150,8 +150,8 @@ _Type *menu* for other options._`);
       console.error('[support] acknowledgement failed:', e.message);
     }
 
-    const num = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-    res.json({ success: true, ticketNo, whatsapp_url: num ? `https://wa.me/${num}` : null });
+    // WhatsApp is retired (2026-10-08): the page hands back to quizpe.in/app.
+    res.json({ success: true, ticketNo, whatsapp_url: require('../web/notify').APP_URL() });
   } catch (e) {
     console.error('[support] submit failed:', e.message);
     res.status(500).json({ success: false, error: 'Could not send your request. Please try again.' });

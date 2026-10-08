@@ -1127,10 +1127,9 @@ router.post('/api/instant-verify', async (req, res) => {
   }
 });
 
-/** wa.me link used to hand the parent back to the chat after paying. */
+/** Where the parent goes after paying — quizpe.in/app now that WhatsApp is retired (2026-10-08). */
 function waHandoffUrl() {
-  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
-  return n ? `https://wa.me/${n}` : null;
+  return require('../web/notify').APP_URL();
 }
 
 /** Kept for the admin/one-off path: a Razorpay Payment Link for one Instant Quiz. */

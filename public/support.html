@@ -66,7 +66,7 @@
   <div class="wrap">
     <div class="card" id="form" style="display:none">
       <h2>How can we help?</h2>
-      <p class="sub">Tell us what's wrong and we'll reply on WhatsApp within 24&ndash;48 hours.<br />
+      <p class="sub">Tell us what's wrong and we'll get back to you within 24&ndash;48 hours.<br />
         Support hours are 9 AM &ndash; 6 PM, every day.</p>
 
       <div class="label">Your name</div>
@@ -74,7 +74,7 @@
 
       <div class="label">Registered mobile</div>
       <input id="mobile" readonly />
-      <div class="hint">We'll reply to this WhatsApp number. It can't be changed here.</div>
+      <div class="hint">We'll get back to you on this mobile number. It can't be changed here.</div>
 
       <div class="label">What is it about? <span class="req">*</span></div>
       <div class="types" id="types"></div>
@@ -94,9 +94,9 @@
       <div class="big">✅</div>
       <h2>Request received</h2>
       <div class="ticket" id="ticket"></div>
-      <p>We'll reply on WhatsApp within 24&ndash;48 hours, during our support hours of
+      <p>We'll get back to you within 24&ndash;48 hours, during our support hours of
         9 AM &ndash; 6 PM.<br />Please keep this ticket number handy.</p>
-      <a class="wa" id="waBtn" href="#">💬 Back to WhatsApp</a>
+      <a class="wa" id="waBtn" href="#">🏠 Back to QuizPe</a>
       <p id="redir" style="font-size:12px;"></p>
     </div>
 
@@ -151,7 +151,7 @@
         $('waBtn').href = r.whatsapp_url;
         let n = 5;
         const t = setInterval(() => {
-          n--; $('redir').textContent = n > 0 ? `Back to WhatsApp in ${n}…` : 'Opening WhatsApp…';
+          n--; $('redir').textContent = n > 0 ? `Back to QuizPe in ${n}…` : 'Opening QuizPe…';
           if (n <= 0) { clearInterval(t); location.href = r.whatsapp_url; }
         }, 1000);
       } else { $('waBtn').style.display = 'none'; }
