@@ -261,9 +261,14 @@ router.post('/checkout', wrap(async (req, res) => {
   if (!plan) return res.status(400).json({ success: false, error: 'That plan is not available.' });
   const ctx = await getUserContext(mobile);
   const sessionId = await ensureSession(mobile, ctx.parentId || null);
-  const { createCheckoutLink } = require('./paymentRouter');
+  const { createCheckoutLink, checkoutTtlLabel } = require('./paymentRouter');
   const { url } = await createCheckoutLink(sessionId, mobile, plan.plan_code);
-  res.json({ success: true, url });
+  // Two ways to pay (2026-10-02, kept on the web 2026-10-08): the parent pays
+  // now and comes back here (&from=app), or sends the link to whoever pays —
+  // it works on the token alone, for CHECKOUT_TTL_MIN, and switches the plan
+  // on for THIS parent's number.
+  const forSomeone = req.body?.someone_else === true;
+  res.json({ success: true, url: forSomeone ? url : `${url}&from=app`, valid_for: checkoutTtlLabel(), someone_else: forSomeone });
 }));
 
 /* ---------------------------------------------------------- phone push */

@@ -82,14 +82,19 @@
     <div class="tick">🎉</div>
     <h2>Payment successful!</h2>
     <p id="doneMsg"></p>
-    <p><b>Your plan and GST invoice are in your QuizPe account.</b></p>
-    <p style="color:#667781;font-size:13px;">Tap the button below to go back to QuizPe.</p>
+    <p id="doneWhere"><b>Your plan and GST invoice are in your QuizPe account.</b></p>
+    <p id="doneHint" style="color:#667781;font-size:13px;">Tap the button below to go back to QuizPe.</p>
     <a class="wa-btn" id="waBtn" href="#">🏠 Back to QuizPe</a>
   </div>
 
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <script>
     const token = new URLSearchParams(location.search).get("token");
+    // Opened by the parent from quizpe.in/app (&from=app), or forwarded to
+    // whoever is paying for them (2026-10-02) — the payer is not signed in and
+    // must not be sent to a sign-in that is not theirs.
+    const fromApp = new URLSearchParams(location.search).get("from") === "app";
+    const maskMobile = (m) => { const d = String(m || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? `+91 ${d.slice(0, 5)} ${d.slice(5)}` : d; };
     const $ = (id) => document.getElementById(id);
     let ctx = null;
     const inr = (n) => "₹" + Number(n).toFixed(2);
@@ -144,7 +149,7 @@
       const r = await (await fetch(`/pay/api/context?token=${encodeURIComponent(token)}`)).json();
       if (!r.success) { $("sub").textContent = r.error; return; }
       ctx = r;
-      $("sub").textContent = `${r.business.product_name} · ${r.mobile}`;
+      $("sub").textContent = `${r.business.product_name} plan for ${maskMobile(r.mobile)}`;
       $("terms").href = r.policy?.url || "#";
       $("planName").textContent = `${r.plan.name} — ${r.plan.duration} days`;
       $("studentsHead").textContent = r.plan.student_count > 1 ? `Details for ${r.plan.student_count} children` : "Student details";
@@ -308,6 +313,16 @@
       const back = /quizpe\.in$/.test(location.hostname) ? "https://quizpe.in/app" : "http://localhost:5174/app";
       $("waBtn").href = back;
       $("wrap").style.display = "none"; $("done").style.display = "block";
+
+      // Paid for someone else: say whose account it switched on, and stop here.
+      if (!fromApp) {
+        const who = maskMobile(ctx && ctx.mobile);
+        $("doneMsg").textContent = /already/i.test(msg) ? "This plan was already paid for. 🎉" : "Thank you — the payment went through. 🎉";
+        $("doneWhere").innerHTML = `<b>The plan is now active on ${who}.</b>`;
+        $("doneHint").textContent = "They will see it — and the GST invoice — in their QuizPe account. You can close this page.";
+        $("waBtn").textContent = "Open QuizPe";
+        return;
+      }
 
       // Auto-return after a short countdown. The plan is already active, so
       // this step only navigates; nothing is lost if the user leaves sooner.
