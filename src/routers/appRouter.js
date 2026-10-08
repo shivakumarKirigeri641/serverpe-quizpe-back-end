@@ -94,7 +94,8 @@ router.get('/me', wrap(async (req, res) => {
     : (await db.query(`SELECT context->>'parent_name' AS parent_name, NULLIF(context->>'email', '') AS email FROM whatsapp_sessions WHERE mobile_number = $1 ORDER BY id DESC LIMIT 1`, [mobile])).rows[0];
   const plans = (await db.query(
     `SELECT plan_code, plan_name, price, comparable_price, student_count, duration
-       FROM quizpe_plans WHERE is_active AND price > 0 AND NOT coalesce(is_instant, false) AND NOT coalesce(is_quick, false)
+       FROM quizpe_plans WHERE is_active AND price > 0 AND duration > 0
+        AND plan_code NOT IN ('INSTANT', 'QUICK_QUIZ')   -- single quizzes have no days; is_quick / is_instant are not on every database
       ORDER BY price`)).rows;
   const terms = (await db.query(`SELECT title, url FROM policies WHERE policy_code = 'terms' AND is_active ORDER BY id DESC LIMIT 1`)).rows[0];
 
@@ -257,7 +258,7 @@ router.post('/checkout', wrap(async (req, res) => {
   const plan = (await db.query(
     `SELECT plan_code FROM quizpe_plans
       WHERE plan_code = $1 AND is_active AND price > 0
-        AND NOT coalesce(is_instant, false) AND NOT coalesce(is_quick, false)`, [code])).rows[0];
+        AND duration > 0 AND plan_code NOT IN ('INSTANT', 'QUICK_QUIZ')`, [code])).rows[0];
   if (!plan) return res.status(400).json({ success: false, error: 'That plan is not available.' });
   const ctx = await getUserContext(mobile);
   const sessionId = await ensureSession(mobile, ctx.parentId || null);
