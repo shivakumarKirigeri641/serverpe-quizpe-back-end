@@ -36,11 +36,12 @@ const RESEND_SEC = Number(process.env.PARENT_CODE_RESEND_SEC) || 30;
 // session will be for 30 days"): open it at least once a month and it stays signed in.
 const SESSION_DAYS = Number(process.env.PARENT_SESSION_DAYS) || 30;
 const FIXED_CODE = process.env.PARENT_FIXED_CODE || '641641';
-// Real SMS for everyone on the live server (user, 2026-10-08: "go with
-// realtime SMS"). The fixed owner code works only off production, or when
-// PARENT_FIXED_CODE_MOBILES is set there on purpose.
+// Real SMS for everyone on the live server (user, 2026-10-08: "go with realtime
+// SMS") — except the owner's own number, which keeps the fixed code there too and is
+// never sent an SMS (user, 2026-10-10: "make hardcoded otp 641641 for me as admin in
+// quizpe"). PARENT_FIXED_CODE_MOBILES overrides the list.
 const FIXED_MOBILES = String(process.env.PARENT_FIXED_CODE_MOBILES
-  || (process.env.NODE_ENV === 'production' ? '' : process.env.ADMIN_MOBILES) || '')
+  || (process.env.NODE_ENV === 'production' ? '9886122415' : process.env.ADMIN_MOBILES) || '')
   .split(',').map((m) => m.replace(/\D/g, '').slice(-10)).filter((m) => m.length === 10);
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');

@@ -15,6 +15,7 @@
  *   GET  /app/api/info/:what (subscription | schedule) · POST /app/api/support
  *   POST /app/api/signout-all · POST /app/api/deactivate { reason } · POST /app/api/resume
  *   GET  /app/api/subscriptions · POST /app/api/child { student_id, name }
+ *   GET  /app/api/activity      the dashboard's week and recent activity
  *
  * Nothing about the quiz itself is new. This page hands the parent the same
  * links the WhatsApp bot used to send — quiz.html, trial.html, pay.html and
@@ -335,6 +336,91 @@ router.get('/reports', wrap(async (req, res) => {
       number: i.invoice_id, date: i.created_at, total: i.total != null ? Number(i.total) : null, plan: i.plan_name,
       url: `${base}/reports/dl-invoice/${i.access_token}`,
     })),
+  });
+}));
+
+/*
+ * THE DASHBOARD'S "THIS WEEK" AND "RECENT ACTIVITY" (user, 2026-10-10: the menu is in
+ * the header, so the dashboard shows recent activity instead of the menu again).
+ *   week      per child: quizzes in the last 7 days, the average score, the best, and
+ *             the streak (days in a row with a finished quiz, up to today or yesterday)
+ *   activity  newest first: quizzes finished (with the report), plans started, payments
+ *             (with the invoice) and sign-ins (with the device)
+ */
+const deviceOf = (ua) => {
+  const s = String(ua || '');
+  const os = /iPhone|iPad/.test(s) ? 'iPhone' : /Android/.test(s) ? 'Android phone' : /Windows/.test(s) ? 'Windows computer' : /Mac OS/.test(s) ? 'Mac' : /Linux/.test(s) ? 'Linux computer' : 'a device';
+  const br = /EdgA?\//.test(s) ? 'Edge' : /CriOS|Chrome\//.test(s) ? 'Chrome' : /FxiOS|Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
+  return br ? `${br} on ${os}` : os;
+};
+router.get('/activity', wrap(async (req, res) => {
+  const mobile = req.parentMobile;
+  const ctx = await getUserContext(mobile);
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+  const pid = ctx.exists ? ctx.parentId : null;
+  const [week, days, quizzes, plans, pays, signins] = await Promise.all([
+    pid ? db.query(
+      `SELECT st.id, st.student_name, count(r.id)::int AS quizzes,
+              round(avg(r.score_pct))::int AS avg_pct, max(r.score_pct)::int AS best_pct
+         FROM students st
+         LEFT JOIN quiz_reports r ON r.student_id = st.id AND r.is_active AND r.report_type IS DISTINCT FROM 'weekly'
+                                 AND r.quiz_date > CURRENT_DATE - 7
+        WHERE st.parent_id = $1 AND st.is_active
+        GROUP BY st.id ORDER BY st.id`, [pid]) : { rows: [] },
+    pid ? db.query(
+      `SELECT DISTINCT r.student_id, r.quiz_date::text AS d
+         FROM quiz_reports r JOIN students st ON st.id = r.student_id
+        WHERE st.parent_id = $1 AND r.is_active AND r.quiz_date > CURRENT_DATE - 60`, [pid]) : { rows: [] },
+    pid ? db.query(
+      `SELECT r.created_at, r.quiz_date, r.report_type, st.student_name, sub.subject_name,
+              r.score_correct, r.score_total, r.score_pct, r.grade, r.access_token
+         FROM quiz_reports r JOIN students st ON st.id = r.student_id
+         LEFT JOIN quizpe_tracker t ON t.id = r.tracker_id LEFT JOIN subjects sub ON sub.id = t.subject_id
+        WHERE st.parent_id = $1 AND r.is_active
+        ORDER BY r.created_at DESC LIMIT 12`, [pid]) : { rows: [] },
+    pid ? db.query(
+      `SELECT s.created_at, s.plan_start_date, s.plan_end_date, pl.plan_name, pl.is_trial
+         FROM parents_quizpe_subscriptions s JOIN quizpe_plans pl ON pl.id = s.plan_id
+        WHERE s.parent_id = $1 ORDER BY s.created_at DESC LIMIT 5`, [pid]) : { rows: [] },
+    pid ? db.query(
+      `SELECT i.created_at, i.invoice_id, i.total, i.access_token, pl.plan_name
+         FROM invoices i JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
+         LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
+        WHERE s.parent_id = $1 AND i.is_active ORDER BY i.created_at DESC LIMIT 5`, [pid]) : { rows: [] },
+    db.query(
+      `SELECT created_at, user_agent, id = $2 AS this_one FROM parent_web_sessions
+        WHERE mobile_number = $1 ORDER BY created_at DESC LIMIT 5`, [mobile, req.parentSessionId]),
+  ]);
+
+  // The streak: days in a row with a finished quiz, ending today (or yesterday, when today's is still to come).
+  const todayIST = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+  const dayBefore = (iso) => new Date(Date.parse(`${iso}T00:00:00Z`) - 864e5).toISOString().slice(0, 10);
+  const streakOf = (sid) => {
+    const set = new Set(days.rows.filter((r) => String(r.student_id) === String(sid)).map((r) => r.d));
+    let d = set.has(todayIST) ? todayIST : dayBefore(todayIST);
+    let n = 0;
+    while (set.has(d)) { n += 1; d = dayBefore(d); }
+    return n;
+  };
+
+  const items = [
+    ...quizzes.rows.map((r) => ({
+      kind: 'quiz', at: r.created_at, child: r.student_name, subject: r.subject_name, weekly: r.report_type === 'weekly',
+      score: `${r.score_correct}/${r.score_total}`, pct: r.score_pct, grade: r.grade,
+      url: r.access_token ? `${base}/reports/dl/${r.access_token}` : null,
+    })),
+    ...plans.rows.map((r) => ({ kind: 'plan', at: r.created_at, plan: r.plan_name, trial: r.is_trial, starts: r.plan_start_date, ends: r.plan_end_date })),
+    ...pays.rows.map((r) => ({
+      kind: 'payment', at: r.created_at, plan: r.plan_name, number: r.invoice_id, total: r.total != null ? Number(r.total) : null,
+      url: r.access_token ? `${base}/reports/dl-invoice/${r.access_token}` : null,
+    })),
+    ...signins.rows.map((r) => ({ kind: 'signin', at: r.created_at, device: deviceOf(r.user_agent), this_device: r.this_one })),
+  ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 15);
+
+  res.json({
+    success: true,
+    week: week.rows.map((r) => ({ id: r.id, child: r.student_name, quizzes: r.quizzes, avg_pct: r.avg_pct, best_pct: r.best_pct, streak: streakOf(r.id) })),
+    activity: items,
   });
 }));
 

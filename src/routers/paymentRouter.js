@@ -61,8 +61,20 @@ const RZP = 'https://api.razorpay.com/v1';
  * step passes the mode the order was created in, so a switch mid-transaction
  * never verifies a payment against the wrong secret.
  */
-async function razorpayCreds(forceMode = null) {
+/*
+ * THE OWNER PAYS IN TEST MODE (user, 2026-10-10: "test mode razorpay for admin in quizpe —
+ * test mode only for me as admin, make sure"). A checkout for one of these numbers always
+ * uses the TEST keys, whatever the Settings toggle says; every other number follows the
+ * toggle. The mode is saved on the checkout as before, so /verify checks it against the
+ * same keys. RAZORPAY_TEST_MOBILES (comma separated) overrides the default.
+ */
+const TEST_MOBILES = String(process.env.RAZORPAY_TEST_MOBILES ?? '9886122415')
+  .split(',').map((m) => m.replace(/\D/g, '').slice(-10)).filter((m) => m.length === 10);
+const isTestPayer = (mobile) => Boolean(mobile) && TEST_MOBILES.includes(String(mobile).replace(/\D/g, '').slice(-10));
+
+async function razorpayCreds(forceMode = null, payerMobile = null) {
   let mode = forceMode;
+  if (!mode && isTestPayer(payerMobile)) mode = 'test';
   if (!mode) {
     const r = await db.query(`SELECT value FROM app_settings WHERE key='razorpay_mode'`).catch(() => null);
     mode = r?.rows[0]?.value || process.env.RAZORPAY_MODE || 'test';
@@ -236,7 +248,7 @@ router.get('/api/context', async (req, res) => {
       gst: { pct: gstPct, ...gstBreakup(c.price, gstPct, true) },   // preview intra; recomputed on state
       boards: boards.rows, mediumsByBoard, grades: grades.rows, states: states.rows,
       availability, gst_pct: gstPct,
-      business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds()).keyId,
+      business: biz.rows[0], policy: pol.rows[0], razorpay_key: (await razorpayCreds(null, c.mobile_number)).keyId,
       existing: await existingFamily(c.mobile_number),   // pre-fill for renewals
       // Instant Quiz prices differently from the plans: the admin price is
       // EX-GST (₹9) and GST is added ON TOP, where a plan's price already
@@ -307,7 +319,7 @@ async function buildCart(c, students, state) {
  * link is only ever delivered through ONE channel.
  */
 async function createLinkForCheckout(c, built, description) {
-  const rzp = await razorpayCreds();
+  const rzp = await razorpayCreds(null, c.mobile_number);
   const contact = `+91${normMobile(c.mobile_number)}`;
   const plRes = await fetch(`${RZP}/payment_links`, {
     method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
@@ -386,7 +398,7 @@ router.post('/api/create-order', async (req, res) => {
     const built = await buildCart(c, students, state);
     if (built.error) return res.status(400).json({ success: false, error: built.error });
     const amountPaise = Math.round(built.total * 100);
-    const rzp = await razorpayCreds();   // current admin-selected mode
+    const rzp = await razorpayCreds(null, c.mobile_number);   // current admin-selected mode (test for the owner)
 
     // Reuse an existing order only if the amount still matches; if it was paid, reconcile.
     if (c.razorpay_order_id) {
@@ -827,7 +839,7 @@ async function createAddChildLink({ parentId, child, dryRun = false }) {
      VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
     [token, sess?.id || null, p.parent_mobile_number, p.plan_id, total, JSON.stringify(cart)]);
 
-  const rzp = await razorpayCreds();
+  const rzp = await razorpayCreds(null, p.parent_mobile_number);
   const contact = `+91${normMobile(p.parent_mobile_number)}`;
   const plRes = await fetch(`${RZP}/payment_links`, {
     method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
@@ -1075,7 +1087,7 @@ router.post('/api/instant-order', async (req, res) => {
                        school_name: String(s.school_name || '').trim().slice(0, 120) || null } }),
     };
 
-    const rzp = await razorpayCreds();
+    const rzp = await razorpayCreds(null, c.mobile_number);
     const rzpRes = await fetch(`${RZP}/orders`, {
       method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({ amount: Math.round(gross * 100), currency: 'INR', receipt: `qpi_${c.id}`,
@@ -1166,7 +1178,7 @@ async function createInstantLink({ sessionId = null, mobile, studentId = null, n
      VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
     [token, sessionId, m, plan.id, gross, JSON.stringify(cart)]);
 
-  const rzp = await razorpayCreds();
+  const rzp = await razorpayCreds(null, m);
   const plRes = await fetch(`${RZP}/payment_links`, {
     method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify({
