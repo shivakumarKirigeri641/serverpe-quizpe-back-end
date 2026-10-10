@@ -272,6 +272,30 @@ router.post('/checkout', wrap(async (req, res) => {
   res.json({ success: true, url: forSomeone ? url : `${url}&from=app`, valid_for: checkoutTtlLabel(), someone_else: forSomeone });
 }));
 
+/* ------------------------------------------- the WhatsApp menu, on the web
+ * (user, 2026-10-10: "the many tappable options WhatsApp gave — include them the
+ * same way in the PWA"). "My subscription" and "Quiz schedule" answer with the bot's
+ * own words (whatsapp/messages.js), minus its "type menu" lines; "Support" opens the
+ * same request form the bot linked to (support.html), keyed to this family.
+ */
+const forWeb = (text) => String(text || '').split('\n').filter((l) => !/type \*?menu\*?/i.test(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+router.get('/info/:what', wrap(async (req, res) => {
+  const M = require('../whatsapp/messages');
+  const ctx = await getUserContext(req.parentMobile);
+  const kids = ctx.exists ? await getStudents(ctx.parentId) : [];
+  const what = req.params.what;
+  if (what === 'subscription') return res.json({ success: true, text: forWeb(await M.subscriptionDetails(ctx, kids)) });
+  if (what === 'schedule') return res.json({ success: true, text: forWeb(M.quizSchedule(ctx, kids)) });
+  res.status(404).json({ success: false, error: 'Not found.' });
+}));
+router.post('/support', wrap(async (req, res) => {
+  const ctx = await getUserContext(req.parentMobile);
+  const sessionId = await ensureSession(req.parentMobile, ctx.parentId || null);
+  const { createSupportLink } = require('./supportWebRouter');
+  const { url } = await createSupportLink(sessionId, req.parentMobile, ctx.parentId || null);
+  res.json({ success: true, url });
+}));
+
 /* ---------------------------------------------------------- phone push */
 router.get('/push-key', wrap(async (req, res) => {
   res.json({ success: true, key: await require('../admin/hq/push').publicKey() });
