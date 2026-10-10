@@ -182,15 +182,17 @@ async function health() {
          WHERE status = 'running' AND locked_at < now() - interval '15 minutes') AS stuck_jobs,
        (SELECT EXTRACT(EPOCH FROM (now() - max(completed_at)))::int
           FROM job_queue WHERE status = 'done')                        AS seconds_since_job,
-       (SELECT EXTRACT(EPOCH FROM (now() - max(created_at)))::int
-          FROM whatsapp_messages WHERE direction = 'inbound')          AS seconds_since_inbound,
-       (SELECT count(*)::int FROM whatsapp_messages
-         WHERE direction = 'outbound' AND status = 'failed'
+       -- The web app (2026-10-10), where the WhatsApp webhook used to be: the last family
+       -- seen on quizpe.in/app, and reminders (phone notifications / email) not reached.
+       (SELECT EXTRACT(EPOCH FROM (now() - max(last_seen_at)))::int
+          FROM parent_web_sessions)                                    AS seconds_since_app,
+       (SELECT count(*)::int FROM notification_log
+         WHERE template_name = 'web' AND status = 'failed'
            AND created_at > now() - interval '24 hours')               AS failed_sends_24h`);
 
   const r = rows[0] || {};
-  // A worker that has not finished anything in two hours, or a webhook silent
-  // for six, is worth a colour — but neither is proof on its own at 3 a.m.
+  // A worker that has not finished anything in two hours, or many reminders not
+  // reaching families, is worth a colour — but neither is proof on its own at 3 a.m.
   const verdict = (r.stuck_jobs > 0 || r.failed_jobs > 0) ? 'critical'
     : (Number(r.seconds_since_job) > 7200 || Number(r.failed_sends_24h) > 10) ? 'warning'
       : 'healthy';

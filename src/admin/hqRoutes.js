@@ -75,7 +75,6 @@ router.get('/hq/journey/:parentId', requireAdmin, requireCap('parents.view'), wr
 }));
 router.get('/hq/quizzes-per-child', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
   ok(res, await hq('families').quizzesPerChild({ days: req.query.days, minMissed: req.query.missed }))));
-router.get('/hq/stopped', requireAdmin, requireCap('parents.view'), wrap(async (_req, res) => ok(res, await hq('families').stopped())));
 
 /* ── broadcast in batches ── */
 router.get('/hq/plans', requireAdmin, requireCap('whatsapp.view'), wrap(async (_req, res) => ok(res, await hq('plans').list())));

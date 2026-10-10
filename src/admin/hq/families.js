@@ -10,16 +10,17 @@ const db = require('../../database/connectDB');
 
 const IST = (col) => `(${col} AT TIME ZONE 'Asia/Kolkata')::date`;
 const mask = (m) => (m ? `••••••${String(m).slice(-4)}` : null);
-const windowOpen = (at) => Boolean(at && Date.now() - new Date(at).getTime() < 24 * 3600 * 1000);
+const M10 = (col) => `right(regexp_replace(${col}, '\\D', '', 'g'), 10)`;
+const ME = require('./notMe').mobile;
 
 /*
  * HOT LEADS — QuizPe's version of GaadiPe's: families worth a word today.
  *   ending     on a free trial that ends within 2 days, never paid
  *   ended      trial ended in the last 14 days, never paid
- *   chatted    wrote to QuizPe in the last 7 days but never enrolled
+ *   no_child   signed in on the app in the last 14 days but has no child enrolled
  *   was_paying a paid plan ended in the last 30 days, not renewed
- * Each says whether their WhatsApp window is open — a reply is then free and
- * needs no template.
+ * WhatsApp is gone (2026-10-10): each says when they last opened the app and how
+ * they can be reached — email, phone notifications, or neither.
  */
 async function hotLeads() {
   const subs = `
@@ -34,28 +35,34 @@ async function hotLeads() {
   const person = `
     p.id::text AS parent_id, p.parent_name AS name, p.parent_mobile_number AS mobile,
     (SELECT string_agg(st.student_name, ', ') FROM students st WHERE st.parent_id = p.id AND st.is_active) AS children,
-    (SELECT max(w.last_inbound_at) FROM whatsapp_sessions w WHERE w.mobile_number = p.parent_mobile_number) AS last_inbound_at,
+    (SELECT max(w.last_seen_at) FROM parent_web_sessions w WHERE ${M10('w.mobile_number')} = ${M10('p.parent_mobile_number')}) AS last_app_visit,
+    (coalesce(p.email, '') <> '') AS has_email,
+    EXISTS (SELECT 1 FROM parent_push x WHERE ${M10('x.mobile_number')} = ${M10('p.parent_mobile_number')}) AS has_push,
     (SELECT count(*)::int FROM quizpe_tracker t JOIN quizpe_status q ON q.id = t.status_id JOIN students st ON st.id = t.student_id
       WHERE st.parent_id = p.id AND q.status_code = 'completed') AS quizzes_done`;
-  const live = `p.is_active AND NOT p.service_paused`;
-  const [ending, ended, wasPaying, chatted] = await Promise.all([
+  const live = `p.is_active AND NOT p.service_paused AND ${ME('p.parent_mobile_number')}`;
+  const [ending, ended, wasPaying, noChild] = await Promise.all([
     db.query(`${subs} SELECT ${person}, sub.trial_end AS at FROM parents p JOIN sub ON sub.parent_id = p.id
                WHERE ${live} AND NOT sub.ever_paid AND sub.trial_end BETWEEN CURRENT_DATE AND CURRENT_DATE + 2 ORDER BY sub.trial_end`),
     db.query(`${subs} SELECT ${person}, sub.trial_end AS at FROM parents p JOIN sub ON sub.parent_id = p.id
                WHERE ${live} AND NOT sub.ever_paid AND sub.trial_end BETWEEN CURRENT_DATE - 14 AND CURRENT_DATE - 1 ORDER BY sub.trial_end DESC`),
     db.query(`${subs} SELECT ${person}, sub.paid_end AS at FROM parents p JOIN sub ON sub.parent_id = p.id
                WHERE ${live} AND sub.ever_paid AND NOT sub.paying AND sub.paid_end BETWEEN CURRENT_DATE - 30 AND CURRENT_DATE - 1 ORDER BY sub.paid_end DESC`),
-    db.query(`SELECT NULL AS parent_id, coalesce(w.context->>'parent_name', '') AS name, w.mobile_number AS mobile, NULL AS children,
-                     w.last_inbound_at, 0 AS quizzes_done, w.last_inbound_at AS at,
-                     (SELECT left(m.body, 160) FROM whatsapp_messages m WHERE m.mobile_number = w.mobile_number AND m.direction = 'inbound'
-                       ORDER BY m.created_at DESC LIMIT 1) AS last_message
-                FROM whatsapp_sessions w
-               WHERE w.is_active AND NOT coalesce(w.opted_out, false) AND w.last_inbound_at > now() - interval '7 days'
-                 AND NOT EXISTS (SELECT 1 FROM parents p WHERE p.parent_mobile_number = w.mobile_number)
-               ORDER BY w.last_inbound_at DESC`),
+    // Signed in on the app lately, but no child enrolled — the trial form was never finished.
+    db.query(`SELECT p.id::text AS parent_id, coalesce(p.parent_name, '') AS name, w.m AS mobile, NULL AS children,
+                     w.last_seen AS last_app_visit, (coalesce(p.email, '') <> '') AS has_email,
+                     EXISTS (SELECT 1 FROM parent_push x WHERE ${M10('x.mobile_number')} = w.m) AS has_push,
+                     0 AS quizzes_done, w.first_at AS at
+                FROM (SELECT ${M10('mobile_number')} AS m, min(created_at) AS first_at, max(last_seen_at) AS last_seen
+                        FROM parent_web_sessions WHERE ${ME('mobile_number')} GROUP BY 1) w
+                LEFT JOIN parents p ON ${M10('p.parent_mobile_number')} = w.m
+               WHERE w.last_seen > now() - interval '14 days'
+                 AND (p.id IS NULL OR NOT EXISTS (SELECT 1 FROM students st WHERE st.parent_id = p.id AND st.is_active))
+               ORDER BY w.last_seen DESC`),
   ]);
-  const shape = (rows) => rows.map((r) => ({ ...r, masked: mask(r.mobile), window_open: windowOpen(r.last_inbound_at) }));
-  const tabs = { ending: shape(ending.rows), ended: shape(ended.rows), was_paying: shape(wasPaying.rows), chatted: shape(chatted.rows) };
+  const shape = (rows) => rows.map((r) => ({ ...r, masked: mask(r.mobile),
+    reach: [r.has_email ? 'email' : null, r.has_push ? 'notifications' : null].filter(Boolean) }));
+  const tabs = { ending: shape(ending.rows), ended: shape(ended.rows), was_paying: shape(wasPaying.rows), no_child: shape(noChild.rows) };
   return { tabs, counts: Object.fromEntries(Object.entries(tabs).map(([k, v]) => [k, v.length])) };
 }
 
@@ -63,7 +70,8 @@ async function hotLeads() {
 
 async function journey(parentId) {
   const { rows: [p] } = await db.query(
-    `SELECT id::text AS id, parent_name AS name, parent_mobile_number AS mobile, created_at, service_paused, paused_at, state_code
+    `SELECT id::text AS id, parent_name AS name, parent_mobile_number AS mobile, created_at, service_paused, paused_at, state_code,
+            email, deactivated_at, deactivated_reason, comeback_trial_at
        FROM parents WHERE id = $1`, [parentId]);
   if (!p) return null;
   const m = p.mobile;
@@ -81,10 +89,12 @@ async function journey(parentId) {
                 JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id WHERE s.parent_id = $1 AND i.is_active`, [parentId]),
     db.query(`SELECT created_at, rating, left(coalesce(message, ''), 200) AS message FROM feedbacks WHERE parent_id = $1`, [parentId]),
     db.query(`SELECT created_at, ticket_no, status, left(coalesce(message, ''), 200) AS message FROM support_tickets WHERE parent_id = $1 OR mobile_number = $2`, [parentId, m]),
-    db.query(`SELECT e.created_at, e.event FROM whatsapp_session_events e JOIN whatsapp_sessions w ON w.id = e.session_id
-               WHERE w.mobile_number = $1 AND e.event NOT IN ('admin_login', 'menu_deduped') ORDER BY e.created_at DESC LIMIT 200`, [m]),
-    db.query(`SELECT count(*) FILTER (WHERE direction = 'inbound')::int AS received, count(*) FILTER (WHERE direction = 'outbound')::int AS sent,
-                     max(created_at) FILTER (WHERE direction = 'inbound') AS last_in FROM whatsapp_messages WHERE mobile_number = $1`, [m]),
+    // The app (2026-10-10), where the WhatsApp chat steps used to be: each sign-in and how it ended.
+    db.query(`SELECT created_at, last_seen_at, ended_at, user_agent FROM parent_web_sessions
+               WHERE ${M10('mobile_number')} = ${M10('$1')} ORDER BY created_at DESC LIMIT 200`, [m]),
+    db.query(`SELECT count(*)::int AS signins, max(last_seen_at) AS last_visit,
+                     (SELECT count(*)::int FROM parent_push x WHERE ${M10('x.mobile_number')} = ${M10('$1')}) AS push_devices
+                FROM parent_web_sessions WHERE ${M10('mobile_number')} = ${M10('$1')}`, [m]),
   ]);
   add(joined.rows, (r) => ({ at: r.created_at, kind: 'joined', text: 'Joined QuizPe' }));
   add(subs.rows, (r) => ({ at: r.created_at, kind: r.is_trial ? 'trial' : 'plan', text: `${r.is_trial ? 'Free trial' : 'Plan'}: ${r.plan_name} · ${String(r.plan_start_date).slice(0, 10)} → ${String(r.plan_end_date).slice(0, 10)}` }));
@@ -93,12 +103,16 @@ async function journey(parentId) {
   add(pays.rows, (r) => ({ at: r.created_at, kind: 'paid', text: `Paid ₹${r.total} · invoice ${r.invoice_id}` }));
   add(fb.rows, (r) => ({ at: r.created_at, kind: 'feedback', text: `Feedback${r.rating ? ` ${r.rating}★` : ''}${r.message ? ` — ${r.message}` : ''}` }));
   add(tickets.rows, (r) => ({ at: r.created_at, kind: 'support', text: `Support ${r.ticket_no} (${r.status})${r.message ? ` — ${r.message}` : ''}` }));
-  add(sess.rows, (r) => ({ at: r.created_at, kind: 'chat', text: r.event.replace(/_/g, ' ') }));
-  if (p.service_paused) events.push({ at: p.paused_at, kind: 'stopped', text: 'Replied STOP — no messages from QuizPe' });
+  const device = (ua) => (/iPhone|iPad/i.test(ua || '') ? 'iPhone' : /Android/i.test(ua || '') ? 'Android' : /Windows/i.test(ua || '') ? 'Windows' : /Mac/i.test(ua || '') ? 'Mac' : 'a browser');
+  add(sess.rows, (r) => ({ at: r.created_at, kind: 'app', text: `Signed in on the app (${device(r.user_agent)})${r.ended_at ? ' · signed out later' : ''}` }));
+  if (p.comeback_trial_at) events.push({ at: p.comeback_trial_at, kind: 'trial', text: 'Took the comeback offer (free days)' });
+  if (p.deactivated_at) events.push({ at: p.deactivated_at, kind: 'stopped', text: `Deactivated the account${p.deactivated_reason ? ` — “${p.deactivated_reason}”` : ''}` });
+  else if (p.service_paused) events.push({ at: p.paused_at, kind: 'stopped', text: 'Paused — no reminders from QuizPe' });
   events.sort((a, b) => new Date(b.at) - new Date(a.at));
+  const a = msgs.rows[0] || {};
   return {
     parent: { ...p, masked: mask(m), mobile: undefined },
-    messages: msgs.rows[0], window_open: windowOpen(msgs.rows[0]?.last_in),
+    app: { signins: a.signins || 0, last_visit: a.last_visit || null, push_devices: a.push_devices || 0, email: Boolean(p.email) },
     events: events.slice(0, 400),
   };
 }
@@ -140,26 +154,4 @@ async function quizzesPerChild({ days = 1, minMissed = 0 } = {}) {
   return { days: d, totals, rows };
 }
 
-/* ─────────────── who asked us to stop ─────────────── */
-
-async function stopped() {
-  const { rows: parents } = await db.query(
-    `SELECT p.id::text AS parent_id, p.parent_name AS name, p.parent_mobile_number AS mobile, p.paused_at AS at,
-            (SELECT string_agg(st.student_name, ', ') FROM students st WHERE st.parent_id = p.id AND st.is_active) AS children,
-            (SELECT max(m.created_at) FROM whatsapp_messages m WHERE m.mobile_number = p.parent_mobile_number AND m.direction = 'inbound') AS last_wrote,
-            (SELECT left(m.body, 160) FROM whatsapp_messages m WHERE m.mobile_number = p.parent_mobile_number AND m.direction = 'inbound'
-              AND m.created_at <= coalesce(p.paused_at, now()) + interval '1 minute' ORDER BY m.created_at DESC LIMIT 1) AS said
-       FROM parents p WHERE p.is_active AND p.service_paused ORDER BY p.paused_at DESC NULLS LAST`);
-  const { rows: leads } = await db.query(
-    `SELECT NULL AS parent_id, coalesce(w.context->>'parent_name', '') AS name, w.mobile_number AS mobile, w.opted_out_at AS at, NULL AS children,
-            w.last_inbound_at AS last_wrote, NULL AS said
-       FROM whatsapp_sessions w WHERE coalesce(w.opted_out, false)
-        AND NOT EXISTS (SELECT 1 FROM parents p WHERE p.parent_mobile_number = w.mobile_number) ORDER BY w.opted_out_at DESC NULLS LAST`);
-  const shape = (r, kind) => ({ ...r, kind, masked: mask(r.mobile), mobile: undefined,
-    wrote_after: Boolean(r.at && r.last_wrote && new Date(r.last_wrote) > new Date(r.at)) });
-  const rows = [...parents.map((r) => shape(r, 'family')), ...leads.map((r) => shape(r, 'lead'))]
-    .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
-  return { rows, counts: { families: parents.length, leads: leads.length, wrote_after: rows.filter((r) => r.wrote_after).length } };
-}
-
-module.exports = { hotLeads, journey, quizzesPerChild, stopped };
+module.exports = { hotLeads, journey, quizzesPerChild };
