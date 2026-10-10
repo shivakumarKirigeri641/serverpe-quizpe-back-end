@@ -229,7 +229,7 @@ router.get('/subscriptions', wrap(async (req, res) => {
        FROM parents_quizpe_subscriptions s
        JOIN quizpe_plans pl ON pl.id = s.plan_id
        LEFT JOIN LATERAL (SELECT invoice_id, total, access_token FROM invoices
-                           WHERE subscription_id = s.id AND is_active ORDER BY id DESC LIMIT 1) i ON true
+                           WHERE subscription_id = s.id AND (is_active OR invoice_id LIKE 'TEST-%') ORDER BY id DESC LIMIT 1) i ON true
       WHERE s.parent_id = $1
       ORDER BY s.plan_end_date DESC, s.id DESC LIMIT 20`, [ctx.parentId]);
   const kids = await getStudents(ctx.parentId);
@@ -322,7 +322,7 @@ router.get('/reports', wrap(async (req, res) => {
          JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
          JOIN parents p ON p.id = s.parent_id
          LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
-        WHERE p.parent_mobile_number = $1 AND i.is_active AND i.access_token IS NOT NULL
+        WHERE p.parent_mobile_number = $1 AND (i.is_active OR i.invoice_id LIKE 'TEST-%') AND i.access_token IS NOT NULL
         ORDER BY i.created_at DESC LIMIT 50`, [mobile]),
   ]);
   res.json({
@@ -380,7 +380,7 @@ router.get('/activity', wrap(async (req, res) => {
       `SELECT i.created_at, i.invoice_id, i.total, i.access_token, pl.plan_name
          FROM invoices i JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
          LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
-        WHERE s.parent_id = $1 AND i.is_active ORDER BY i.created_at DESC LIMIT 5`, [pid]) : { rows: [] },
+        WHERE s.parent_id = $1 AND (i.is_active OR i.invoice_id LIKE 'TEST-%') ORDER BY i.created_at DESC LIMIT 5`, [pid]) : { rows: [] },
   ]);
 
   // The streak: days in a row with a finished quiz, ending today (or yesterday, when today's is still to come).

@@ -55,7 +55,8 @@ router.get('/dl/:token', async (req, res) => {
 router.get('/dl-invoice/:token', async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT invoice_path, invoice_id FROM invoices WHERE access_token=$1 AND is_active`, [req.params.token]);
+      // A TEST-mode invoice is saved inactive (out of revenue) but still opens (2026-10-10).
+      `SELECT invoice_path, invoice_id FROM invoices WHERE access_token=$1 AND (is_active OR invoice_id LIKE 'TEST-%')`, [req.params.token]);
     if (!rows.length) return res.status(404).send('Invoice not found.');
     const abs = path.join(__dirname, '..', 'uploads', rows[0].invoice_path);
     if (!fs.existsSync(abs)) return res.status(404).send('File missing.');

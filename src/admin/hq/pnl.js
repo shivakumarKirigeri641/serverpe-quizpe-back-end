@@ -32,7 +32,9 @@ async function statement(days = 30) {
   const { rows: [pay] } = await db.query(
     `SELECT coalesce(sum(amount), 0)::float AS amount, coalesce(sum(fee), 0)::float AS fee, count(*) FILTER (WHERE fee IS NULL)::int AS no_fee,
             coalesce(sum(amount) FILTER (WHERE fee IS NULL), 0)::float AS amount_no_fee
-       FROM payments WHERE status = 'captured' AND created_at > ${since}`);
+       FROM payments WHERE status = 'captured' AND created_at > ${since}
+        -- Not the owner's TEST-mode payments (2026-10-10); their invoices are inactive already.
+        AND ${require('./notMe').payment('payments')}`);
   // Razorpay stores fee in paise when it gives one; the estimate is 2% + 18% GST, GST left out (input credit).
   const feePct = Number(await shared.setting('hq_razorpay_fee_percent', '2')) || 2;
   const gateway = pay.fee / 100 + (pay.amount_no_fee * feePct) / 100;

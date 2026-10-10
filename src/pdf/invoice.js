@@ -55,7 +55,8 @@ async function nextInvoiceNumber(exec = db) {
 /** Create the sequence once, seeded past invoices that already exist. */
 async function ensureInvoiceSequence(exec = db) {
   await exec.query(`CREATE SEQUENCE IF NOT EXISTS invoice_seq START 1`);
-  const { rows: [r] } = await exec.query(`SELECT COUNT(*)::int n FROM invoices`);
+  // TEST- invoices (owner test purchases) are outside the series, so they never move it.
+  const { rows: [r] } = await exec.query(`SELECT COUNT(*)::int n FROM invoices WHERE invoice_id NOT LIKE 'TEST-%'`);
   await exec.query(
     `SELECT setval('invoice_seq', GREATEST($1::bigint, last_value), true) FROM invoice_seq`, [r.n]);
 }
@@ -141,7 +142,14 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   const sgst = intra ? +(gstAmt - cgst).toFixed(2) : 0;
   const igst = intra ? 0 : gstAmt;
 
-  const invoiceNo = await nextInvoiceNumber(exec);
+  /* A TEST-mode purchase (opts.test — the owner paying with the Razorpay test keys,
+     user 2026-10-10: "ignore my test payments in admin") never takes a number from the
+     statutory series and never reaches the GST return: TEST-<date>-<payment>, saved
+     inactive, so no revenue figure counts it. As GaadiPe does (src/pay/invoice.js). */
+  const test = opts.test === true;
+  const invoiceNo = test
+    ? `TEST-${new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '')}-${paymentDbId || subscriptionId}`
+    : await nextInvoiceNumber(exec);
   fs.mkdirSync(DIR, { recursive: true });
   const fileName = `${invoiceNo}.pdf`;
   const filePath = path.join(DIR, fileName);
@@ -266,10 +274,19 @@ async function generateInvoice(subscriptionId, paymentDbId = null, exec = db, ca
   const accessToken = crypto.randomBytes(18).toString('hex');
   const invoiceDbId = (await exec.query(
     `INSERT INTO invoices (subscription_id, payment_id, invoice_id, invoice_path, access_token,
-                           amount_base, gst_pct, cgst, sgst, igst, total)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+                           amount_base, gst_pct, cgst, sgst, igst, total, is_active)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
     [subscriptionId, paymentDbId, invoiceNo, `invoices/${fileName}`, accessToken,
-     base, gstPct, cgst, sgst, igst, gross])).rows[0].id;
+     base, gstPct, cgst, sgst, igst, gross, !test])).rows[0].id;
+
+  if (test) {
+    return {
+      filePath, fileName, invoiceNo, test: true,
+      downloadUrl: `${base_url}/reports/dl-invoice/${accessToken}`,
+      amounts: { base, gstPct, cgst, sgst, igst, total: gross, intra },
+      head,
+    };
+  }
 
   // ---- GSTR-1 monthly filing record (B2CS — sale to an unregistered parent) ----
   const invDate = new Date();

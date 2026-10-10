@@ -582,7 +582,8 @@ async function finalize(c, pay, mailCtx = null) {
     catch (e) { console.error('[pay] referral release skipped:', e.message); }
 
     const { generateInvoice } = require('../pdf/invoice');
-    const inv = await generateInvoice(subId.id, paymentDbId, client, cart);
+    // A TEST-mode payment gets a TEST- invoice, out of the series, revenue and GST (2026-10-10).
+    const inv = await generateInvoice(subId.id, paymentDbId, client, cart, { test: c.razorpay_mode === 'test' });
 
     await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
     if (c.whatsapp_session_id) {
@@ -939,7 +940,7 @@ async function finalizeAddChild(c, pay) {
     }
 
     const { generateInvoice } = require('../pdf/invoice');
-    const inv = await generateInvoice(cart.subscription_id, paymentDbId, client, cart);
+    const inv = await generateInvoice(cart.subscription_id, paymentDbId, client, cart, { test: c.razorpay_mode === 'test' });
 
     await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
     await client.query('COMMIT');

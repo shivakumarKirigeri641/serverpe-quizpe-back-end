@@ -18,6 +18,8 @@ const n = (v) => Number(v || 0);
 const ten = (m) => String(m || '').replace(/\D/g, '').slice(-10);
 const TODAY = `(date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')`;
 const ONLINE_MIN = 15;     // seen on the app in the last 15 minutes = "on the app now"
+// The owner's own sign-ins and use stay out (user, 2026-10-10) — shown when searched for.
+const ME = require('./notMe').mobile;
 
 /** "Android 14 · Chrome" from a user agent — enough to tell devices apart. */
 function deviceOf(ua) {
@@ -48,26 +50,26 @@ async function overview() {
     `SELECT
        (SELECT count(*) FROM site_visits WHERE NOT coalesce(is_bot, false) AND created_at >= ${TODAY})::int AS visits_today,
        (SELECT count(DISTINCT session_id) FROM site_visits WHERE NOT coalesce(is_bot, false) AND created_at >= ${TODAY})::int AS visitors_today,
-       (SELECT count(*) FROM parent_web_sessions WHERE created_at >= ${TODAY})::int AS signins_today,
-       (SELECT count(*) FROM parent_web_sessions WHERE created_at > now() - interval '7 days')::int AS signins_7d,
+       (SELECT count(*) FROM parent_web_sessions WHERE created_at >= ${TODAY} AND ${ME('mobile_number')})::int AS signins_today,
+       (SELECT count(*) FROM parent_web_sessions WHERE created_at > now() - interval '7 days' AND ${ME('mobile_number')})::int AS signins_7d,
        (SELECT count(DISTINCT mobile_number) FROM parent_web_sessions
-         WHERE ended_at IS NULL AND expires_at > now() AND last_seen_at > now() - make_interval(mins => ${ONLINE_MIN}))::int AS online_now,
-       (SELECT count(DISTINCT mobile_number) FROM parent_web_sessions)::int AS web_families,
-       (SELECT count(DISTINCT mobile_number) FROM parent_web_sessions WHERE created_at > now() - interval '30 days')::int AS active_30d,
-       (SELECT count(*) FROM parent_web_sessions WHERE ended_at IS NULL AND expires_at > now())::int AS open_sessions,
-       (SELECT count(DISTINCT mobile_number) FROM parent_push)::int AS push_families,
-       (SELECT count(*) FROM parents WHERE email IS NOT NULL AND email <> '')::int AS email_families,
-       (SELECT count(*) FROM parent_web_codes WHERE created_at >= ${TODAY})::int AS codes_today,
-       (SELECT count(*) FROM parent_web_codes WHERE created_at >= ${TODAY} AND consumed_at IS NULL)::int AS codes_unused_today`)).rows[0];
+         WHERE ended_at IS NULL AND expires_at > now() AND last_seen_at > now() - make_interval(mins => ${ONLINE_MIN}) AND ${ME('mobile_number')})::int AS online_now,
+       (SELECT count(DISTINCT mobile_number) FROM parent_web_sessions WHERE ${ME('mobile_number')})::int AS web_families,
+       (SELECT count(DISTINCT mobile_number) FROM parent_web_sessions WHERE created_at > now() - interval '30 days' AND ${ME('mobile_number')})::int AS active_30d,
+       (SELECT count(*) FROM parent_web_sessions WHERE ended_at IS NULL AND expires_at > now() AND ${ME('mobile_number')})::int AS open_sessions,
+       (SELECT count(DISTINCT mobile_number) FROM parent_push WHERE ${ME('mobile_number')})::int AS push_families,
+       (SELECT count(*) FROM parents WHERE email IS NOT NULL AND email <> '' AND ${ME('parent_mobile_number')})::int AS email_families,
+       (SELECT count(*) FROM parent_web_codes WHERE created_at >= ${TODAY} AND ${ME('mobile_number')})::int AS codes_today,
+       (SELECT count(*) FROM parent_web_codes WHERE created_at >= ${TODAY} AND consumed_at IS NULL AND ${ME('mobile_number')})::int AS codes_unused_today`)).rows[0];
   // Families on the app who cannot be reached by either (no email, no phone notifications).
   const unreachable = (await db.query(
     `SELECT count(DISTINCT w.mobile_number)::int AS n FROM parent_web_sessions w
        LEFT JOIN parents p ON right(regexp_replace(p.parent_mobile_number, '\\D', '', 'g'), 10) = right(regexp_replace(w.mobile_number, '\\D', '', 'g'), 10)
-      WHERE coalesce(p.email, '') = ''
+      WHERE coalesce(p.email, '') = '' AND ${ME('w.mobile_number')}
         AND NOT EXISTS (SELECT 1 FROM parent_push x WHERE right(regexp_replace(x.mobile_number, '\\D', '', 'g'), 10) = right(regexp_replace(w.mobile_number, '\\D', '', 'g'), 10))`)).rows[0];
   const { rows: days } = await db.query(
     `SELECT to_char(d, 'YYYY-MM-DD') AS day,
-            (SELECT count(*) FROM parent_web_sessions w WHERE (w.created_at AT TIME ZONE 'Asia/Kolkata')::date = d)::int AS signins,
+            (SELECT count(*) FROM parent_web_sessions w WHERE (w.created_at AT TIME ZONE 'Asia/Kolkata')::date = d AND ${ME('w.mobile_number')})::int AS signins,
             (SELECT count(DISTINCT session_id) FROM site_visits v WHERE NOT coalesce(v.is_bot, false) AND (v.created_at AT TIME ZONE 'Asia/Kolkata')::date = d)::int AS visitors
        FROM generate_series((now() AT TIME ZONE 'Asia/Kolkata')::date - 13, (now() AT TIME ZONE 'Asia/Kolkata')::date, interval '1 day') d
       ORDER BY d`);
@@ -85,6 +87,7 @@ async function signIns({ days = 30, q = '', limit = 300 } = {}) {
        LEFT JOIN parents p ON right(regexp_replace(p.parent_mobile_number, '\\D', '', 'g'), 10) = right(regexp_replace(w.mobile_number, '\\D', '', 'g'), 10)
        ${PLAN}
       WHERE w.created_at > now() - make_interval(days => $1::int)
+        AND ($2 <> '' OR ${ME('w.mobile_number')})
         AND ($2 = '' OR w.mobile_number LIKE '%' || $2 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $2 || '%')
       ORDER BY w.created_at DESC LIMIT $3`, [Math.min(365, Math.max(1, Number(days) || 30)), term, Math.min(1000, Number(limit) || 300)]);
   const now = Date.now();
@@ -122,7 +125,8 @@ async function families({ q = '', filter = 'all', limit = 300 } = {}) {
        LEFT JOIN pu ON pu.m10 = w.m10
        LEFT JOIN parents p ON right(regexp_replace(p.parent_mobile_number, '\\D', '', 'g'), 10) = w.m10
        ${PLAN}
-      WHERE ($1 = '' OR w.m10 LIKE '%' || $1 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $1 || '%')
+      WHERE ($1 <> '' OR ${ME('w.m10')})
+        AND ($1 = '' OR w.m10 LIKE '%' || $1 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $1 || '%')
       ORDER BY w.last_at DESC NULLS LAST LIMIT $2`, [term, Math.min(1000, Number(limit) || 300)]);
   const all = rows.map((r) => ({
     mobile: r.m10, name: r.parent_name || null, email: r.email || null, parent_id: r.parent_id ? String(r.parent_id) : null,

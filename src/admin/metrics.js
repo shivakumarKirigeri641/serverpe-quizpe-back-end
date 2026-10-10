@@ -100,10 +100,10 @@ async function comparisons() {
       (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 7)          AS signups_week,
       (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 14
                                            AND ${IST_DATE('created_at')} <= CURRENT_DATE - 7)         AS signups_prev_week,
-      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE ${IST_DATE('created_at')} = CURRENT_DATE)     AS revenue_today,
-      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE ${IST_DATE('created_at')} = CURRENT_DATE - 1) AS revenue_yesterday,
-      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 30) AS revenue_month,
-      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 60
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} = CURRENT_DATE)     AS revenue_today,
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} = CURRENT_DATE - 1) AS revenue_yesterday,
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} > CURRENT_DATE - 30) AS revenue_month,
+      (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} > CURRENT_DATE - 60
                                                               AND ${IST_DATE('created_at')} <= CURRENT_DATE - 30) AS revenue_prev_month
   `);
   const pair = (now, was) => ({ now: Number(now), was: Number(was), delta: delta(Number(now), Number(was)) });
