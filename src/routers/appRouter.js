@@ -12,6 +12,9 @@
  *   POST /app/api/trial         { parent_name }          -> { url }  (trial.html)
  *   POST /app/api/checkout      { plan_code }            -> { url }  (pay.html)
  *   GET  /app/api/push-key ·  POST /app/api/push  ·  POST /app/api/push/off
+ *   GET  /app/api/info/:what (subscription | schedule) · POST /app/api/support
+ *   POST /app/api/signout-all · POST /app/api/deactivate { reason } · POST /app/api/resume
+ *   GET  /app/api/subscriptions · POST /app/api/child { student_id, name }
  *
  * Nothing about the quiz itself is new. This page hands the parent the same
  * links the WhatsApp bot used to send — quiz.html, trial.html, pay.html and
@@ -34,6 +37,11 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   res.status(e.status || 500).json({ success: false, error: e.status ? e.message : 'Something went wrong. Please try again.' });
 });
 const ipOf = (req) => String(req.ip || '').replace(/^::ffff:/, '');
+/** Whole days from a date to today in India (negative = in the future). */
+const daysSince = (d) => {
+  const ist = (x) => new Date(new Date(x).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })).setHours(0, 0, 0, 0);
+  return Math.round((ist(Date.now()) - ist(d)) / 864e5);
+};
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** The conversation row the quiz, trial and checkout pages are keyed on. */
@@ -60,7 +68,7 @@ router.post('/verify', wrap(async (req, res) => {
   const r = await auth.verifyCode(req.body?.mobile, req.body?.code, {
     termsAccepted: req.body?.terms_accepted, ip: ipOf(req), userAgent: req.headers['user-agent'],
   });
-  res.json({ success: true, token: r.token, mobile: r.mobile });
+  res.json({ success: true, token: r.token, mobile: r.mobile, reactivated: Boolean(r.reactivated) });
 }));
 
 router.post('/signout', wrap(async (req, res) => {
@@ -69,6 +77,47 @@ router.post('/signout', wrap(async (req, res) => {
 }));
 
 router.use(auth.requireParent);
+
+/* ------------------------------------------- the account (2026-10-10) */
+router.post('/signout-all', wrap(async (req, res) => {
+  const r = await auth.signOutAll(req.parentMobile);
+  console.log(`[app] signed out of all devices: ${req.parentMobile.slice(0, 2)}xxxxxx${req.parentMobile.slice(-2)} (${r.ended})`);
+  res.json({ success: true, ended: r.ended });
+}));
+
+/*
+ * DEACTIVATE (user, 2026-10-10: "deactivate account (ask for reason)"). Everything
+ * stops — quizzes, reminders, emails, phone notifications — and every device is
+ * signed out. Nothing is deleted: the children, reports, invoices and the plan's
+ * dates stay (invoices must be kept for GST), and signing in again brings it all
+ * back (web/auth.js verifyCode). A paid plan is not refunded or paused — its days
+ * keep running, which the confirmation says before the parent agrees.
+ */
+router.post('/deactivate', wrap(async (req, res) => {
+  const mobile = req.parentMobile;
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (reason.length < 2) return res.status(400).json({ success: false, error: 'Please tell us why — it helps us improve.' });
+  const { rowCount } = await db.query(
+    `UPDATE parents SET is_active = false, service_paused = true, reminders_enabled = false, paused_at = now(),
+            deactivated_at = now(), deactivated_reason = $2, modified_at = now()
+      WHERE parent_mobile_number = $1`, [mobile, reason]);
+  // A number with no family yet has nothing to switch off — its sign-ins still end.
+  await db.query(
+    `UPDATE whatsapp_sessions SET context = context || jsonb_build_object('web_deactivated_at', now()::text, 'web_deactivated_reason', $2::text), modified_at = now()
+      WHERE mobile_number = $1`, [mobile, reason]).catch(() => {});
+  await auth.signOutAll(mobile);
+  console.log(`[app] account deactivated by the parent: ${mobile.slice(0, 2)}xxxxxx${mobile.slice(-2)} (family: ${rowCount ? 'yes' : 'no'}) — ${reason}`);
+  res.json({ success: true });
+}));
+
+/* RESUME — the web's START: a family that paused everything (STOP on WhatsApp) switches it back on. */
+router.post('/resume', wrap(async (req, res) => {
+  await db.query(
+    `UPDATE parents SET service_paused = false, reminders_enabled = true, paused_at = NULL, modified_at = now()
+      WHERE parent_mobile_number = $1`, [req.parentMobile]);
+  await db.query(`UPDATE whatsapp_sessions SET opted_out = false, opted_out_at = NULL, modified_at = now() WHERE mobile_number = $1`, [req.parentMobile]).catch(() => {});
+  res.json({ success: true });
+}));
 
 /* ------------------------------------------------------------------- me */
 router.get('/me', wrap(async (req, res) => {
@@ -79,18 +128,24 @@ router.get('/me', wrap(async (req, res) => {
   const Q = require('../whatsapp/quiz');
 
   const kids = ctx.exists ? await getStudents(ctx.parentId) : [];
+  // The profile shows each child in full (2026-10-10): the board's and medium's names too.
+  const more = kids.length ? Object.fromEntries((await db.query(
+    `SELECT st.id, b.board_name, m.medium_name
+       FROM students st JOIN boards b ON b.id = st.board_id LEFT JOIN mediums m ON m.id = st.medium_id
+      WHERE st.id = ANY($1::int[])`, [kids.map((s) => s.id)])).rows.map((r) => [r.id, r])) : {};
   const children = [];
   for (const s of kids) {
     let today = null;
     try { today = await Q.dailyQuizProgress(s.id); } catch { today = null; }
     children.push({
       id: s.id, name: s.student_name, board: s.board_code, grade: s.grade_name, school: s.school_name,
+      board_name: more[s.id]?.board_name || null, medium: more[s.id]?.medium_name || null,
       today: today ? { done: today.done, total: today.total, has_next: today.hasNext } : null,
       can_choose_level: DIFF.gradeAllows(s.grade_code), last_level: DIFF.label(s.difficulty_level),
     });
   }
   const parent = ctx.exists
-    ? (await db.query(`SELECT parent_name, email FROM parents WHERE id = $1`, [ctx.parentId])).rows[0]
+    ? (await db.query(`SELECT parent_name, email, service_paused FROM parents WHERE id = $1`, [ctx.parentId])).rows[0]
     : (await db.query(`SELECT context->>'parent_name' AS parent_name, NULLIF(context->>'email', '') AS email FROM whatsapp_sessions WHERE mobile_number = $1 ORDER BY id DESC LIMIT 1`, [mobile])).rows[0];
   const plans = (await db.query(
     `SELECT plan_code, plan_name, price, comparable_price, student_count, duration
@@ -107,7 +162,14 @@ router.get('/me', wrap(async (req, res) => {
     needs_email: Boolean(ctx.exists && !parent?.email),
     status: ctx.status,                       // NEW | INCOMPLETE | NO_SUBSCRIPTION | TRIAL_ACTIVE | ACTIVE | EXPIRED
     subscribed: Boolean(ctx.isSubscribed),
-    plan: ctx.planName ? { name: ctx.planName, trial: Boolean(ctx.isTrial), ends: ctx.endDate, days_left: ctx.daysLeft, seats: ctx.seatLimit } : null,
+    plan: ctx.planName ? {
+      name: ctx.planName, trial: Boolean(ctx.isTrial), starts: ctx.startDate, ends: ctx.endDate, days_left: ctx.daysLeft, seats: ctx.seatLimit,
+      // The dashboard's status (2026-10-10): "expired x days ago", or "starts on …" for a plan not begun yet.
+      ended_days_ago: ctx.status === 'EXPIRED' && ctx.endDate ? Math.max(0, daysSince(ctx.endDate)) : null,
+      not_started: Boolean(ctx.startDate && daysSince(ctx.startDate) < 0),
+    } : null,
+    paused: Boolean(parent?.service_paused),
+    free_access: Boolean(ctx.freeAccess),
     can_start_trial: Boolean(ctx.canStartTrial), trial_days: ctx.trialDays,
     children,
     window: { state: W.state(), opens: W.openHHMM(), closes: W.CLOSE_HHMM },
@@ -135,6 +197,54 @@ router.post('/profile', wrap(async (req, res) => {
     await db.query(`UPDATE whatsapp_sessions SET context = context || jsonb_build_object('email', $2::text), modified_at = now() WHERE id = $1`, [sid, emailRaw]);
   }
   res.json({ success: true });
+}));
+
+/* A child's name, from the profile (2026-10-10) — the name the quizzes, reports and the app's header use. */
+router.post('/child', wrap(async (req, res) => {
+  const ctx = await getUserContext(req.parentMobile);
+  const st = ctx.exists ? (await getStudents(ctx.parentId)).find((s) => String(s.id) === String(req.body?.student_id)) : null;
+  if (!st) return res.status(404).json({ success: false, error: 'We could not find that child.' });
+  const name = String(req.body?.name || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (name.length < 2 || !/^[\p{L}][\p{L} .'-]*$/u.test(name)) return res.status(400).json({ success: false, error: "Please enter the child's name in letters." });
+  await db.query(`UPDATE students SET student_name = $2, modified_at = now() WHERE id = $1`, [st.id, name]);
+  res.json({ success: true });
+}));
+
+/*
+ * MY SUBSCRIPTION (2026-10-10: "show current subscriptions"): every plan this family
+ * has had, newest first — what it is, its dates, days left, the children it covers
+ * and its invoice — so the current one and the history read at a glance.
+ */
+router.get('/subscriptions', wrap(async (req, res) => {
+  const ctx = await getUserContext(req.parentMobile);
+  if (!ctx.exists) return res.json({ success: true, subscriptions: [], children: [] });
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
+  const { rows } = await db.query(
+    `SELECT s.id, s.plan_start_date, s.plan_end_date, s.is_active, s.created_at,
+            pl.plan_name, pl.is_trial, pl.student_count, pl.duration,
+            (s.is_active AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date) AS current,
+            (s.is_active AND CURRENT_DATE < s.plan_start_date) AS upcoming,
+            i.invoice_id, i.total, i.access_token
+       FROM parents_quizpe_subscriptions s
+       JOIN quizpe_plans pl ON pl.id = s.plan_id
+       LEFT JOIN LATERAL (SELECT invoice_id, total, access_token FROM invoices
+                           WHERE subscription_id = s.id AND is_active ORDER BY id DESC LIMIT 1) i ON true
+      WHERE s.parent_id = $1
+      ORDER BY s.plan_end_date DESC, s.id DESC LIMIT 20`, [ctx.parentId]);
+  const kids = await getStudents(ctx.parentId);
+  res.json({
+    success: true,
+    children: kids.map((k) => k.student_name),
+    subscriptions: rows.map((r) => ({
+      id: r.id, plan: r.plan_name, trial: r.is_trial, seats: r.student_count, days: r.duration,
+      starts: r.plan_start_date, ends: r.plan_end_date,
+      // A plan is switched off when it ends, so only one switched off before its end date was cancelled.
+      state: r.current ? 'current' : r.upcoming ? 'upcoming' : !r.is_active && daysSince(r.plan_end_date) < 0 ? 'cancelled' : 'ended',
+      days_left: r.current ? Math.max(0, -daysSince(r.plan_end_date)) + 1 : null,
+      ended_days_ago: !r.current && !r.upcoming ? Math.max(0, daysSince(r.plan_end_date)) : null,
+      invoice: r.access_token ? { number: r.invoice_id, total: r.total != null ? Number(r.total) : null, url: `${base}/reports/dl-invoice/${r.access_token}` } : null,
+    })),
+  });
 }));
 
 /* ------------------------------------------------------------ the quiz */

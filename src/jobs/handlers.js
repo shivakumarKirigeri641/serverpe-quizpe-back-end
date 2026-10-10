@@ -41,6 +41,7 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
         title: `📄 ${rep.head.student_name}'s report is ready`,
         body: `${rep.head.subject_name}: ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) — every question explained.`,
         tag: `report-${trackerId}`, email: false,
+        url: `${require('../web/notify').APP_URL()}?open=reports`,
       });
     }
   } catch (e) {

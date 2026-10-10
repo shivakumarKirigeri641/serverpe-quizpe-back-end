@@ -32,7 +32,9 @@ const db = require('../database/connectDB');
 const CODE_TTL_MIN = Number(process.env.PARENT_CODE_TTL_MIN) || 10;
 const MAX_TRIES = 5;
 const RESEND_SEC = Number(process.env.PARENT_CODE_RESEND_SEC) || 30;
-const SESSION_DAYS = Number(process.env.PARENT_SESSION_DAYS) || 90;
+// 30 days, counted from the last time the app was used (user, 2026-10-10: "the
+// session will be for 30 days"): open it at least once a month and it stays signed in.
+const SESSION_DAYS = Number(process.env.PARENT_SESSION_DAYS) || 30;
 const FIXED_CODE = process.env.PARENT_FIXED_CODE || '641641';
 // Real SMS for everyone on the live server (user, 2026-10-08: "go with
 // realtime SMS"). The fixed owner code works only off production, or when
@@ -117,7 +119,17 @@ async function verifyCode(rawMobile, code, { termsAccepted, ip, userAgent } = {}
          FROM policies pol WHERE pol.policy_code = 'terms' AND pol.is_active
        ON CONFLICT (mobile_number, policy_id) DO NOTHING`, [mobile]);
     await c.query('COMMIT');
-    return { token, mobile };
+    // Signing in again withdraws the parent's own deactivation (2026-10-10), as on GaadiPe:
+    // reminders and quizzes come back. An admin's deactivation or a STOP is not touched.
+    let reactivated = false;
+    try {
+      const r = await db.query(
+        `UPDATE parents SET is_active = true, service_paused = false, reminders_enabled = true, paused_at = NULL,
+                deactivated_at = NULL, deactivated_reason = NULL, modified_at = now()
+          WHERE parent_mobile_number = $1 AND deactivated_at IS NOT NULL`, [mobile]);
+      reactivated = r.rowCount > 0;
+    } catch { /* the column comes with migrate.js parent_self_deactivate */ }
+    return { token, mobile, reactivated };
   } catch (e) {
     await c.query('ROLLBACK').catch(() => {});
     throw e;
@@ -137,15 +149,24 @@ async function sessionOf(req) {
   if (!token) return null;
   const { rows } = await db.query(
     `UPDATE parent_web_sessions
-        SET last_seen_at = CASE WHEN last_seen_at < now() - interval '1 minute' THEN now() ELSE last_seen_at END
+        SET last_seen_at = CASE WHEN last_seen_at < now() - interval '1 minute' THEN now() ELSE last_seen_at END,
+            expires_at   = CASE WHEN last_seen_at < now() - interval '1 minute' THEN now() + ($2 || ' days')::interval ELSE expires_at END
       WHERE token_hash = $1 AND ended_at IS NULL AND expires_at > now()
-      RETURNING id, mobile_number`, [sha(token)]);
+      RETURNING id, mobile_number`, [sha(token), String(SESSION_DAYS)]);
   return rows[0] ? { id: rows[0].id, mobile: rows[0].mobile_number } : null;
 }
 
 async function signOut(req) {
   const token = tokenOf(req);
   if (token) await db.query(`UPDATE parent_web_sessions SET ended_at = now() WHERE token_hash = $1 AND ended_at IS NULL`, [sha(token)]);
+}
+
+/** "Sign out from all devices": every session of this number, and its phone notifications. */
+async function signOutAll(mobile) {
+  const { rowCount } = await db.query(
+    `UPDATE parent_web_sessions SET ended_at = now() WHERE mobile_number = $1 AND ended_at IS NULL`, [mobile]);
+  await db.query(`DELETE FROM parent_push WHERE mobile_number = $1`, [mobile]);
+  return { ended: rowCount };
 }
 
 /** Express middleware: 401 unless signed in; sets req.parentMobile. */
@@ -159,4 +180,4 @@ async function requireParent(req, res, next) {
   } catch (e) { return next(e); }
 }
 
-module.exports = { requestCode, verifyCode, sessionOf, signOut, requireParent, normMobile };
+module.exports = { requestCode, verifyCode, sessionOf, signOut, signOutAll, requireParent, normMobile, SESSION_DAYS };

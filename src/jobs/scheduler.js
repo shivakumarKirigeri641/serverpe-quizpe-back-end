@@ -304,7 +304,8 @@ async function runLifecycleJob(kind) {
         ? { title: `Your QuizPe plan ends ${when}`, body: `Renew ${row.plan_name} to keep ${row.student_name}'s daily quizzes going.` }
         : { title: 'Your QuizPe plan has ended', body: `Renew to continue ${row.student_name}'s daily quizzes — the progress so far is kept.` };
       try {
-        const r = await require('../web/notify').toMobile(row.parent_mobile_number, { ...msg, tag: `plan-${kind}` });
+        const notify = require('../web/notify');
+        const r = await notify.toMobile(row.parent_mobile_number, { ...msg, url: `${notify.APP_URL()}?open=plans`, tag: `plan-${kind}` });
         await finishSend(row, kind, null, r.reached ? null : 'not reached (push/email)');
       } catch (e) { await finishSend(row, kind, null, e.message); }
       continue;
@@ -525,7 +526,9 @@ async function webNudge(row, kind, variant, close) {
     if (!(await reachableOnWeb(row.parent_mobile_number))) return false;
     if (!(await claimSend(row, kind, 'web'))) return true;     // already nudged today
     const msg = (WEB_NUDGE[variant] || WEB_NUDGE.morning)(row.student_name, close);
-    const r = await require('../web/notify').toMobile(row.parent_mobile_number, { ...msg, tag: `quiz-${variant}` });
+    // A tap opens the app with the "quiz is ready" pop-up (2026-10-10).
+    const notify = require('../web/notify');
+    const r = await notify.toMobile(row.parent_mobile_number, { ...msg, url: `${notify.APP_URL()}?open=quiz`, tag: `quiz-${variant}` });
     await finishSend(row, kind, null, r.reached ? null : 'not reached (push/email)');
     return true;
   } catch (e) {

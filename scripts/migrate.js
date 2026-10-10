@@ -688,6 +688,17 @@ const STEPS = [
       `ALTER TABLE parents ADD COLUMN IF NOT EXISTS email text`,
     ],
   },
+  {
+    name: 'parent_self_deactivate',
+    // "Deactivate account (ask for reason)" in the web menu (user, 2026-10-10). The
+    // parent's own deactivation, kept apart from an admin's (is_active alone) so that
+    // signing in again brings back only what the parent switched off.
+    check: `SELECT 1 FROM information_schema.columns WHERE table_name='parents' AND column_name='deactivated_at'`,
+    apply: [
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS deactivated_at timestamptz`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS deactivated_reason text`,
+    ],
+  },
 ];
 
 (async () => {
