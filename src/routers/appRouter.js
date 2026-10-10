@@ -16,6 +16,7 @@
  *   POST /app/api/signout-all · POST /app/api/deactivate { reason } · POST /app/api/resume
  *   GET  /app/api/subscriptions · POST /app/api/child { student_id, name }
  *   GET  /app/api/activity      the dashboard's week and recent activity
+ *   POST /app/api/comeback-trial  a lapsed family restarts free (when the offer is on)
  *
  * Nothing about the quiz itself is new. This page hands the parent the same
  * links the WhatsApp bot used to send — quiz.html, trial.html, pay.html and
@@ -111,6 +112,12 @@ router.post('/deactivate', wrap(async (req, res) => {
   res.json({ success: true });
 }));
 
+/* THE COMEBACK OFFER (2026-10-10): a lapsed family restarts with N free days, once (web/comeback.js). */
+router.post('/comeback-trial', wrap(async (req, res) => {
+  const r = await require('../web/comeback').start(req.parentMobile);
+  res.json({ success: true, ...r });
+}));
+
 /* RESUME — the web's START: a family that paused everything (STOP on WhatsApp) switches it back on. */
 router.post('/resume', wrap(async (req, res) => {
   await db.query(
@@ -170,6 +177,8 @@ router.get('/me', wrap(async (req, res) => {
       not_started: Boolean(ctx.startDate && daysSince(ctx.startDate) < 0),
     } : null,
     paused: Boolean(parent?.service_paused),
+    // The comeback offer (2026-10-10): { days } when this lapsed family may restart free, once.
+    comeback: await require('../web/comeback').offerFor(ctx).catch(() => null),
     free_access: Boolean(ctx.freeAccess),
     can_start_trial: Boolean(ctx.canStartTrial), trial_days: ctx.trialDays,
     children,

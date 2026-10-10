@@ -699,6 +699,19 @@ const STEPS = [
       `ALTER TABLE parents ADD COLUMN IF NOT EXISTS deactivated_reason text`,
     ],
   },
+  {
+    name: 'comeback_trial',
+    // THE COMEBACK OFFER (user, 2026-10-10: "give an offer to all lapsed families to take
+    // 7 days free trial — but keep it until SMS gets approved"). A family whose plan has
+    // ended may restart with N free days, once. OFF until switched on in the admin
+    // (Website page), so it starts with the SMS that tells them about it.
+    check: `SELECT 1 FROM information_schema.columns WHERE table_name='parents' AND column_name='comeback_trial_at'`,
+    apply: [
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS comeback_trial_at timestamptz`,
+      `INSERT INTO app_settings (key, value) VALUES ('comeback_trial_on', 'false') ON CONFLICT (key) DO NOTHING`,
+      `INSERT INTO app_settings (key, value) VALUES ('comeback_trial_days', '7') ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
 ];
 
 (async () => {

@@ -47,6 +47,14 @@ router.get('/hq/web/sign-ins', requireAdmin, requireCap('parents.view'), wrap(as
   ok(res, await hq('web').signIns({ days: req.query.days, q: req.query.q }))));
 router.get('/hq/web/families', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
   ok(res, await hq('web').families({ q: req.query.q, filter: req.query.filter }))));
+/* The comeback offer (2026-10-10): how many it is for, and the switch — off until the SMS is approved. */
+router.get('/hq/web/comeback', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) =>
+  ok(res, await require('../web/comeback').stats())));
+router.put('/hq/web/comeback', requireAdmin, requireCap('settings.view'),
+  audit('comeback.offer', (req) => ({ targetType: 'settings', targetId: 'comeback_trial',
+    summary: `comeback trial ${req.body?.on ? 'on' : 'off'}${req.body?.days ? `, ${req.body.days} days` : ''}` })),
+  express.json(), wrap(async (req, res) =>
+    ok(res, { ...(await require('../web/comeback').set({ on: req.body?.on, days: req.body?.days })), message: 'Saved' })));
 router.get('/hq/graphs/:page', requireAdmin, requireCap('analytics.view'), wrap(async (req, res) => {
   const out = await hq('insights').page(req.params.page, req.query.days);
   if (!out) return fail(res, 404, 'No such graph page.');
