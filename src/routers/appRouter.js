@@ -344,21 +344,15 @@ router.get('/reports', wrap(async (req, res) => {
  * the header, so the dashboard shows recent activity instead of the menu again).
  *   week      per child: quizzes in the last 7 days, the average score, the best, and
  *             the streak (days in a row with a finished quiz, up to today or yesterday)
- *   activity  newest first: quizzes finished (with the report), plans started, payments
- *             (with the invoice) and sign-ins (with the device)
+ *   activity  newest first: quizzes finished (with the report), plans started and
+ *             payments (with the invoice) — not sign-ins (user, 2026-10-10)
  */
-const deviceOf = (ua) => {
-  const s = String(ua || '');
-  const os = /iPhone|iPad/.test(s) ? 'iPhone' : /Android/.test(s) ? 'Android phone' : /Windows/.test(s) ? 'Windows computer' : /Mac OS/.test(s) ? 'Mac' : /Linux/.test(s) ? 'Linux computer' : 'a device';
-  const br = /EdgA?\//.test(s) ? 'Edge' : /CriOS|Chrome\//.test(s) ? 'Chrome' : /FxiOS|Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
-  return br ? `${br} on ${os}` : os;
-};
 router.get('/activity', wrap(async (req, res) => {
   const mobile = req.parentMobile;
   const ctx = await getUserContext(mobile);
   const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
   const pid = ctx.exists ? ctx.parentId : null;
-  const [week, days, quizzes, plans, pays, signins] = await Promise.all([
+  const [week, days, quizzes, plans, pays] = await Promise.all([
     pid ? db.query(
       `SELECT st.id, st.student_name, count(r.id)::int AS quizzes,
               round(avg(r.score_pct))::int AS avg_pct, max(r.score_pct)::int AS best_pct
@@ -387,9 +381,6 @@ router.get('/activity', wrap(async (req, res) => {
          FROM invoices i JOIN parents_quizpe_subscriptions s ON s.id = i.subscription_id
          LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
         WHERE s.parent_id = $1 AND i.is_active ORDER BY i.created_at DESC LIMIT 5`, [pid]) : { rows: [] },
-    db.query(
-      `SELECT created_at, user_agent, id = $2 AS this_one FROM parent_web_sessions
-        WHERE mobile_number = $1 ORDER BY created_at DESC LIMIT 5`, [mobile, req.parentSessionId]),
   ]);
 
   // The streak: days in a row with a finished quiz, ending today (or yesterday, when today's is still to come).
@@ -410,11 +401,15 @@ router.get('/activity', wrap(async (req, res) => {
       url: r.access_token ? `${base}/reports/dl/${r.access_token}` : null,
     })),
     ...plans.rows.map((r) => ({ kind: 'plan', at: r.created_at, plan: r.plan_name, trial: r.is_trial, starts: r.plan_start_date, ends: r.plan_end_date })),
+    // A plan that has ended shows that too, on the evening of its last day.
+    ...plans.rows.filter((r) => daysSince(r.plan_end_date) > 0).map((r) => ({
+      kind: 'plan_end', at: new Date(`${new Date(r.plan_end_date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })}T23:59:00+05:30`),
+      plan: r.plan_name, trial: r.is_trial, ends: r.plan_end_date,
+    })),
     ...pays.rows.map((r) => ({
       kind: 'payment', at: r.created_at, plan: r.plan_name, number: r.invoice_id, total: r.total != null ? Number(r.total) : null,
       url: r.access_token ? `${base}/reports/dl-invoice/${r.access_token}` : null,
     })),
-    ...signins.rows.map((r) => ({ kind: 'signin', at: r.created_at, device: deviceOf(r.user_agent), this_device: r.this_one })),
   ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 15);
 
   res.json({
