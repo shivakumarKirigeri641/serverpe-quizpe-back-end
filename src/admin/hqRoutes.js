@@ -40,6 +40,13 @@ router.post('/hq/meta-news/:id/seen', requireAdmin, wrap(async (req, res) =>
 
 /* ── home and graphs ── */
 router.get('/hq/home', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) => ok(res, await hq('insights').home())));
+
+/* ── the website: quizpe.in/app (hq/web.js, 2026-10-10 — WhatsApp is gone) ── */
+router.get('/hq/web/overview', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) => ok(res, await hq('web').overview())));
+router.get('/hq/web/sign-ins', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
+  ok(res, await hq('web').signIns({ days: req.query.days, q: req.query.q }))));
+router.get('/hq/web/families', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
+  ok(res, await hq('web').families({ q: req.query.q, filter: req.query.filter }))));
 router.get('/hq/graphs/:page', requireAdmin, requireCap('analytics.view'), wrap(async (req, res) => {
   const out = await hq('insights').page(req.params.page, req.query.days);
   if (!out) return fail(res, 404, 'No such graph page.');
