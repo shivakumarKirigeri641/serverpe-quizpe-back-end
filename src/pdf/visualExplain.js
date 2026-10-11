@@ -412,8 +412,13 @@ function drawVisual(doc, x, y, w, item) {
     }
   };
   // heights are deterministic, so we can draw the panel before the content
-  const est =
-    spec.kind === 'place'    ? placeHeight(doc, w, spec.n) :
+  const est = heightOf(doc, w, spec);
+  doc.roundedRect(x, y - 2, w, est + 4, 4).fillAndStroke(C.soft, C.soft);
+  return render();
+}
+
+function heightOf(doc, w, spec) {
+  return spec.kind === 'place'    ? placeHeight(doc, w, spec.n) :
     spec.kind === 'compare'  ? 50 :
     spec.kind === 'seq'      ? 48 :
     spec.kind === 'bars'     ? 56 :
@@ -421,9 +426,20 @@ function drawVisual(doc, x, y, w, item) {
     spec.kind === 'clock'    ? 64 :
     spec.kind === 'mul'
       ? (Math.min(spec.a, spec.b) <= 10 && Math.max(spec.a, spec.b) <= 12 ? 36 + Math.min(spec.a, spec.b) * 10 : 32)
-      : columnHeight(spec.nums.length);
-  doc.roundedRect(x, y - 2, w, est + 4, 4).fillAndStroke(C.soft, C.soft);
-  return render();
+      : ['add', 'sub'].includes(spec.kind) ? columnHeight(spec.nums.length) : 0;
 }
 
-module.exports = { drawVisual, detect, toWords };
+/**
+ * How tall this question's visual will be, WITHOUT drawing it — 0 when there is none.
+ * The report measures a whole answer block with it before drawing, so a visual is never
+ * started near the bottom of a page (pdfkit then adds a page for every line drawn past
+ * the edge: the "blank pages" in reports, 2026-10-11).
+ */
+function visualHeight(doc, w, item) {
+  try {
+    const spec = detect({ question: item.question_pdf, explanation: item.explanation, correctText: item.correct_text });
+    return spec ? heightOf(doc, w, spec) : 0;
+  } catch { return 0; }
+}
+
+module.exports = { drawVisual, visualHeight, detect, toWords };

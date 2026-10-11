@@ -420,9 +420,30 @@ async function generateDailyReport(trackerId) {
   label(doc, 'Answer review — with explanations', M, y, C.brand, 10); y += 18;
 
   const optText = (it, l) => ({ A: it.option_a, B: it.option_b, C: it.option_c, D: it.option_d }[l]);
+  /*
+   * NO BLANK PAGES (user, 2026-10-11: "a lot of blank pages, then the solutions"). The page
+   * has no margins (margin: 0), so anything drawn past its bottom edge makes pdfkit add a
+   * page — one per line of a tall visual started near the bottom. Each answer block is
+   * now MEASURED first (question, your answer, the correct one, why, and the drawn
+   * working) and moved to a new page whole when it would not fit above the footer.
+   */
+  const { visualHeight } = require('./visualExplain');
+  const BOTTOM = doc.page.height - 34;          // the footer band is the last 26pt
+  const blockHeight = (it) => {
+    doc.font(doc._F.bold).fontSize(9.5);
+    let h = Math.max(18, doc.heightOfString(`Q${it.serial_number}. ${it.question_pdf}`, { width: W - 26 }) + 2);
+    doc.font(doc._F.regular).fontSize(8.5);
+    h += doc.heightOfString(`Your answer: ${it.answered_option ? `${it.answered_option}) ${optText(it, it.answered_option) ?? ''}` : 'not answered'}`, { width: W - 26 }) + 2;
+    if (!it.is_correct) h += doc.heightOfString(`Correct: ${it.answer}) ${optText(it, it.answer) ?? ''}`, { width: W - 26 }) + 1;
+    if (it.explanation) { doc.font(doc._F.oblique).fontSize(8.5); h += doc.heightOfString(`Why: ${it.explanation}`, { width: W - 40 }) + 1; }
+    const vh = visualHeight(doc, W - 30, it);
+    return { h: h + (vh ? vh + 16 : 0) + 12, vh };
+  };
   doc.y = y;
   items.forEach(it => {
-    if (doc.y > doc.page.height - 96) { doc.addPage(); doc.y = M; }
+    const { h, vh } = blockHeight(it);
+    // Whole block to the next page when it does not fit (and would fit on an empty one).
+    if (doc.y + h > BOTTOM && h < BOTTOM - M) { doc.addPage(); doc.y = M; }
     const top = doc.y;
     const badge = it.is_correct ? C.ok : (it.answered_option ? C.bad : C.faint);
 
@@ -449,8 +470,10 @@ async function generateDailyReport(trackerId) {
     try {
       const { drawVisual } = require('./visualExplain');
       const vw = W - 30;   // full content width, so long number-words never clip
-      if (doc.y + 90 > doc.page.height - 40) { doc.addPage(); doc.y = M; }
-      const used = drawVisual(doc, M + 26, doc.y + 6, vw, it);
+      // Only when there IS a visual, and only by its real height (it was a flat 90pt check,
+      // which added a page even for questions with no visual at all).
+      if (vh && doc.y + vh + 16 > BOTTOM) { doc.addPage(); doc.y = M; }
+      const used = vh ? drawVisual(doc, M + 26, doc.y + 6, vw, it) : 0;
       if (used) doc.y += used + 10;
     } catch (e) { /* visual is a bonus, never break the report */ }
     doc.moveTo(M, doc.y + 6).lineTo(M + W, doc.y + 6).strokeColor(C.line).lineWidth(0.5).stroke();
