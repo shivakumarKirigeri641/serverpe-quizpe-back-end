@@ -46,6 +46,19 @@ const csv = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
       money(r.igst), money(r.total), r.is_active ? 'yes' : 'no', how].map(csv).join(','));
   }
   fs.writeFileSync(path.join(out, 'invoices.csv'), `${lines.join('\n')}\n`);
+  /* Every captured Razorpay payment should have its invoice — one without is listed, so
+     nothing paid is missed in GST (2026-10-12: "don't we have QuizPe payments?"). */
+  const { rows: pays } = await db.query(
+    `SELECT p.id, p.payment_id, p.amount, p.description, to_char(p.created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS day,
+            EXISTS (SELECT 1 FROM invoices i WHERE i.payment_id = p.id) AS invoiced
+       FROM payments p
+      WHERE p.status = 'captured' AND to_char(p.created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM') = $1
+        AND (p.order_id IS NULL OR p.order_id NOT IN (SELECT razorpay_order_id FROM checkout_sessions WHERE razorpay_mode = 'test' AND razorpay_order_id IS NOT NULL))
+      ORDER BY p.created_at`, [month]);
+  const noInvoice = pays.filter((p) => !p.invoiced);
+  // payments.amount is in rupees here (only the fee is in paise — hq/pnl.js).
+  console.log(`Razorpay payments captured in ${month}: ${pays.length} · ₹${pays.reduce((a, p) => a + Number(p.amount || 0), 0).toFixed(2)}${noInvoice.length ? ` · ${noInvoice.length} WITHOUT an invoice:` : ' · every one has its invoice'}`);
+  for (const p of noInvoice) console.log(`  ${p.day} · ${p.payment_id} · ₹${Number(p.amount).toFixed(2)} · ${p.description || ''}`);
   const sum = (k) => rows.reduce((a, r) => a + Number(r[k] || 0), 0).toFixed(2);
   console.log(`QuizPe ${month}: ${rows.length} invoice(s) · copied ${copied} · missing ${missing}${rows.some((r) => !r.is_active) ? ` · ${rows.filter((r) => !r.is_active).length} marked inactive` : ''}`);
   console.log(`Taxable ₹${sum('amount_base')} · CGST ₹${sum('cgst')} · SGST ₹${sum('sgst')} · IGST ₹${sum('igst')} · Total ₹${sum('total')}`);
