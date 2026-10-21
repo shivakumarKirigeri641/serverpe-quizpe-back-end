@@ -11,6 +11,8 @@
  */
 
 const db = require('../database/connectDB');
+// Families who agreed only (2026-10-21, hq/agreed.js): never someone who only said Hi or replied STOP.
+const AGREED = require('./hq/agreed').sql('parent_mobile_number');
 const { LAUNCH_DATE } = require('../config/launch');
 
 const TZ = 'Asia/Kolkata';
@@ -29,7 +31,7 @@ async function overview() {
   const { rows: [r] } = await db.query(`
     WITH d AS (SELECT CURRENT_DATE AS today)
     SELECT
-      (SELECT COUNT(*)::int FROM parents WHERE is_active)                              AS parents_total,
+      (SELECT COUNT(*)::int FROM parents WHERE is_active AND ${AGREED})                              AS parents_total,
       (SELECT COUNT(*)::int FROM students WHERE is_active)                             AS students_total,
       (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
         WHERE s.is_active AND p.is_trial AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date) AS trial_active,
@@ -72,7 +74,7 @@ async function daily(days = 30) {
        GROUP BY t.quiz_date) q ON q.d = span.d
     LEFT JOIN (
       SELECT ${IST_DATE('created_at')} AS d, COUNT(*)::int AS signups
-        FROM parents WHERE is_active GROUP BY 1) s ON s.d = span.d
+        FROM parents WHERE is_active AND ${AGREED} GROUP BY 1) s ON s.d = span.d
     LEFT JOIN (
       SELECT ${IST_DATE('created_at')} AS d, SUM(total)::numeric AS revenue
         FROM invoices WHERE is_active GROUP BY 1) i ON i.d = span.d
@@ -95,10 +97,10 @@ async function comparisons() {
       (SELECT COUNT(*)::int FROM quizpe_tracker WHERE quiz_date > CURRENT_DATE - 30)                  AS quizzes_month,
       (SELECT COUNT(*)::int FROM quizpe_tracker WHERE quiz_date > CURRENT_DATE - 60
                                                   AND quiz_date <= CURRENT_DATE - 30)                 AS quizzes_prev_month,
-      (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} = CURRENT_DATE)              AS signups_today,
-      (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} = CURRENT_DATE - 1)          AS signups_yesterday,
-      (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 7)          AS signups_week,
-      (SELECT COUNT(*)::int FROM parents WHERE ${IST_DATE('created_at')} > CURRENT_DATE - 14
+      (SELECT COUNT(*)::int FROM parents WHERE ${AGREED} AND ${IST_DATE('created_at')} = CURRENT_DATE)              AS signups_today,
+      (SELECT COUNT(*)::int FROM parents WHERE ${AGREED} AND ${IST_DATE('created_at')} = CURRENT_DATE - 1)          AS signups_yesterday,
+      (SELECT COUNT(*)::int FROM parents WHERE ${AGREED} AND ${IST_DATE('created_at')} > CURRENT_DATE - 7)          AS signups_week,
+      (SELECT COUNT(*)::int FROM parents WHERE ${AGREED} AND ${IST_DATE('created_at')} > CURRENT_DATE - 14
                                            AND ${IST_DATE('created_at')} <= CURRENT_DATE - 7)         AS signups_prev_week,
       (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} = CURRENT_DATE)     AS revenue_today,
       (SELECT COALESCE(SUM(total),0)::numeric FROM invoices WHERE is_active AND ${IST_DATE('created_at')} = CURRENT_DATE - 1) AS revenue_yesterday,

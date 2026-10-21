@@ -21,6 +21,25 @@ const metrics = require('../admin/metrics');
 
 const router = express.Router();
 
+/*
+ * ONLY FAMILIES WHO AGREED, IN EVERY ANSWER (user, 2026-10-21: "taking count of earlier customers who all
+ * agreed only — we are no more with WhatsApp"; admin/hq/agreed.js). Before any route answers: a list row
+ * for someone who never agreed, or replied STOP, is taken out, and their number anywhere else blanked.
+ * Sign-in, settings and the question bank carry no families and are left alone.
+ */
+const AGREED_SKIP = /^\/(otp|login|logout|me|questions|curriculum|holidays|admins?|audit|settings)(\/|$)/;
+router.use((req, res, next) => {
+  if (AGREED_SKIP.test(req.path) || req.method !== 'GET') return next();
+  const inner = res.json.bind(res);
+  res.json = (body) => {
+    require('../admin/hq/agreed').filter(body)
+      .then((out) => inner(out))
+      .catch((e) => { console.error('[admin] agreed filter:', e.message); inner(body); });
+    return res;
+  };
+  next();
+});
+
 // Customer CRUD + guarded deletion lives in its own module — see the delete
 // policy documented there before changing anything.
 router.use(require('../admin/customerRoutes'));

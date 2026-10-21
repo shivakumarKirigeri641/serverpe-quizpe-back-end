@@ -15,6 +15,11 @@ const shared = require('./shared');
    phone notifications). The owner's own use is left out (hq/notMe.js). */
 const ME = require('./notMe').mobile;
 const M10 = (col) => `right(regexp_replace(${col}, '\\D', '', 'g'), 10)`;
+/* Families who agreed only (2026-10-21, hq/agreed.js): WhatsApp agreements before it closed, website
+   sign-ins since; never someone who only said Hi or replied STOP. */
+const AG = require('./agreed').sql;
+const AGREED = AG('parent_mobile_number');
+const AGREED_P = AG('p.parent_mobile_number');
 
 const IST = (col) => `(${col} AT TIME ZONE 'Asia/Kolkata')::date`;
 const clampDays = (d, def = 30) => Math.min(365, Math.max(1, Number(d) || def));
@@ -36,13 +41,13 @@ const STANDING = `
 async function home() {
   const { rows: [t] } = await db.query(`${STANDING}
     SELECT
-      (SELECT count(*)::int FROM parents WHERE is_active) AS families,
-      (SELECT count(*)::int FROM parents WHERE is_active AND ${IST('created_at')} = CURRENT_DATE) AS families_today,
+      (SELECT count(*)::int FROM parents WHERE is_active AND ${AGREED}) AS families,
+      (SELECT count(*)::int FROM parents WHERE is_active AND ${AGREED} AND ${IST('created_at')} = CURRENT_DATE) AS families_today,
       (SELECT count(*)::int FROM students WHERE is_active) AS children,
-      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND n.paying) AS paying,
-      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND n.on_trial AND NOT n.paying) AS on_trial,
-      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND NOT n.on_trial AND NOT n.paying) AS lapsed,
-      (SELECT count(*)::int FROM parents WHERE is_active AND service_paused) AS stopped,
+      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND ${AGREED_P} AND n.paying) AS paying,
+      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND ${AGREED_P} AND n.on_trial AND NOT n.paying) AS on_trial,
+      (SELECT count(*)::int FROM parents p JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND ${AGREED_P} AND NOT n.on_trial AND NOT n.paying) AS lapsed,
+      (SELECT count(*)::int FROM parents WHERE is_active AND ${AGREED} AND service_paused) AS stopped,
       (SELECT count(*)::int FROM quizpe_tracker WHERE quiz_date = CURRENT_DATE AND is_active) AS quizzes_today,
       (SELECT count(*)::int FROM quizpe_tracker t JOIN quizpe_status st ON st.id = t.status_id
         WHERE t.quiz_date = CURRENT_DATE AND st.status_code = 'completed') AS completed_today,
@@ -77,7 +82,7 @@ async function overview(days) {
   const { rows } = await db.query(`
     WITH span AS (${span()})
     SELECT span.d::text AS d,
-      (SELECT count(*)::int FROM parents WHERE is_active AND ${IST('created_at')} = span.d) AS families,
+      (SELECT count(*)::int FROM parents WHERE is_active AND ${AGREED} AND ${IST('created_at')} = span.d) AS families,
       (SELECT count(*)::int FROM quizpe_tracker t JOIN quizpe_status st ON st.id = t.status_id
         WHERE t.quiz_date = span.d AND st.status_code = 'completed') AS completed,
       (SELECT count(*)::int FROM quizpe_tracker WHERE quiz_date = span.d AND is_active) AS quizzes,
@@ -149,7 +154,7 @@ async function families(days) {
   const { rows } = await db.query(`
     WITH span AS (${span()})
     SELECT span.d::text AS d,
-      (SELECT count(*)::int FROM parents WHERE is_active AND ${IST('created_at')} = span.d) AS joined,
+      (SELECT count(*)::int FROM parents WHERE is_active AND ${AGREED} AND ${IST('created_at')} = span.d) AS joined,
       -- First sign-in on the app that day (2026-10-10), where "replied STOP" used to be.
       (SELECT count(*)::int FROM (SELECT ${M10('mobile_number')} AS m, min(created_at) AS first_at FROM parent_web_sessions
                                    WHERE ${ME('mobile_number')} GROUP BY 1) f WHERE ${IST('f.first_at')} = span.d) AS first_signin,
@@ -162,11 +167,11 @@ async function families(days) {
            count(*) FILTER (WHERE NOT n.on_trial AND NOT n.paying AND n.ever_paid)::int AS was_paying,
            count(*) FILTER (WHERE NOT n.on_trial AND NOT n.paying AND NOT n.ever_paid)::int AS trial_ended,
            count(*) FILTER (WHERE n.parent_id IS NULL)::int AS never_started
-      FROM parents p LEFT JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active`);
+      FROM parents p LEFT JOIN now_sub n ON n.parent_id = p.id WHERE p.is_active AND ${AGREED_P}`);
   const { rows: states } = await db.query(`
     SELECT coalesce(su.state_name, nullif(p.state_code, ''), '—') AS state, count(*)::int AS families
       FROM parents p LEFT JOIN states_unions su ON su.state_code = p.state_code
-     WHERE p.is_active GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+     WHERE p.is_active AND ${AGREED_P} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
   const { rows: boards } = await db.query(`
     SELECT b.board_name AS board, g.grade_name AS grade, count(*)::int AS children
       FROM students s LEFT JOIN boards b ON b.id = s.board_id LEFT JOIN grades g ON g.id = s.grade_id
@@ -257,7 +262,7 @@ async function reach(days) {
     WITH fam AS (
       SELECT p.id, (coalesce(p.email, '') <> '') AS email,
              EXISTS (SELECT 1 FROM parent_push x WHERE ${M10('x.mobile_number')} = ${M10('p.parent_mobile_number')}) AS push
-        FROM parents p WHERE p.is_active AND ${ME('p.parent_mobile_number')})
+        FROM parents p WHERE p.is_active AND ${AGREED_P} AND ${ME('p.parent_mobile_number')})
     SELECT count(*) FILTER (WHERE email AND push)::int AS both,
            count(*) FILTER (WHERE email AND NOT push)::int AS email_only,
            count(*) FILTER (WHERE push AND NOT email)::int AS push_only,
@@ -311,7 +316,7 @@ async function drill(kind, day) {
     const { rows } = await db.query(
       `SELECT p.id::text AS id, p.parent_name AS name, p.parent_mobile_number AS mobile, p.state_code AS state, p.created_at,
               (SELECT string_agg(s.student_name, ', ') FROM students s WHERE s.parent_id = p.id AND s.is_active) AS children
-         FROM parents p WHERE p.is_active AND ${IST('p.created_at')} = $1::date ORDER BY p.created_at`, [day]);
+         FROM parents p WHERE p.is_active AND ${AGREED_P} AND ${IST('p.created_at')} = $1::date ORDER BY p.created_at`, [day]);
     return rows.map((r) => ({ ...r, masked: mask(r.mobile) }));
   }
   if (kind === 'quizzes') {

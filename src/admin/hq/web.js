@@ -73,7 +73,16 @@ async function overview() {
             (SELECT count(DISTINCT session_id) FROM site_visits v WHERE NOT coalesce(v.is_bot, false) AND (v.created_at AT TIME ZONE 'Asia/Kolkata')::date = d)::int AS visitors
        FROM generate_series((now() AT TIME ZONE 'Asia/Kolkata')::date - 13, (now() AT TIME ZONE 'Asia/Kolkata')::date, interval '1 day') d
       ORDER BY d`);
-  return { ...s, unreachable: n(unreachable?.n), days };
+  /* Every family who agreed, and the WhatsApp ones not on the app yet (2026-10-21, hq/agreed.js). */
+  const M = (c) => `right(regexp_replace(${c}, '\\D', '', 'g'), 10)`;
+  const ag = (await db.query(
+    `WITH web AS (SELECT DISTINCT ${M('mobile_number')} AS m FROM parent_web_sessions),
+          wa AS (SELECT DISTINCT ${M('c.mobile_number')} AS m FROM policy_consents c
+                  WHERE c.is_active AND c.mobile_number IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM whatsapp_sessions so WHERE so.opted_out AND ${M('so.mobile_number')} = ${M('c.mobile_number')}))
+     SELECT (SELECT count(*) FROM (SELECT m FROM web UNION SELECT m FROM wa) x WHERE length(m) = 10 AND ${ME('m')})::int AS agreed_families,
+            (SELECT count(*) FROM wa WHERE m NOT IN (SELECT m FROM web) AND length(m) = 10 AND ${ME('m')})::int AS whatsapp_not_on_app`)).rows[0];
+  return { ...s, unreachable: n(unreachable?.n), agreed_families: n(ag?.agreed_families), whatsapp_not_on_app: n(ag?.whatsapp_not_on_app), days };
 }
 
 async function signIns({ days = 30, q = '', limit = 300 } = {}) {
@@ -108,38 +117,66 @@ async function signIns({ days = 30, q = '', limit = 300 } = {}) {
  * sign-ins and the last visit. filter: all | unreachable (no email and no
  * notifications) | no_email | push | trial | paid | not_enrolled
  */
-async function families({ q = '', filter = 'all', limit = 300 } = {}) {
+/*
+ * EVERY FAMILY WHO AGREED (user, 2026-10-21: "taking count of earlier customers who all agreed only — we
+ * are no more with WhatsApp"; hq/agreed.js). Those who agreed on WhatsApp before it closed — most have not
+ * signed in on the app yet — and everyone who signed in on the app; never someone who only said Hi or
+ * replied STOP (unless they came back on the app). Each is tagged by where they agreed:
+ *   channel  web (the app only) | whatsapp (WhatsApp, not on the app yet) | both (WhatsApp, now on the app)
+ * Extra filters: web | whatsapp | both.
+ */
+async function families({ q = '', filter = 'all', limit = 500 } = {}) {
   const term = String(q || '').trim().replace(/[%_]/g, '');
+  const M = (c) => `right(regexp_replace(${c}, '\\D', '', 'g'), 10)`;
   const { rows } = await db.query(
     `WITH w AS (
-       SELECT right(regexp_replace(mobile_number, '\\D', '', 'g'), 10) AS m10, min(created_at) AS first_at, max(last_seen_at) AS last_at,
+       SELECT ${M('mobile_number')} AS m10, min(created_at) AS first_at, max(last_seen_at) AS last_at,
               count(*)::int AS signins,
               bool_or(ended_at IS NULL AND expires_at > now()) AS signed_in
          FROM parent_web_sessions GROUP BY 1),
-     pu AS (SELECT right(regexp_replace(mobile_number, '\\D', '', 'g'), 10) AS m10, count(*)::int AS devices FROM parent_push GROUP BY 1)
-     SELECT w.*, coalesce(pu.devices, 0) AS push_devices,
+     wa AS (
+       SELECT ${M('c.mobile_number')} AS m10, min(c.consented_at) AS agreed_at
+         FROM policy_consents c
+        WHERE c.is_active AND c.mobile_number IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM whatsapp_sessions so WHERE so.opted_out AND ${M('so.mobile_number')} = ${M('c.mobile_number')})
+        GROUP BY 1),
+     wa_last AS (
+       SELECT ${M('mobile_number')} AS m10, max(created_at) AS last_at FROM whatsapp_messages WHERE direction = 'in' GROUP BY 1),
+     base AS (SELECT m10 FROM w UNION SELECT m10 FROM wa),
+     pu AS (SELECT ${M('mobile_number')} AS m10, count(*)::int AS devices FROM parent_push GROUP BY 1)
+     SELECT base.m10, w.first_at, w.last_at, coalesce(w.signins, 0) AS signins, coalesce(w.signed_in, false) AS signed_in,
+            wa.agreed_at, wl.last_at AS wa_last,
+            CASE WHEN w.m10 IS NOT NULL AND wa.m10 IS NOT NULL THEN 'both' WHEN w.m10 IS NOT NULL THEN 'web' ELSE 'whatsapp' END AS channel,
+            coalesce(pu.devices, 0) AS push_devices,
             p.id AS parent_id, p.parent_name, p.email, p.created_at AS enrolled_at,
             (SELECT count(*) FROM students st WHERE st.parent_id = p.id AND st.is_active)::int AS children,
             sub.plan_name, sub.is_trial, sub.running, sub.plan_end_date
-       FROM w
-       LEFT JOIN pu ON pu.m10 = w.m10
-       LEFT JOIN parents p ON right(regexp_replace(p.parent_mobile_number, '\\D', '', 'g'), 10) = w.m10
+       FROM base
+       LEFT JOIN w ON w.m10 = base.m10
+       LEFT JOIN wa ON wa.m10 = base.m10
+       LEFT JOIN wa_last wl ON wl.m10 = base.m10
+       LEFT JOIN pu ON pu.m10 = base.m10
+       LEFT JOIN parents p ON ${M('p.parent_mobile_number')} = base.m10
        ${PLAN}
-      WHERE ($1 <> '' OR ${ME('w.m10')})
-        AND ($1 = '' OR w.m10 LIKE '%' || $1 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $1 || '%')
-      ORDER BY w.last_at DESC NULLS LAST LIMIT $2`, [term, Math.min(1000, Number(limit) || 300)]);
+      WHERE length(base.m10) = 10 AND ($1 <> '' OR ${ME('base.m10')})
+        AND ($1 = '' OR base.m10 LIKE '%' || $1 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $1 || '%')
+      ORDER BY greatest(w.last_at, wl.last_at, wa.agreed_at) DESC NULLS LAST LIMIT $2`, [term, Math.min(2000, Number(limit) || 500)]);
   const all = rows.map((r) => ({
     mobile: r.m10, name: r.parent_name || null, email: r.email || null, parent_id: r.parent_id ? String(r.parent_id) : null,
+    channel: r.channel,
     children: n(r.children), plan: planOf(r), plan_name: r.plan_name || null, plan_ends: r.plan_end_date || null,
     push_devices: n(r.push_devices), signins: n(r.signins), signed_in: Boolean(r.signed_in),
-    first_at: r.first_at, last_at: r.last_at, enrolled_at: r.enrolled_at,
+    first_at: r.first_at || r.agreed_at, last_at: r.last_at, wa_last: r.wa_last, agreed_at: r.agreed_at, enrolled_at: r.enrolled_at,
     reach: [r.email ? 'email' : null, n(r.push_devices) ? 'push' : null].filter(Boolean),
   }));
   const F = {
     unreachable: (x) => !x.reach.length, no_email: (x) => !x.email, push: (x) => x.push_devices > 0,
     trial: (x) => x.plan === 'free trial', paid: (x) => x.plan === 'paid plan', not_enrolled: (x) => x.plan === 'not enrolled',
+    web: (x) => x.channel === 'web', whatsapp: (x) => x.channel === 'whatsapp', both: (x) => x.channel === 'both',
   }[filter];
-  return { rows: F ? all.filter(F) : all, total: all.length };
+  const counts = { web: 0, whatsapp: 0, both: 0 };
+  for (const x of all) counts[x.channel] += 1;
+  return { rows: F ? all.filter(F) : all, total: all.length, by_channel: counts };
 }
 
 module.exports = { overview, signIns, families, deviceOf };
