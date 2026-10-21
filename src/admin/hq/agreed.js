@@ -13,7 +13,7 @@
  *   filter(body)  an admin API answer with everyone else taken out: a list row whose own mobile is not
  *                 allowed is removed; that number anywhere else is blanked (null) and marked hidden
  *   channelSql(col) 'web' | 'whatsapp' | 'both' — where the family agreed
- * The admin's own numbers (ADMIN_MOBILES) always show. Nothing is deleted — payments and invoices stay
+ * The admin's own numbers (ADMIN_MOBILES) never show (2026-10-21: "do not include my details"). Nothing is deleted — payments and invoices stay
  * in the database as legal records; they are only not shown.
  */
 
@@ -27,9 +27,10 @@ const viaWeb = (m) => `EXISTS (SELECT 1 FROM parent_web_sessions aw WHERE ${M10(
 const stopped = (m) => `EXISTS (SELECT 1 FROM whatsapp_sessions so WHERE so.opted_out AND ${M10('so.mobile_number')} = ${m})`;
 
 /** SQL: the mobile in `col` belongs to a family who agreed (and did not STOP, unless they came back on the web). */
+// Never the owner's own number either (user, 2026-10-21: "do not include my details") — hq/notMe.js.
 const sql = (col) => {
   const m = M10(col);
-  return `((${viaWhatsApp(m)} AND NOT ${stopped(m)}) OR ${viaWeb(m)})`;
+  return `(((${viaWhatsApp(m)} AND NOT ${stopped(m)}) OR ${viaWeb(m)}) AND ${require('./notMe').mobile(col)})`;
 };
 
 /** SQL: where the family agreed — 'both', 'web' or 'whatsapp'. */
@@ -57,7 +58,7 @@ function collect(node, out, depth = 0) {
 async function allowedOf(mobiles) {
   if (!mobiles.length) return new Set();
   const { rows } = await db.query(
-    `SELECT m FROM unnest($1::text[]) AS m WHERE ${sql('m')} OR m = ANY($2::text[])`, [mobiles, OWNER]);
+    `SELECT m FROM unnest($1::text[]) AS m WHERE ${sql('m')}`, [mobiles]);
   return new Set(rows.map((r) => r.m));
 }
 

@@ -182,7 +182,7 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        SELECT 'email_confirmed'::text, p.email_verified_at,
               COALESCE(p.parent_name, '—'), COALESCE(p.parent_name, ''), p.parent_mobile_number,
               p.email, p.id, NULL::bigint, p.id, NULL::numeric
-         FROM parents p WHERE p.email_verified_at IS NOT NULL
+         FROM parents p WHERE p.email_verified_at IS NOT NULL AND ${require('./hq/notMe').mobile('p.parent_mobile_number')}
         ORDER BY p.email_verified_at DESC LIMIT 30
      ), pay_failed AS (
        -- a payment that failed (2026-10-21) — worth a look while the family may still be trying
@@ -193,7 +193,7 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          FROM payments pay
          LEFT JOIN checkout_sessions cs ON cs.razorpay_order_id = pay.order_id
          LEFT JOIN parents pp ON right(regexp_replace(pp.parent_mobile_number, '[^0-9]', '', 'g'), 10) = right(regexp_replace(cs.mobile_number, '[^0-9]', '', 'g'), 10)
-        WHERE pay.status = 'failed' AND coalesce(cs.razorpay_mode, 'live') <> 'test'
+        WHERE pay.status = 'failed' AND coalesce(cs.razorpay_mode, 'live') <> 'test' AND ${require('./hq/notMe').mobile('cs.mobile_number')}
         ORDER BY pay.created_at DESC LIMIT 30
      ), tick AS (
        SELECT 'support'::text, t.created_at,
