@@ -161,6 +161,40 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          LEFT JOIN students st ON st.id = f.student_id
         WHERE f.rating IS NOT NULL
         ORDER BY f.created_at DESC LIMIT 30
+     ), web_new AS (
+       -- THE WEBSITE'S "SAID HI" (2026-10-21, WhatsApp is gone): a mobile signing in on quizpe.in/app
+       -- for the very first time.
+       SELECT 'app_signin'::text, f.first_at,
+              COALESCE(p.parent_name, 'New family'), COALESCE(p.parent_name, ''), f.mobile,
+              'signed in on quizpe.in/app for the first time',
+              f.id, NULL::bigint, p.id, NULL::numeric
+         FROM (
+           SELECT DISTINCT ON (right(regexp_replace(w.mobile_number, '[^0-9]', '', 'g'), 10))
+                  right(regexp_replace(w.mobile_number, '[^0-9]', '', 'g'), 10) AS mobile, w.created_at AS first_at, w.id
+             FROM parent_web_sessions w
+            ORDER BY right(regexp_replace(w.mobile_number, '[^0-9]', '', 'g'), 10), w.created_at
+         ) f
+         LEFT JOIN parents p ON right(regexp_replace(p.parent_mobile_number, '[^0-9]', '', 'g'), 10) = f.mobile
+        WHERE ${require('./hq/notMe').mobile('f.mobile')}   -- the owner's own sign-ins do not pop
+        ORDER BY f.first_at DESC LIMIT 40
+     ), email_ok AS (
+       -- a parent confirmed their email with the code (2026-10-21, web/email.js)
+       SELECT 'email_confirmed'::text, p.email_verified_at,
+              COALESCE(p.parent_name, '—'), COALESCE(p.parent_name, ''), p.parent_mobile_number,
+              p.email, p.id, NULL::bigint, p.id, NULL::numeric
+         FROM parents p WHERE p.email_verified_at IS NOT NULL
+        ORDER BY p.email_verified_at DESC LIMIT 30
+     ), pay_failed AS (
+       -- a payment that failed (2026-10-21) — worth a look while the family may still be trying
+       SELECT 'payment_failed'::text, pay.created_at,
+              COALESCE(pp.parent_name, '—'), COALESCE(pp.parent_name, ''), cs.mobile_number,
+              COALESCE(pay.error_description, pay.error_reason, 'payment failed'),
+              pay.id, NULL::bigint, pp.id, pay.amount
+         FROM payments pay
+         LEFT JOIN checkout_sessions cs ON cs.razorpay_order_id = pay.order_id
+         LEFT JOIN parents pp ON right(regexp_replace(pp.parent_mobile_number, '[^0-9]', '', 'g'), 10) = right(regexp_replace(cs.mobile_number, '[^0-9]', '', 'g'), 10)
+        WHERE pay.status = 'failed' AND coalesce(cs.razorpay_mode, 'live') <> 'test'
+        ORDER BY pay.created_at DESC LIMIT 30
      ), tick AS (
        SELECT 'support'::text, t.created_at,
               COALESCE(t.user_name, '—'), COALESCE(t.user_name, ''), t.mobile_number,
@@ -176,7 +210,8 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          SELECT * FROM orphan_reports UNION ALL
          SELECT * FROM subs   UNION ALL SELECT * FROM hi      UNION ALL
          SELECT * FROM bc     UNION ALL
-         SELECT * FROM fb     UNION ALL SELECT * FROM tick
+         SELECT * FROM fb     UNION ALL SELECT * FROM tick      UNION ALL
+         SELECT * FROM web_new UNION ALL SELECT * FROM email_ok UNION ALL SELECT * FROM pay_failed
        ) all_events
       WHERE ($1::timestamptz IS NULL OR at > $1::timestamptz)
         AND ($2::text[] IS NULL OR kind = ANY($2::text[]))
