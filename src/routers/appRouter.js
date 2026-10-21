@@ -153,7 +153,7 @@ router.get('/me', wrap(async (req, res) => {
     });
   }
   const parent = ctx.exists
-    ? (await db.query(`SELECT parent_name, email, service_paused FROM parents WHERE id = $1`, [ctx.parentId])).rows[0]
+    ? (await db.query(`SELECT parent_name, email, email_verified_at, service_paused FROM parents WHERE id = $1`, [ctx.parentId])).rows[0]
     : (await db.query(`SELECT context->>'parent_name' AS parent_name, NULLIF(context->>'email', '') AS email FROM whatsapp_sessions WHERE mobile_number = $1 ORDER BY id DESC LIMIT 1`, [mobile])).rows[0];
   const plans = (await db.query(
     `SELECT plan_code, plan_name, price, comparable_price, student_count, duration
@@ -165,7 +165,8 @@ router.get('/me', wrap(async (req, res) => {
   res.json({
     success: true,
     mobile,
-    parent: { name: parent?.parent_name || null, email: parent?.email || null },
+    // email_verified (2026-10-21, web/email.js): confirmed with the 4-digit code we emailed.
+    parent: { name: parent?.parent_name || null, email: parent?.email || null, email_verified: Boolean(parent?.email_verified_at) },
     // An enrolled family must give an email before anything else (2026-10-08).
     needs_email: Boolean(ctx.exists && !parent?.email),
     status: ctx.status,                       // NEW | INCOMPLETE | NO_SUBSCRIPTION | TRIAL_ACTIVE | ACTIVE | EXPIRED
@@ -202,11 +203,28 @@ router.post('/profile', wrap(async (req, res) => {
     await db.query(`UPDATE whatsapp_sessions SET context = context || jsonb_build_object('parent_name', $2::text), modified_at = now() WHERE id = $1`, [sid, name]);
   }
   if (emailRaw != null) {
-    await db.query(`UPDATE parents SET email = $2, modified_at = now() WHERE parent_mobile_number = $1`, [mobile, emailRaw]);
+    // A different address is not confirmed yet (2026-10-21): the code confirms it again.
+    await db.query(
+      `UPDATE parents SET email = $2, modified_at = now(),
+              email_verified_at = CASE WHEN lower(coalesce(email, '')) = lower($2) THEN email_verified_at END
+        WHERE parent_mobile_number = $1`, [mobile, emailRaw]);
     const sid = await ensureSession(mobile);
     await db.query(`UPDATE whatsapp_sessions SET context = context || jsonb_build_object('email', $2::text), modified_at = now() WHERE id = $1`, [sid, emailRaw]);
   }
   res.json({ success: true });
+}));
+
+/* CONFIRM THE EMAIL (user, 2026-10-21; web/email.js): a 4-digit code to the address, typed back here. */
+router.post('/email/code', wrap(async (req, res) => {
+  const email = req.body?.email || (await db.query(`SELECT email FROM parents WHERE parent_mobile_number = $1 ORDER BY id LIMIT 1`, [req.parentMobile])).rows[0]?.email;
+  const out = await require('../web/email').sendCode(req.parentMobile, email);
+  if (!out.ok) return res.status(out.status || 400).json({ success: false, error: out.error });
+  res.json({ success: true, sent_to: out.sent_to, message: `A 4-digit code is on its way to ${out.sent_to}. Check Spam too.` });
+}));
+router.post('/email/verify', wrap(async (req, res) => {
+  const out = await require('../web/email').verifyCode(req.parentMobile, req.body?.email, req.body?.code);
+  if (!out.ok) return res.status(400).json({ success: false, error: out.message, code: out.error });
+  res.json({ success: true, email: out.email, message: 'Your email is confirmed. Reports and reminders will come there.' });
 }));
 
 /* A child's name, from the profile (2026-10-10) — the name the quizzes, reports and the app's header use. */

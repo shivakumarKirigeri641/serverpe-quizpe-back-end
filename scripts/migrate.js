@@ -712,6 +712,57 @@ const STEPS = [
       `INSERT INTO app_settings (key, value) VALUES ('comeback_trial_days', '7') ON CONFLICT (key) DO NOTHING`,
     ],
   },
+  {
+    name: 'email_confirm_and_broadcast',
+    // EMAIL, CONFIRMED, AND A BROADCAST TO IT (user, 2026-10-21: "all do it" — like GaadiPe). The app asks
+    // for an email already (required since 2026-10-08) but never checked it:
+    //   parents.email_verified_at      set when the parent types the 4-digit code we emailed
+    //   parents.email_unsubscribed_at  set by the unsubscribe link in every broadcast email
+    //   parents.email_token            the unsubscribe link's key
+    //   parent_email_codes             the codes (hashed, 10 minutes, 5 tries)
+    //   hq_email_campaigns / hq_email_sends   the admin's broadcast emails and who each went to
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='hq_email_sends'`,
+    apply: [
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS email_verified_at timestamptz`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS email_unsubscribed_at timestamptz`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS email_token varchar(64)`,
+      `CREATE TABLE IF NOT EXISTS parent_email_codes (
+         id            bigserial PRIMARY KEY,
+         mobile_number varchar(15) NOT NULL,
+         email         text        NOT NULL,
+         code_hash     varchar(64) NOT NULL,
+         expires_at    timestamptz NOT NULL,
+         attempts      smallint    NOT NULL DEFAULT 0,
+         consumed_at   timestamptz,
+         created_at    timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_parent_email_codes_live ON parent_email_codes (mobile_number, created_at DESC) WHERE consumed_at IS NULL`,
+      `CREATE TABLE IF NOT EXISTS hq_email_campaigns (
+         id           bigserial PRIMARY KEY,
+         admin_mobile varchar(15),
+         category     varchar(20) NOT NULL DEFAULT 'service',
+         audience     varchar(30) NOT NULL DEFAULT 'all',
+         subject      text        NOT NULL,
+         body         text        NOT NULL,
+         status       varchar(20) NOT NULL DEFAULT 'queued',
+         created_at   timestamptz NOT NULL DEFAULT now(),
+         finished_at  timestamptz
+       )`,
+      `CREATE TABLE IF NOT EXISTS hq_email_sends (
+         id           bigserial PRIMARY KEY,
+         campaign_id  bigint      NOT NULL REFERENCES hq_email_campaigns(id) ON DELETE CASCADE,
+         parent_id    bigint,
+         email        text        NOT NULL,
+         status       varchar(20) NOT NULL DEFAULT 'pending',
+         error        text,
+         attempts     smallint    NOT NULL DEFAULT 0,
+         sent_at      timestamptz,
+         created_at   timestamptz NOT NULL DEFAULT now(),
+         UNIQUE (campaign_id, parent_id)
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_hq_email_sends_pending ON hq_email_sends (status, id) WHERE status IN ('pending', 'failed')`,
+    ],
+  },
 ];
 
 (async () => {

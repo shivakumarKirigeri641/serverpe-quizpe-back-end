@@ -51,6 +51,18 @@ router.get('/hq/web/families', requireAdmin, requireCap('parents.view'), wrap(as
 router.get('/hq/events', requireAdmin, requireCap('dashboard.view'), wrap(async (req, res) =>
   ok(res, await hq('events').log({ hours: req.query.hours, kind: req.query.kind, q: req.query.q, visits: req.query.visits === '1' }))));
 router.get('/hq/live-now', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) => ok(res, await hq('events').live())));
+/* Broadcast email (2026-10-21, web/email.js): to confirmed, subscribed families who agreed; a test to you first. */
+router.get('/hq/email', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) =>
+  ok(res, { ...(await require('../web/email').audienceCounts()), campaigns: await require('../web/email').campaigns() })));
+router.post('/hq/email', requireAdmin, requireCap('whatsapp.send'), express.json(), wrap(async (req, res) => {
+  const b = req.body || {};
+  if (!b.test && String(b.confirm || '') !== 'SEND') return fail(res, 400, 'Type SEND to confirm.');
+  const out = await require('../web/email').queueCampaign({ adminMobile: req.admin?.sub, category: b.category, audience: b.audience,
+    subject: b.subject, body: b.body, test: Boolean(b.test) });
+  if (!out.ok) return fail(res, 400, out.error);
+  if (!out.test) console.log('[hq] email broadcast %s queued %d by %s', out.campaign_id, out.queued, req.admin?.sub || '?');
+  ok(res, { ...out, message: out.test ? `Test sent to ${out.sent_to}` : `${out.queued} emails queued — they go out a few a minute` });
+}));
 /* The comeback offer (2026-10-10): how many it is for, and the switch — off until the SMS is approved. */
 router.get('/hq/web/comeback', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) =>
   ok(res, await require('../web/comeback').stats())));

@@ -235,6 +235,8 @@ app.use('/admin/api', require('./security/tunnel').tunnel({ exempt: isFileRoute 
 // Policies — public so a parent can read them before signing up, and so the
 // WhatsApp consent links resolve for someone with no account.
 app.use('/legal', legalRouter);
+// The unsubscribe link in every broadcast email (2026-10-21, web/email.js).
+app.use('/email', require('./web/email').unsubscribeRouter);
 
 // The parents' page, quizpe.in/app — sign in by SMS code; replaces the
 // WhatsApp menu (2026-10-08).
@@ -296,6 +298,8 @@ require('./referrals/engine').ensureSchema()
 // restart and is safe to run from several processes at once.
 require('./jobs/handlers').registerAll();
 require('./jobs/jobQueue').start();
+// The admin's broadcast emails, a few a minute (2026-10-21, web/email.js).
+require('./web/email').start(60);
 
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
