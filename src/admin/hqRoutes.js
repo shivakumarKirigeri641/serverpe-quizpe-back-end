@@ -47,6 +47,10 @@ router.get('/hq/web/sign-ins', requireAdmin, requireCap('parents.view'), wrap(as
   ok(res, await hq('web').signIns({ days: req.query.days, q: req.query.q }))));
 router.get('/hq/web/families', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
   ok(res, await hq('web').families({ q: req.query.q, filter: req.query.filter }))));
+/* The event log and who is here now (hq/events.js, 2026-10-21) — from the tables that already record it. */
+router.get('/hq/events', requireAdmin, requireCap('dashboard.view'), wrap(async (req, res) =>
+  ok(res, await hq('events').log({ hours: req.query.hours, kind: req.query.kind, q: req.query.q, visits: req.query.visits === '1' }))));
+router.get('/hq/live-now', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) => ok(res, await hq('events').live())));
 /* The comeback offer (2026-10-10): how many it is for, and the switch — off until the SMS is approved. */
 router.get('/hq/web/comeback', requireAdmin, requireCap('dashboard.view'), wrap(async (_req, res) =>
   ok(res, await require('../web/comeback').stats())));
