@@ -21,20 +21,7 @@ const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 // Set DRY_RUN=1 to print messages to the console instead of calling Meta.
 const DRY_RUN = process.env.WA_DRY_RUN === '1';
 
-/* ONLY THESE NUMBERS (user, 2026-10-24: QuizPe's flow is tried on GaadiPe's number, "do not disturb live of
-   GaadiPe"). With WHATSAPP_ALLOWED_RECIPIENTS set (10-digit, comma-separated), every message to anyone else is
-   refused here, at the one door all sends leave through — a reminder, broadcast or job can never reach a real
-   family from that number. Empty = no limit (QuizPe on its own number). */
-const ALLOWED = new Set(String(process.env.WHATSAPP_ALLOWED_RECIPIENTS || '').split(',')
-  .map((m) => m.replace(/\D/g, '').slice(-10)).filter((m) => m.length === 10));
-
 async function post(payload) {
-  if (ALLOWED.size && !ALLOWED.has(String(payload?.to || '').replace(/\D/g, '').slice(-10))) {
-    console.warn(`[whatsapp] ${payload?.to} not in WHATSAPP_ALLOWED_RECIPIENTS — not sent`);
-    const err = new Error('recipient_not_allowed');
-    err.code = 'recipient_not_allowed';
-    throw err;
-  }
   if (DRY_RUN) {
     console.log('\n\x1b[36m--- WhatsApp OUT ---\x1b[0m');
     console.log(JSON.stringify(payload, null, 2));
