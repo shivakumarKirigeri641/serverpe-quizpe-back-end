@@ -68,7 +68,11 @@ const RZP = 'https://api.razorpay.com/v1';
  * toggle. The mode is saved on the checkout as before, so /verify checks it against the
  * same keys. RAZORPAY_TEST_MOBILES (comma separated) overrides the default.
  */
-const TEST_MOBILES = String(process.env.RAZORPAY_TEST_MOBILES ?? '9886122415')
+// The owner's own numbers always pay in TEST mode too (user, 2026-10-28: "for me as ADMIN_MOBILE or
+// MYOWNNUMBERPERSONAL, payment must be test mode") — plans, recharges, everything, whatever the toggle says.
+const TEST_MOBILES = [process.env.RAZORPAY_TEST_MOBILES ?? '9886122415', process.env.ADMIN_MOBILE,
+  process.env.MYOWNNUMBERPERSONAL, process.env.ADMIN_MOBILES]
+  .filter(Boolean).join(',')
   .split(',').map((m) => m.replace(/\D/g, '').slice(-10)).filter((m) => m.length === 10);
 const isTestPayer = (mobile) => Boolean(mobile) && TEST_MOBILES.includes(String(mobile).replace(/\D/g, '').slice(-10));
 
