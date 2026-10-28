@@ -92,6 +92,36 @@ router.get('/hq/journey/:parentId', requireAdmin, requireCap('parents.view'), wr
 router.get('/hq/quizzes-per-child', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
   ok(res, await hq('families').quizzesPerChild({ days: req.query.days, minMissed: req.query.missed }))));
 
+/* ── pay as you answer (2026-10-28): a family's MCQ balance, where it went, and a support top-up ── */
+router.get('/hq/mcq/:parentId', requireAdmin, requireCap('parents.view'), wrap(async (req, res) => {
+  const id = String(req.params.parentId).replace(/\D/g, '') || '0';
+  const W = require('../prepaid/wallet');
+  const db = require('../database/connectDB');
+  const lots = (await db.query(
+    `SELECT id, source, mcqs, used, mcqs - used AS left, expires_at, rupees, note, created_at
+       FROM mcq_lots WHERE parent_id = $1 ORDER BY created_at DESC LIMIT 50`, [id])).rows;
+  const usage = (await db.query(
+    `SELECT u.used_on, st.student_name, u.source, count(*)::int AS mcqs
+       FROM mcq_usage u JOIN students st ON st.id = u.student_id
+      WHERE u.parent_id = $1 GROUP BY 1, 2, 3 ORDER BY 1 DESC LIMIT 60`, [id])).rows;
+  ok(res, { balance: await W.balance(id), free_eligible: await W.freeEligible(id), lots, usage });
+}));
+router.post('/hq/mcq/:parentId/topup', requireAdmin, requireCap('settings.view'), express.json(),
+  audit('mcq.topup', (req) => ({ targetType: 'parent', targetId: String(req.params.parentId),
+    summary: `+${Number(req.body?.mcqs) || 0} MCQs: ${String(req.body?.note || '').slice(0, 120)}` })),
+  wrap(async (req, res) => {
+    const id = String(req.params.parentId).replace(/\D/g, '') || '0';
+    const mcqs = Math.floor(Number(req.body?.mcqs));
+    const note = String(req.body?.note || '').trim().slice(0, 200);
+    if (!(mcqs >= 1 && mcqs <= 2000)) return fail(res, 400, 'MCQs must be between 1 and 2000.');
+    if (note.length < 3) return fail(res, 400, 'Please give a reason (it is kept in the audit log).');
+    const db = require('../database/connectDB');
+    if (!(await db.query(`SELECT 1 FROM parents WHERE id = $1`, [id])).rowCount) return fail(res, 404, 'No such family.');
+    const W = require('../prepaid/wallet');
+    const lot = await W.addLot(db, { parentId: id, source: 'admin', mcqs, note: `${note} — by ${req.admin?.sub || 'admin'}` });
+    ok(res, { lot, balance: await W.balance(id), message: `${mcqs} MCQs added (valid till 31 Mar).` });
+  }));
+
 /* ── broadcast in batches ── */
 router.get('/hq/plans', requireAdmin, requireCap('whatsapp.view'), wrap(async (_req, res) => ok(res, await hq('plans').list())));
 router.post('/hq/plans', requireAdmin, requireCap('whatsapp.send'),

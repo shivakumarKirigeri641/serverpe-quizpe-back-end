@@ -542,6 +542,13 @@ async function processInbound(msg, contactName) {
   // "Stop reminders" contain "no" / "stop", which the opt-out check reads as STOP-everything.
   const ownButton = /^(qc_|rem_|mcq_|ans_|child_)/.test(id || '')
     || /^(no,? next day|no thanks|stop reminders|skip today|turn on again|end quiz)\b/i.test(String(text || '').replace(/[^\w ,]/g, '').trim());
+  // A bare "no" TYPED during a quiz (e.g. to "Do you still want to continue?") ends the quiz, with the report —
+  // it is not "stop all messages". A typed STOP still is.
+  if (session.state === 'in_quiz' && /^(no|nope|nahi|nahin|no thanks|not now)[.!]?$/i.test(String(text || '').trim())) {
+    const CQ = require('./chatQuiz');
+    const t = await CQ.currentTracker(session);
+    if (t) { await CQ.endQuiz(session.id, mobile, t.id, 'typed_no'); return; }
+  }
   if (!ownButton && require('./optOut').wantsToStop(text)) {
     /*
      * EVERY opt-out is honoured, whether or not this number ever enrolled.
