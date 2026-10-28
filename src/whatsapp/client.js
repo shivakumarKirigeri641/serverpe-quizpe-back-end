@@ -100,13 +100,24 @@ if (SEND_ALLOWLIST.size) {
  * says: every send is a no-op (as a blocked test-mode send always was) and no
  * media is uploaded. Set back to false only if WhatsApp ever returns.
  */
-const RETIRED = true;
+/*
+ * BACK ON A NEW NUMBER (user, 2026-10-28: +91 83173 19463 - "double tick, but no reply"). The hard switch
+ * became WHATSAPP_MODE in .env:
+ *   off      (the default) nothing is sent, as while retired
+ *   replies  answers to parents who write in; every TEMPLATE is blocked - the plan for the first weeks
+ *            (no daily quiz templates, reminders or broadcasts to old families: the new number starts clean)
+ *   on       everything, templates included
+ */
+const MODE = ['off', 'replies', 'on'].includes(String(process.env.WHATSAPP_MODE || '').toLowerCase())
+  ? String(process.env.WHATSAPP_MODE).toLowerCase() : 'off';
+console.log(`[wa] WhatsApp mode: ${MODE}${MODE === 'replies' ? ' (replies only - templates blocked)' : ''}`);
 let retiredSkips = 0;
 function retired(what) {
-  if (!RETIRED) return false;
+  const blocked = MODE === 'off' || (MODE === 'replies' && what === 'template');
+  if (!blocked) return false;
   retiredSkips += 1;
   if (retiredSkips === 1 || retiredSkips % 50 === 0) {
-    console.log(`[wa] WhatsApp is retired — not sending ${what} (${retiredSkips} skipped since start)`);
+    console.log(`[wa] WhatsApp mode ${MODE} — not sending ${what} (${retiredSkips} skipped since start)`);
   }
   return true;
 }

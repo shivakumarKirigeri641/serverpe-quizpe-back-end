@@ -63,8 +63,8 @@ async function waLimit() {
 /* ─────────────────────────── Meta's view of the number ─────────────────────────── */
 
 let metaCache = { at: 0, data: null };
-// WhatsApp is retired (2026-10-07): Meta is no longer asked about the number.
-const WHATSAPP_RETIRED = true;
+// WhatsApp was retired 2026-10-07; back on a new number 2026-10-28 - Meta is asked again unless WHATSAPP_MODE is off.
+const WHATSAPP_RETIRED = !['replies', 'on'].includes(String(process.env.WHATSAPP_MODE || '').toLowerCase());
 /** Tier, quality, name status and health of the QuizPe number, from Meta (cached 10 min). */
 async function metaStatus({ fresh = false } = {}) {
   if (WHATSAPP_RETIRED) return { ok: false, retired: true, error: 'WhatsApp has been disabled for QuizPe. Nothing is sent to WhatsApp.' };
