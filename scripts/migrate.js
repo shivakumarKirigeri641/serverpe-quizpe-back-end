@@ -830,6 +830,17 @@ const STEPS = [
       `ALTER TABLE parents ADD COLUMN IF NOT EXISTS mcq_expiry_alerted text`,
     ],
   },
+  {
+    /* THE OLD ACCOUNT'S TEMPLATES OFF (user, 2026-10-28: "disable all 15 older ones"). Every template on file was
+       the banned account's; all are switched off now. The new number's own come back from Meta with their real
+       status (whatsapp/templateSync.js), and only an APPROVED one on the new account is ever sent. */
+    name: 'old_templates_off',
+    check: `SELECT 1 FROM app_settings WHERE key = 'old_templates_off'`,
+    apply: [
+      `UPDATE whatsapp_templates SET approval_status = 'NOT_ON_NUMBER', is_active = false, modified_at = now()`,
+      `INSERT INTO app_settings (key, value) VALUES ('old_templates_off', now()::text) ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
 ];
 
 (async () => {

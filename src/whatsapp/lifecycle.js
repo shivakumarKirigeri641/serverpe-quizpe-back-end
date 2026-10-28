@@ -27,8 +27,9 @@ const TEMPLATES = {
   expired: 'qp_enrollmentexpired_v1',
 };
 
-/** A template is only usable once Meta has approved it. */
+/** A template is only usable once Meta has approved it — on the new number's account (templateSync.js). */
 async function approved(name) {
+  if (!require('./templateSync').canSend(name)) return false;
   const { rows } = await db.query(
     `SELECT template_name FROM whatsapp_templates
       WHERE template_name = $1 AND is_active AND approval_status = 'APPROVED'`, [name]);

@@ -303,6 +303,8 @@ require('./web/email').start(60);
 
 // Daily reminder + quiz-trigger jobs (skips templates Meta hasn't approved).
 require('./jobs/scheduler').startScheduler();
+// The new number's templates from Meta (GET only), every 30 minutes; old ones are disabled and never sent (2026-10-28).
+require('./whatsapp/templateSync').start();
 
 // The admin revamp (2026-10-05). Separate from the quiz scheduler and never
 // touching it: every five minutes, the alerts centre checks for problems and

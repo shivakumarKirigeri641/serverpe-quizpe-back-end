@@ -124,6 +124,11 @@ function retired(what) {
 
 async function send(sessionId, to, payload, bodyForLog, type) {
   if (retired(type || 'message')) return null;   // nothing goes to Meta; treated as a no-op
+  // Only a template APPROVED on the new number's account (templateSync.js) — never an old one, whatever the mode.
+  if (type === 'template' && !require('./templateSync').canSend(payload?.template?.name)) {
+    console.log(`[wa] template ${payload?.template?.name} not sent — not approved on this number`);
+    return null;
+  }
   // Hard block: in test mode, only allowlisted numbers may receive anything.
   if (SEND_ALLOWLIST.size && !SEND_ALLOWLIST.has(toLocalNumber(to))) {
     console.warn(`[wa] BLOCKED send to ${toLocalNumber(to)} — not in WA_SEND_ALLOWLIST (test mode)`);
