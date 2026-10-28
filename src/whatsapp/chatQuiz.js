@@ -400,11 +400,24 @@ async function whoIsPlaying(sessionId, mobile, students) {
 
 /** The parent's balance, plainly. */
 async function showBalance(sessionId, mobile, parentId) {
+  // Friendly, not a statement (user, 2026-10-28: "looks annoying, put some attractive").
   const b = await W.balance(parentId);
-  const lines = b.left
-    ? `💰 *MCQ balance: ${b.left}*${b.free ? `\n🎁 Free: ${b.free} (till ${W.fmtDay(b.nextExpiry)})` : ''}${b.paid ? `\n💳 Paid: ${b.paid} (till ${W.fmtDay(b.lastExpiry)})` : ''}`
-    : '💰 *MCQ balance: 0*';
-  await rechargeOffer(sessionId, mobile, `${lines}\n\nPay as you answer — recharge any time (+GST):`);
+  if (!b.left) {
+    await rechargeOffer(sessionId, mobile,
+      `🎯 *Your QuizPe balance: 0 MCQs*\n\n`
+      + `Keep the practice going! 🚀\n`
+      + `Pick a pack below — it's added the moment you pay, for all your children. 👇`);
+    return;
+  }
+  const cfg = await W.config();
+  const days = Math.max(1, Math.floor(b.left / (Number(cfg.daily_limit) || 20)));
+  await rechargeOffer(sessionId, mobile,
+    `🎯 *Your QuizPe balance*\n\n`
+    + `💰 *${b.left} MCQs* ready to practise\n`
+    + (b.free ? `      🎁 ${b.free} free · till ${W.fmtDay(b.nextExpiry)}\n` : '')
+    + (b.paid ? `      💳 ${b.paid} paid · till ${W.fmtDay(b.lastExpiry)}\n` : '')
+    + `\n📚 That's about *${days} day${days === 1 ? '' : 's'}* of daily practice ✨\n`
+    + `_Only answered questions are counted. Top up any time:_ 👇`);
 }
 
 /** A recharge button was tapped: the Razorpay link. */
