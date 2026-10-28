@@ -107,7 +107,8 @@ async function entitledSlots(studentId, exec = db) {
        LEFT JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
        LEFT JOIN quizpe_plans pl ON pl.id = s.plan_id
       WHERE st.id = $1`, [studentId]);
-  const normal = W.isWeekend() && rows[0]?.paid_active ? SLOTS_PREMIUM_WEEKEND : SLOTS_DEFAULT;
+  // Holidays from the admin calendar count like a weekend (user, 2026-10-28: "weekend & holidays with 3 slots").
+  const normal = (W.isWeekend() || W.isHoliday()) && rows[0]?.paid_active ? SLOTS_PREMIUM_WEEKEND : SLOTS_DEFAULT;
 
   /* A free-access window sets its own quizzes-per-day.
      For a family with NO live plan the window IS their entitlement, so the
@@ -136,7 +137,7 @@ async function dailyQuizProgress(studentId, exec = db) {
     `SELECT COUNT(*)::int done FROM quizpe_tracker t
        JOIN quizpe_status qs ON qs.id = t.status_id
       WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
-        AND NOT COALESCE(t.is_instant, false)
+        AND NOT COALESCE(t.is_instant, false) AND t.paid_by IS DISTINCT FROM 'wallet'
         AND qs.status_code IN ('completed','closed')`, [studentId]);
   const done = doneRows[0].done;
   // Available if something is still pending, or a subject is under its slot cap.
@@ -146,7 +147,7 @@ async function dailyQuizProgress(studentId, exec = db) {
     for (const s of subjects) {
       const used = (await exec.query(
         `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
-          WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
+          WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false) AND paid_by IS DISTINCT FROM 'wallet'`, [studentId, s.id])).rows[0].m;
       if (used < maxSlots) { hasNext = true; break; }
     }
   }
@@ -169,7 +170,7 @@ async function ensureNextTracker(studentId, maxSlots, exec = db) {
   for (const s of subjects) {
     const used = (await exec.query(
       `SELECT COALESCE(MAX(quiz_slot),0)::int m FROM quizpe_tracker
-        WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false)`, [studentId, s.id])).rows[0].m;
+        WHERE student_id=$1 AND subject_id=$2 AND quiz_date=CURRENT_DATE AND NOT COALESCE(is_instant,false) AND paid_by IS DISTINCT FROM 'wallet'`, [studentId, s.id])).rows[0].m;
     if (used < maxSlots) {
       const nextSlot = used + 1;
       const qc = await mastery.recommendedQuestionCount(studentId, s.id, exec);
@@ -194,7 +195,7 @@ async function pendingTrackers(studentId) {
        JOIN subjects s       ON s.id = t.subject_id
        JOIN quizpe_status qs ON qs.id = t.status_id
       WHERE t.student_id = $1 AND t.quiz_date = CURRENT_DATE
-        AND NOT COALESCE(t.is_instant, false)
+        AND NOT COALESCE(t.is_instant, false) AND t.paid_by IS DISTINCT FROM 'wallet'
         AND qs.status_code IN ('scheduled','delivered','yet_to_start','in_progress')
       ORDER BY t.quiz_slot ASC, (s.subject_code = $2) DESC, s.subject_code`,
     [studentId, BASE_SUBJECT]);
@@ -377,8 +378,8 @@ async function submitAnswer(sessionId, mobile, trackerId, serial, letter, opts =
   return { isCorrect: rows[0].is_correct, done: p.done, total: p.total };
 }
 
-/** Mark the tracker complete and send the score card. */
-async function finishQuiz(sessionId, mobile, trackerId) {
+/** Mark the tracker complete and send the score card. opts.noOffer: the caller (chatQuiz) offers what's next. */
+async function finishQuiz(sessionId, mobile, trackerId, opts = {}) {
   const { rows } = await db.query(
     `SELECT COUNT(*)::int total,
             COUNT(*) FILTER (WHERE is_correct)::int correct
@@ -539,6 +540,7 @@ _Full answers & explanations are in the report below._ 📄`);
   // Multiple quizzes a day: if this child still has another quiz within today's
   // window and cap, offer a one-tap button to start the next one now. Best-effort
   // — the offer must never break the score/report the child just earned.
+  if (opts.noOffer) return { total, correct, pct };
   try {
     const t = (await db.query(`SELECT student_id, is_instant FROM quizpe_tracker WHERE id=$1`, [trackerId])).rows[0];
     if (t && t.is_instant) {

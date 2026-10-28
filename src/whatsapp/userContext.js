@@ -66,9 +66,11 @@ async function getUserContext(rawMobile, exec = db) {
               AND CURRENT_DATE BETWEEN s.plan_start_date AND s.plan_end_date) AS in_window,
             (SELECT COUNT(*)::int FROM students st
               WHERE st.parent_id = p.id AND st.is_active)                     AS student_count_actual,
-            EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s2
+            (EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s2
                       JOIN quizpe_plans p2 ON p2.id = s2.plan_id
-                     WHERE s2.parent_id = p.id AND p2.is_trial)               AS trial_used
+                     WHERE s2.parent_id = p.id AND p2.is_trial)
+             -- the free start is now 50 MCQs (2026-10-28): having had them counts as "used"
+             OR EXISTS (SELECT 1 FROM mcq_lots l WHERE l.parent_id = p.id AND l.source = 'free'))  AS trial_used
        FROM parents p
        LEFT JOIN LATERAL (
             SELECT * FROM parents_quizpe_subscriptions x
@@ -161,19 +163,17 @@ function buildMainMenu(ctx) {
   // put the detail in `description` (72 chars).
   const rows = [];
   // free trial first when it's on offer and unused — it's the easiest yes
+  // The free start is 50 MCQs (pay as you answer, 2026-10-28; the old trial plan row only opens the signup).
   if (ctx.canStartTrial) {
-    rows.push({ id: 'start_trial', title: '🎁 Start free trial',
-                description: `${ctx.trialDays || 7} days free · no payment details needed` });
-  }
-  if (!ctx.isSubscribed && ctx.status !== 'EXPIRED') {
-    rows.push({ id: 'subscribe', title: '🚀 Subscribe',
-                description: 'Start daily quizzes — from just ₹99' });
+    rows.push({ id: 'start_trial', title: '🎁 Start free',
+                description: '50 free MCQs · no payment details needed' });
   }
   if (ctx.status === 'EXPIRED') {
     rows.push({ id: 'renew', title: '🔄 Renew plan',
-                description: 'Your plan ended — resubscribe to continue' });
+                description: 'Your plan ended — renew, or pay as you answer' });
   }
-  if (ctx.isSubscribed) {
+  // Anyone with a student can start: the plan pays first, then the MCQ balance.
+  if (ctx.isSubscribed || (ctx.exists && ctx.studentCount > 0)) {
     // The old wording said "opens at your daily quiz time", which is wrong and
     // costs us quizzes: the window is 7 PM–11:45 PM for EVERYONE, and the
     // personal slot only decides when we send the nudge. A parent free at 9 PM
@@ -190,15 +190,14 @@ function buildMainMenu(ctx) {
                     ? `Opens at ${fmtHour(qw.openHHMM())}${allDay ? ' — all day today!' : ' tonight'}. About 5 minutes.`
                     : "Today's quiz has closed — the next one is tomorrow." });
   }
-  // Instant Quiz — pay-per-quiz, no plan needed. Offered to EVERYONE (lapsed,
-  // premium, trial, and numbers with no child yet): the checkout form collects
-  // whatever we don't already know, so it never depends on a subscription.
-  rows.push({ id: 'instant_quiz', title: '⚡ Instant quiz @ ₹9*',
-              description: '12 questions right now · pay per quiz, no plan · *+GST' });
+  // Pay as you answer replaces the ₹9 Instant Quiz (2026-10-28).
+  if (ctx.exists) {
+    rows.push({ id: 'my_balance', title: '💰 MCQ balance',
+                description: 'MCQs left · recharge ₹50 / ₹100 / ₹200 (+GST)' });
+  }
   rows.push(
-    { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and children enrolled' },
+    { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and students enrolled' },
     { id: 'quiz_report',     title: '📊 Quiz reports',    description: 'Recent scores and progress' },
-    { id: 'quiz_schedule',   title: '📅 Quiz schedule',   description: 'When the next quizzes arrive' },
   );
   // Only offered to enrolled parents: someone still deciding has nothing to
   // recommend yet, and asking them to would be presumptuous.
@@ -207,7 +206,7 @@ function buildMainMenu(ctx) {
                 description: 'Earn free days when a friend joins & starts' });
   }
   rows.push(
-    { id: 'view_plans',      title: '💎 Premium plans',   description: 'Upgrade from just ₹99' },
+    { id: 'view_plans',      title: '💎 Premium plans',   description: 'Daily plans from ₹99 · or pay as you answer' },
     { id: 'support',         title: '💬 Support',         description: 'Get help from our team' },
   );
   return rows.slice(0, 10);

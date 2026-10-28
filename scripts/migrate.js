@@ -763,6 +763,60 @@ const STEPS = [
       `CREATE INDEX IF NOT EXISTS idx_hq_email_sends_pending ON hq_email_sends (status, id) WHERE status IN ('pending', 'failed')`,
     ],
   },
+  {
+    /* PAY AS YOU ANSWER (user, 2026-10-28; src/prepaid/wallet.js). A family's MCQ balance is a set of LOTS - the
+       one-off 50 free (7 days), each recharge (to 31 March), an admin top-up - and every answered MCQ is taken
+       from the lot that expires soonest and written down once (mcq_usage.history_id is UNIQUE, so a replayed
+       answer can never charge twice). The old ₹99/169/249 plans are untouched and are used first. */
+    name: 'mcq_wallet',
+    check: `SELECT 1 FROM information_schema.tables WHERE table_name='mcq_usage'`,
+    apply: [
+      `CREATE TABLE IF NOT EXISTS mcq_lots (
+         id          bigserial   PRIMARY KEY,
+         parent_id   bigint      NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
+         source      varchar(12) NOT NULL CHECK (source IN ('free', 'recharge', 'admin')),
+         mcqs        integer     NOT NULL CHECK (mcqs > 0),
+         used        integer     NOT NULL DEFAULT 0,
+         expires_at  timestamptz NOT NULL,
+         rupees      numeric(10,2),
+         payment_id  bigint,
+         checkout_id bigint UNIQUE,
+         note        text,
+         created_at  timestamptz NOT NULL DEFAULT now(),
+         CONSTRAINT mcq_lots_used_ok CHECK (used >= 0 AND used <= mcqs)
+       )`,
+      // The 50 free MCQs: once per family, ever.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_mcq_lots_one_free ON mcq_lots (parent_id) WHERE source = 'free'`,
+      `CREATE INDEX IF NOT EXISTS idx_mcq_lots_live ON mcq_lots (parent_id, expires_at) WHERE used < mcqs`,
+      `CREATE TABLE IF NOT EXISTS mcq_usage (
+         id          bigserial   PRIMARY KEY,
+         parent_id   bigint      NOT NULL,
+         student_id  bigint      NOT NULL,
+         tracker_id  bigint      NOT NULL,
+         history_id  bigint      NOT NULL UNIQUE,
+         lot_id      bigint      NOT NULL REFERENCES mcq_lots(id),
+         source      varchar(12) NOT NULL,
+         used_on     date        NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Kolkata')::date,
+         created_at  timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_mcq_usage_student_day ON mcq_usage (student_id, used_on)`,
+      `CREATE INDEX IF NOT EXISTS idx_mcq_usage_parent_day ON mcq_usage (parent_id, used_on, source)`,
+      // Which pocket pays for a quiz: NULL = the plan (as before), 'wallet' = the MCQ balance.
+      `ALTER TABLE quizpe_tracker ADD COLUMN IF NOT EXISTS paid_by varchar(12)`,
+      // The parent's daily cap per student on the balance (default 20).
+      `ALTER TABLE students ADD COLUMN IF NOT EXISTS daily_mcq_limit smallint NOT NULL DEFAULT 20`,
+      // A plan row for recharge checkouts (checkout_sessions.plan_id is required). Never listed: inactive.
+      `INSERT INTO quizpe_plans (plan_code, plan_name, price, student_count, duration, is_trial, is_instant, is_active)
+       SELECT 'MCQ_PACK', 'MCQ recharge', 0, 4, 0, false, false, false
+        WHERE NOT EXISTS (SELECT 1 FROM quizpe_plans WHERE plan_code = 'MCQ_PACK')`,
+      // The ₹9 Instant Quiz is retired (user, 2026-10-28: "hide, disable and shut down this offer"). Quizzes
+      // already bought stay playable — only new purchases stop (createInstantCheckout needs an active row).
+      `UPDATE quizpe_plans SET is_active = false WHERE plan_code = 'INSTANT'`,
+      `INSERT INTO app_settings (key, value) VALUES ('prepaid_mcq',
+         '{"paise_per_mcq":20,"packs":[{"rupees":50,"mcqs":250},{"rupees":100,"mcqs":500},{"rupees":200,"mcqs":1000}],"jan_mar_rupees":[50,100],"free_mcqs":50,"free_days":7,"free_per_day":20,"daily_limit":20,"round":10,"low_left":20}')
+       ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
 ];
 
 (async () => {

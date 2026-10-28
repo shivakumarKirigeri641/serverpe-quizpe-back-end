@@ -71,16 +71,16 @@ async function trialTerms() {
   // the full terms behind a link rather than pasted into the chat.
   return {
     text:
-`🎁 *${plan.duration}-DAY FREE TRIAL*
+`🎁 *50 FREE MCQs*
 
 *${b.product_name}* — _${b.product_tagline}_
 
-✅ Daily 15-question quiz, ${plan.duration} days
-✅ Answers & explanations after each quiz
-✅ Daily summary & weekly progress PDFs
-✅ 1 child · Mathematics · CBSE/ICSE/KSEAB
+✅ Questions right here in the chat — tap an answer
+✅ A report with answers & explanations when you end
+✅ Valid 7 days · up to 20 a day
+✅ Mathematics · CBSE/ICSE/KSEAB
 
-💯 *No payment details needed.* The trial ends automatically — nothing is ever charged.
+💯 *No payment details needed.* After that: pay as you answer — 20 paise per MCQ (+GST) — or a daily plan.
 
 📄 *Terms & disclaimer:*
 ${publicUrl(pol.url)}

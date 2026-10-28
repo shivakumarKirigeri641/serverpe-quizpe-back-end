@@ -186,6 +186,18 @@ router.get('/me', wrap(async (req, res) => {
     window: { state: W.state(), opens: W.openHHMM(), closes: W.CLOSE_HHMM },
     plans: plans.map((p) => ({ code: p.plan_code, name: p.plan_name, price: Number(p.price), was: Number(p.comparable_price), children: p.student_count, days: p.duration })),
     terms_url: terms?.url || '/legal.html?doc=terms',
+    /* PAY AS YOU ANSWER (2026-10-28): the family's MCQ balance and the recharges; the quiz itself is on WhatsApp
+       now — whatsapp_url opens the chat with "Hi" ready to send. */
+    mcq: await (async () => {
+      const Wl = require('../prepaid/wallet');
+      const b = await Wl.balance(ctx.parentId).catch(() => null);
+      return b ? { left: b.left, free: b.free, paid: b.paid, valid_till: b.lastExpiry,
+                   free_eligible: await Wl.freeEligible(ctx.parentId).catch(() => false), packs: await Wl.packs() } : null;
+    })(),
+    whatsapp_url: (() => {
+      const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+      return n ? `https://wa.me/${n}?text=${encodeURIComponent('Hi')}` : null;
+    })(),
   });
 }));
 

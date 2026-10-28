@@ -359,4 +359,38 @@ async function generateInstantInvoice({ paymentDbId, parent, student, exec = db 
   return generateInvoice(null, paymentDbId, exec, cart, { head });
 }
 
-module.exports = { generateInvoice, generateInstantInvoice, nextInvoiceNumber, ensureInvoiceSequence };
+/**
+ * Tax invoice for an MCQ recharge (pay as you answer, 2026-10-28) — no subscription. The pack price (₹50 / 100 /
+ * 200) is the EX-GST base and GST is added on top, as for the Instant Quiz.
+ */
+async function generateMcqInvoice({ paymentDbId, parent, rupees, mcqs, validTill, exec = db }) {
+  const gstRow = (await exec.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const gross = +(Number(rupees) * (1 + gstPct / 100)).toFixed(2);
+  const pay = (await exec.query(
+    `SELECT payment_id AS rzp_payment_id, order_id AS rzp_order_id, method FROM payments WHERE id=$1`, [paymentDbId])).rows[0] || {};
+  const stateRow = parent.state_code
+    ? (await exec.query(`SELECT state_name FROM states_unions WHERE state_code=$1`, [parent.state_code])).rows[0]
+    : null;
+  const head = {
+    subscription_id: null,
+    plan_code: 'MCQ_PACK', plan_name: `MCQ recharge — ${mcqs} MCQs`,
+    price: gross, student_count: 1, duration: 0,
+    plan_start_date: new Date(), plan_end_date: validTill || new Date(),
+    parent_id: parent.id, parent_name: parent.parent_name || 'Customer',
+    parent_mobile_number: parent.parent_mobile_number, state_code: parent.state_code || null,
+    state_name: stateRow?.state_name || null,
+    rzp_payment_id: pay.rzp_payment_id || null, rzp_order_id: pay.rzp_order_id || null, method: pay.method || null,
+    gstr_desc: `MCQ recharge — ${mcqs} MCQs`,
+  };
+  const cart = {
+    total: gross, students: [],
+    baseLine: {
+      desc: `MCQ recharge — ${mcqs} MCQs (pay as you answer)`, plan: 'MCQ_PACK', qty: 1, gross,
+      sub: `20 paise per MCQ · valid till 31 Mar`,
+    },
+  };
+  return generateInvoice(null, paymentDbId, exec, cart, { head });
+}
+
+module.exports = { generateInvoice, generateInstantInvoice, generateMcqInvoice, nextInvoiceNumber, ensureInvoiceSequence };

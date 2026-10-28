@@ -58,9 +58,10 @@ const CFG = {
   MIN_QUESTIONS: 8,           // hard floor: never deliver fewer than this, for any
                               // grade — even a thin bank re-asks earlier questions
                               // rather than send a stub (see the backfill below)
-  BASE_QUESTIONS: 15,         // doing well -> standard quiz
-  MID_QUESTIONS: 18,          // wobbling  -> more practice
-  MAX_QUESTIONS: 20,          // struggling -> most practice (hard ceiling)
+  // A plan quiz (one slot) is 10-15 questions (user, 2026-10-28: "ranges between 10-15"), asked in rounds of 10.
+  BASE_QUESTIONS: 10,         // doing well -> standard quiz
+  MID_QUESTIONS: 12,          // wobbling  -> more practice
+  MAX_QUESTIONS: 15,          // struggling -> most practice (hard ceiling)
 };
 
 /**

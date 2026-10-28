@@ -1314,6 +1314,145 @@ Your *Instant Quiz* for *${studentName}* is starting now — 12 questions.
   }
 }
 
+/* ─────────────────────────────── MCQ recharge (pay as you answer, 2026-10-28) ─────────────────────────────── */
+
+/**
+ * A Razorpay Payment Link for one recharge (₹50 / 100 / 200 + GST). The family is already known (the parent is
+ * chatting), so there is no form. `resumeStudentId`: the student whose quiz stopped for want of MCQs — their quiz
+ * carries on straight after payment.
+ */
+async function createMcqLink({ sessionId = null, mobile, rupees, resumeStudentId = null }) {
+  const W = require('../prepaid/wallet');
+  const pack = (await W.packs()).find((p) => p.rupees === Number(rupees));
+  if (!pack) return { error: 'That recharge is not available right now.' };
+  const plan = (await db.query(`SELECT id FROM quizpe_plans WHERE plan_code='MCQ_PACK'`)).rows[0];
+  if (!plan) return { error: 'Recharge is not available right now.' };
+  const gstRow = (await db.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const gstPct = gstRow ? Number(gstRow.gst_value) : 18;
+  const gross = +(pack.rupees * (1 + gstPct / 100)).toFixed(2);
+  const m = normMobile(mobile);
+  const parent = (await db.query(`SELECT id, parent_name FROM parents WHERE parent_mobile_number=$1`, [m])).rows[0];
+
+  const cart = { mcq: true, rupees: pack.rupees, mcqs: pack.mcqs, total: gross, gst_pct: gstPct,
+                 resume_student_id: resumeStudentId || null };
+  const token = crypto.randomBytes(24).toString('base64url');
+  const { rows: [ins] } = await db.query(
+    `INSERT INTO checkout_sessions (token, whatsapp_session_id, mobile_number, plan_id, amount, cart, status, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'link_created', now() + interval '3 days') RETURNING id`,
+    [token, sessionId, m, plan.id, gross, JSON.stringify(cart)]);
+
+  const rzp = await razorpayCreds(null, m);
+  const plRes = await fetch(`${RZP}/payment_links`, {
+    method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: Math.round(gross * 100), currency: 'INR', accept_partial: false,
+      description: `QuizPe — ${pack.mcqs} MCQs (₹${pack.rupees} + GST)`,
+      customer: { name: String(parent?.parent_name || m).slice(0, 50), contact: `+91${m}` },
+      notify: { sms: false, email: false }, reminder_enable: false,
+      notes: { token: String(token), checkout_id: String(ins.id), mcq: '1', mobile: String(m) },
+    }),
+  });
+  const link = await plRes.json();
+  if (!plRes.ok || !link.short_url) { console.error('[pay] mcq link failed:', link); return { error: link?.error?.description || 'Could not create the payment link.' }; }
+  await db.query(`UPDATE checkout_sessions SET razorpay_mode=$2 WHERE id=$1`, [ins.id, rzp.mode]);
+  return { short_url: link.short_url, amount: gross, rupees: pack.rupees, mcqs: pack.mcqs, token };
+}
+
+/**
+ * A recharge was paid: the payment, the MCQs (to 31 March), the GST invoice. Then on WhatsApp: the confirmation,
+ * the invoice, and the stopped quiz carries on. Idempotent (checkout row locked; one lot per checkout).
+ */
+async function finalizeMcq(c, pay) {
+  const cart = c.cart || {};
+  const W = require('../prepaid/wallet');
+  const done = (await db.query(
+    `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`,
+    [pay.id])).rows[0];
+  if (done) return { already: true, invoice: done.invoice_id };
+
+  const client = await db.getClient();
+  let inv, parentId, lot;
+  try {
+    await client.query('BEGIN');
+    const locked = (await client.query(`SELECT id, used_at, status FROM checkout_sessions WHERE id=$1 FOR UPDATE`, [c.id])).rows[0];
+    if (locked.used_at || locked.status === 'paid') {
+      await client.query('ROLLBACK');
+      const i = (await db.query(
+        `SELECT i.invoice_id FROM payments p JOIN invoices i ON i.payment_id=p.id WHERE p.payment_id=$1 ORDER BY i.id DESC LIMIT 1`, [pay.id])).rows[0];
+      return { already: true, invoice: i?.invoice_id };
+    }
+    const paymentDbId = (await client.query(
+      `INSERT INTO payments (payment_id, entity, amount, currency, status, order_id, method, captured,
+                             description, email, contact, notes, api_response)
+       VALUES ($1,'payment',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (payment_id) DO UPDATE SET status=EXCLUDED.status, modified_at=now()
+       RETURNING id`,
+      [pay.id, pay.amount / 100, pay.currency, pay.status, pay.order_id || null, pay.method, pay.captured === true,
+       `MCQ recharge (${cart.mcqs} MCQs)`, pay.email || null, pay.contact || c.mobile_number,
+       JSON.stringify(pay.notes || {}), JSON.stringify(pay)])).rows[0].id;
+
+    const parent = (await client.query(
+      `INSERT INTO parents (parent_name, parent_mobile_number) VALUES ('Parent', $1)
+       ON CONFLICT (parent_mobile_number) DO UPDATE SET modified_at = now()
+       RETURNING id, parent_name, parent_mobile_number, state_code`, [c.mobile_number])).rows[0];
+    parentId = parent.id;
+
+    lot = await W.addLot(client, { parentId, source: 'recharge', mcqs: Number(cart.mcqs), rupees: Number(cart.rupees),
+      paymentId: paymentDbId, checkoutId: c.id, note: `₹${cart.rupees} + GST` });
+    const { generateMcqInvoice } = require('../pdf/invoice');
+    inv = await generateMcqInvoice({ paymentDbId, parent, rupees: cart.rupees, mcqs: cart.mcqs,
+      validTill: lot?.expires_at, exec: client });
+
+    await client.query(`UPDATE checkout_sessions SET used_at=now(), status='paid' WHERE id=$1`, [c.id]);
+    if (c.whatsapp_session_id) {
+      await client.query(`UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`, [c.whatsapp_session_id, parentId]);
+      await client.query(
+        `INSERT INTO whatsapp_session_events (session_id, from_state, to_state, event, payload)
+         VALUES ($1, COALESCE((SELECT state FROM whatsapp_sessions WHERE id=$1),'main_menu'),
+                 COALESCE((SELECT state FROM whatsapp_sessions WHERE id=$1),'main_menu'), 'mcq_recharged', $2)`,
+        [c.whatsapp_session_id, JSON.stringify({ payment_id: pay.id, invoice: inv.invoiceNo, mcqs: cart.mcqs })]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  // Tell them, send the invoice, and carry on the stopped quiz. Never undoes the payment.
+  try {
+    const wa = require('../whatsapp/client');
+    const bal = await W.balance(parentId);
+    await wa.sendText(c.whatsapp_session_id, c.mobile_number,
+      `✅ *Payment received — ₹${Number(pay.amount / 100).toFixed(2)}*\n\n`
+      + `*${cart.mcqs} MCQs* added. Balance now: *${bal.left} MCQs*, valid till *${W.fmtDay(lot?.expires_at || W.yearEnd())}*.\n`
+      + `🧾 Invoice: ${inv.invoiceNo}`);
+    await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
+      filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+      caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`,
+    });
+    await require('../whatsapp/chatQuiz').afterRecharge(c.whatsapp_session_id, c.mobile_number, cart.resume_student_id);
+  } catch (e) { console.error('[pay] mcq deliver failed:', e.message); }
+
+  try {
+    const M2 = require('../whatsapp/messages');
+    require('../mail/notify').payment({
+      parent: { name: c.mobile_number, mobile: c.mobile_number, state: null },
+      children: [],
+      plan: { name: `MCQ recharge — ${cart.mcqs} MCQs (₹${cart.rupees} + GST)`, duration: null,
+              start: M2.fmtDate(new Date()), end: '31 Mar', quizTime: '—', reminderTime: '—' },
+      payment: { amount: Number(pay.amount / 100).toFixed(2), method: pay.method, status: pay.status,
+                 paymentId: pay.id, orderId: pay.order_id || '—', mode: c.razorpay_mode || 'test' },
+      invoice: { number: inv.invoiceNo, base: inv.amounts?.base, cgst: inv.amounts?.cgst,
+                 sgst: inv.amounts?.sgst, igst: inv.amounts?.igst, total: inv.amounts?.total },
+      ctx: { channel: 'MCQ recharge', at: new Date(), sessionId: c.whatsapp_session_id },
+    });
+  } catch (e) { console.error('[pay] mcq alert skipped:', e.message); }
+
+  return { invoice: inv.invoiceNo };
+}
+
 /** Fetch a captured payment for an order (used to reconcile an already-paid order). */
 async function capturedPaymentForOrder(orderId, auth) {
   const header = auth || (await razorpayCreds()).authHeader;
@@ -1399,7 +1538,9 @@ async function activateFromToken(token, pay) {
   }
   // Each link type carries its own activation path: instant (no subscription,
   // pay-per-quiz), mid-plan add-child (pro-rated), or a normal subscription.
-  const result = c.cart && c.cart.instant
+  const result = c.cart && c.cart.mcq
+    ? await finalizeMcq(c, pay)
+    : c.cart && c.cart.instant
     ? await finalizeInstant(c, pay)
     : c.cart && c.cart.midplan
       ? await finalizeAddChild(c, pay)
@@ -1443,7 +1584,9 @@ async function activateFromWebhook(pay) {
 
   // Route by cart type, exactly as the payment-link path does — an Instant Quiz
   // reaching here must NOT be run through finalize() (which expects a plan).
-  const result = c.cart && c.cart.instant
+  const result = c.cart && c.cart.mcq
+    ? await finalizeMcq(c, pay)
+    : c.cart && c.cart.instant
     ? await finalizeInstant(c, pay)
     : c.cart && c.cart.midplan
       ? await finalizeAddChild(c, pay)
@@ -1550,7 +1693,9 @@ async function reconcileByPaymentId(paymentId, token = null) {
     return { error: `Amount mismatch: checkout ₹${c.cart.total} vs payment ₹${Number(pay.amount) / 100}.` };
   }
 
-  const result = c.cart && c.cart.instant
+  const result = c.cart && c.cart.mcq
+    ? await finalizeMcq(c, pay)
+    : c.cart && c.cart.instant
     ? await finalizeInstant(c, pay)
     : c.cart && c.cart.midplan
       ? await finalizeAddChild(c, pay)
@@ -1566,4 +1711,6 @@ module.exports.createAddChildLink = createAddChildLink;
 module.exports.createRenewalLink = createRenewalLink;
 module.exports.createInstantLink = createInstantLink;
 module.exports.createInstantCheckout = createInstantCheckout;
+module.exports.createMcqLink = createMcqLink;
+module.exports.finalizeMcq = finalizeMcq;
 module.exports.checkoutTtlLabel = checkoutTtlLabel;

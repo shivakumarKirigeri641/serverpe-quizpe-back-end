@@ -342,24 +342,9 @@ async function activateTrial(session, mobile, stateCode) {
       [parent, board_code, grade_code,
        session.context.medium_code || 'ENGLISH', student_name])).rows[0].id;
 
-    // only one active subscription per parent
-    await c.query(
-      `UPDATE parents_quizpe_subscriptions SET is_active=false, modified_at=now()
-        WHERE parent_id=$1 AND is_active`, [parent]);
-
-    // whichever plan is flagged is_trial — length comes from the plan row
-    const trial = (await c.query(
-      `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
-    if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
-
-    const slot = require('./quizSlot').slotFor(parent);   // spread the evening load
-
-    const sub = (await c.query(
-      `INSERT INTO parents_quizpe_subscriptions
-         (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
-       VALUES ($1, $2, CURRENT_DATE + $3::int, $4::time, $5::time)
-       RETURNING id, plan_end_date, quiz_time`,
-      [parent, trial.id, trial.duration, slot.quiz_time, slot.reminder_time])).rows[0];
+    // THE FREE START IS 50 MCQs (user, 2026-10-28: replaces the 7-day trial) — no subscription is created.
+    const lot = await require('../prepaid/wallet').grantFree(parent, c);
+    const sub = { id: null, plan_end_date: lot?.expires_at || null, quiz_time: null, free_mcqs: lot?.mcqs || 0 };
 
     await c.query(
       `UPDATE whatsapp_sessions SET parent_id=$2, modified_at=now() WHERE id=$1`,
@@ -387,12 +372,11 @@ async function activateTrial(session, mobile, stateCode) {
       const notify = require('../mail/notify');
       const { fromWhatsApp } = require('../mail/context');
       const meta = (await db.query(
-        `SELECT b.board_code, g.grade_name, m.medium_name, su.state_name, pl.plan_name
+        `SELECT b.board_code, g.grade_name, m.medium_name, su.state_name
            FROM boards b, grades g, mediums m
            LEFT JOIN states_unions su ON su.state_code = $4
-           LEFT JOIN quizpe_plans pl ON pl.id = $5
           WHERE b.board_code=$1 AND g.grade_code=$2 AND m.medium_code=$3 LIMIT 1`,
-        [board_code, grade_code, session.context.medium_code || 'ENGLISH', stateCode, trial.id])).rows[0] || {};
+        [board_code, grade_code, session.context.medium_code || 'ENGLISH', stateCode])).rows[0] || {};
       notify.trial({
         parent: { name: session.context.parent_name || 'Parent', mobile, state: meta.state_name || stateCode },
         children: [{
@@ -401,9 +385,9 @@ async function activateTrial(session, mobile, stateCode) {
           school: session.context.school_name,
         }],
         plan: {
-          name: meta.plan_name || 'Free trial', duration: trial.duration,
-          start: M.fmtDate(new Date()), end: M.fmtDate(sub.plan_end_date),
-          quizTime: M.fmtTime(sub.quiz_time), reminderTime: M.fmtTime(slot.reminder_time),
+          name: 'Free start — 50 MCQs', duration: 7,
+          start: M.fmtDate(new Date()), end: sub.plan_end_date ? M.fmtDate(sub.plan_end_date) : '—',
+          quizTime: '—', reminderTime: '—',
         },
         ctx: fromWhatsApp({ sessionId: session.id, mobile }),
       });
@@ -763,13 +747,58 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
     // is consumed once, then this branch stops applying.
     if (await deliverFreeGrantIfAny(session, mobile, ctx)) return;
 
-    if (ctx.isSubscribed) {
+    // Pay as you answer (2026-10-28): no plan is needed — beginQuizFor uses the plan if there is one, else the
+    // MCQ balance (with the free 50 for a new or lapsed family, or a recharge offer).
+    if (ctx.exists && ctx.studentCount > 0) {
       await handleMenuChoice(session, mobile, ctx, 'start_quiz');
+    } else if (ctx.exists) {
+      await showMainMenu(session, mobile, ctx);
     } else {
-      await wa.sendText(session.id, mobile,
-        `Your subscription isn't active. Type *menu* to subscribe. 💎`);
+      await showWelcome(session, mobile);
     }
     return;
+  }
+
+  /* ── pay as you answer (2026-10-28, chatQuiz.js): the quiz buttons, recharges, END ── */
+  {
+    const CQ = require('./chatQuiz');
+    const begin = (st) => beginQuizFor(session, mobile, st, 0);
+    const kidFor = async (sid) => (await getStudents(ctx.parentId)).find((s) => Number(s.id) === Number(sid));
+    if (/^qc_yes_\d+$/.test(id)) {
+      const kid = await kidFor(id.slice(7));
+      if (kid) await CQ.continueFor(session, mobile, kid.id, () => begin(kid));
+      else await showMainMenu(session, mobile, ctx);
+      return;
+    }
+    if (/^qc_end_\d+$/.test(id) || (session.state === 'in_quiz' && /^(end|end quiz|stop quiz|finish)\s*[.!]?$/i.test(text.trim()))) {
+      const t = await CQ.currentTracker(session);
+      if (t) await CQ.endQuiz(session.id, mobile, t.id, 'ended');
+      else await wa.sendButtons(session.id, mobile, 'No quiz is running right now.',
+        [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+      return;
+    }
+    if (id === 'qc_next') {
+      const t = await CQ.currentTracker(session);
+      // The score card and the PDF still follow (finishQuiz); only the "what next?" buttons are left out.
+      if (t) await CQ.endQuiz(session.id, mobile, t.id, 'next_student', { quiet: true });
+      const students = await getStudents(ctx.parentId);
+      if (students.length > 1) await CQ.whoIsPlaying(session.id, mobile, students);
+      return;
+    }
+    if (id === 'qc_done') {
+      await setState(session, 'main_menu', 'quiz_done_for_now');
+      await wa.sendText(session.id, mobile, '👍 Great practice today! Send *Hi* any time to start again. 🌟');
+      return;
+    }
+    if (/^mcq_\d+$/.test(id) || /^₹\s*\d+\s*·\s*\d+\s*mcqs?$/i.test(text.trim())) {
+      const rupees = /^mcq_\d+$/.test(id) ? Number(id.slice(4)) : Number(text.replace(/[^\d·]/g, '').split('·')[0]);
+      await CQ.startRecharge(session, mobile, rupees);
+      return;
+    }
+    if (id === 'my_balance' || id === 'recharge' || /^(balance|my balance|recharge)$/i.test(text.trim())) {
+      await CQ.showBalance(session.id, mobile, ctx.parentId);
+      return;
+    }
   }
 
   // The child picker for a granted quiz (premium families with several children).
@@ -822,7 +851,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
         const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
         await wa.sendText(session.id, mobile,
           `🎁 *${first} invited you to QuizPe!*\n\n` +
-          `Start your *free 7-day trial* below — no app, no login. Just say hi and today's quiz begins.`);
+          `Start with *50 free MCQs* — no app, no login. Just say hi and today's quiz begins.`);
       } else {
         // Unknown code — remember it anyway so a typo can be looked at later,
         // but say nothing; a stranger typing "JOIN" should not get an error.
@@ -926,14 +955,16 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
       // Answers can arrive in either state (the list stays tappable).
       if (id.startsWith('ans_')) { await handleAnswer(session, mobile, id); break; }
       if (id.startsWith('plan_')) { await handleMenuChoice(session, mobile, ctx, id); break; }
-      // Typed answers: "B", "b)", "Option C" all work.
+      // Typed answers: "B", "b)", "Option C" all work — A/B/C as SHOWN, mapped back to the question's own letter.
       if (session.state === 'in_quiz') {
-        const typed = text.trim().match(/^(?:option\s*)?([ABCDabcd])\)?$/);
+        const typed = text.trim().match(/^(?:option\s*)?([ABCabc])\)?$/);
         if (typed && session.context.tracker_id) {
-          const next = await Q.nextQuestion(Number(session.context.tracker_id));
-          if (next) {
+          const CQ = require('./chatQuiz');
+          const next = await CQ.nextQ(Number(session.context.tracker_id));
+          const letter = next && CQ.originalLetter(next, typed[1]);
+          if (letter) {
             await handleAnswer(session, mobile,
-              `ans_${session.context.tracker_id}_${next.serial_number}_${typed[1].toUpperCase()}`);
+              `ans_${session.context.tracker_id}_${next.serial_number}_${letter}`);
             break;
           }
         }
@@ -951,12 +982,12 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
         await setState(session, 'awaiting_form', 'agreed_trial');
         await wa.sendCtaUrl(session.id, mobile, {
           header: '🎉 One last step!',
-          body: `Your child's *7-day FREE trial* is ready — the first quiz can start today. 🌟\n\n`
-            + `All that's left: your child's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
+          body: `Your student's *50 free MCQs* are ready — the first quiz can start today. 🌟\n\n`
+            + `All that's left: your student's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
             + `👇 Tap below and you're done — the first quiz is ready right after.`,
-          displayText: '✅ Fill child form',
+          displayText: '✅ Fill student form',
           url,
-          footer: 'Free for 7 days · no card · ~30 seconds',
+          footer: '50 free MCQs · no card · ~30 seconds',
         });
       } else {
         await wa.sendText(session.id, mobile, 'Tap *✅ Agree & Proceed* to continue, or *⬅️ Back* for the menu.');
@@ -1022,22 +1053,8 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
       const grade = (await db.query(
         `SELECT grade_name FROM grades WHERE grade_code=$1`, [session.context.grade_code])).rows[0];
 
-      await require('./lifecycle').sendEnrolment({
-        sessionId: session.id, mobile,
-        parentName: session.context?.parent_name || 'there',
-        students: [session.context.student_name],
-        planName: 'Free Trial',
-      });
-
-      await wa.sendText(session.id, mobile, M.trialActivated({
-        studentName: session.context.student_name,
-        boardCode: session.context.board_code,
-        gradeName: grade.grade_name,
-        endDate: sub.plan_end_date,
-        quizTime: sub.quiz_time,
-      }));
-      await setState(session, 'active', 'trial_activated', { subscription_id: sub.id });
-      await offerStartQuizIfOpen(session, mobile);
+      await setState(session, 'active', 'free_mcqs_granted', { free_mcqs: sub.free_mcqs });
+      await sendFreeStart(session, mobile, session.context.student_name, session.context.board_code, grade.grade_name, sub);
       break;
     }
 
@@ -1345,56 +1362,40 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
   // Older chats may still hold an 'instant_child_*' row from the previous
   // child-picker. The web form now collects the child, so any of those simply
   // reopens the checkout rather than dead-ending on an id nothing handles.
-  if (String(choice).startsWith('instant_child_')) {
-    await startInstantPurchase(session, mobile, ctx, students);
+  // THE ₹9 INSTANT QUIZ IS RETIRED (user, 2026-10-28): pay as you answer replaces it. Old buttons and menu rows
+  // land on the balance and the recharges instead of a checkout. (startInstantPurchase is kept, unused.)
+  if (String(choice).startsWith('instant_child_') || choice === 'instant_quiz' || choice === 'instant_again') {
+    await wa.sendText(session.id, mobile,
+      `⚡ The Instant Quiz is now *Pay as you answer* — just *20 paise per MCQ* (+GST), no plan, used only when your student answers.`);
+    await require('./chatQuiz').showBalance(session.id, mobile, ctx.parentId);
     return;
   }
 
   switch (choice) {
-    case 'instant_quiz':
-    case 'instant_again':
-      await startInstantPurchase(session, mobile, ctx, students);
+    case 'my_balance':
+    case 'recharge':
+      await require('./chatQuiz').showBalance(session.id, mobile, ctx.parentId);
       break;
 
     case 'start_quiz': {
       if (!students.length) {
-        await wa.sendText(session.id, mobile, 'No child enrolled yet. Type *menu* to get started.');
+        await wa.sendText(session.id, mobile, 'No student added yet. Type *menu* to get started.');
         break;
       }
-      // A child is available if they still have a quiz left today — either
-      // something pending, or they're under their daily slot cap (2/day, or 3 on
-      // weekends for premium). This replaces the old "one quiz per day" check so
-      // 2nd/3rd quizzes are offered too.
-      const pending = [];
-      for (const s of students) {
-        const prog = await Q.dailyQuizProgress(s.id);
-        if (prog.hasNext) pending.push(s);
-      }
-
-      if (!pending.length) {
-        await wa.sendText(session.id, mobile,
-          "✅ All of today's quizzes are complete — brilliant! Fresh quizzes arrive tomorrow. See you then! 🌙");
+      // "Who is playing?" (2026-10-28): every student is offered; beginQuizFor decides who pays — the plan's
+      // slots first, then the MCQ balance — and says plainly when today's limit is reached.
+      if (students.length > 1) {
+        await require('./chatQuiz').whoIsPlaying(session.id, mobile, students);
         break;
       }
-      // Multiple children still pending -> let the parent choose whose quiz to take.
-      if (pending.length > 1) {
-        await wa.sendList(session.id, mobile, {
-          header: '▶️ Start quiz',
-          text: 'Which child is taking the quiz now?',
-          buttonText: 'Choose child',
-          rows: pending.map(s => ({ id: `child_${s.id}`, title: s.student_name.slice(0, 24),
-            description: `${s.board_code} · ${s.grade_name}` })),
-        });
-        break;
-      }
-      await beginQuizFor(session, mobile, pending[0], pending.length);
+      await beginQuizFor(session, mobile, students[0], 1);
       break;
     }
 
     case 'start_trial':
       if (!ctx.canStartTrial) {
         await wa.sendText(session.id, mobile, ctx.trialUsed
-          ? `You've already used your free trial. 💎 Here are our plans — from just ₹99.`
+          ? `You've already had your free MCQs. 💎 Daily plans from ₹99 — or pay as you answer from the menu (*💰 MCQ balance*).`
           : `You already have an active subscription. 🎉`);
         if (ctx.trialUsed) await showPlans(session, mobile);
         break;
@@ -1571,18 +1572,34 @@ async function beginQuizFor(session, mobile, st, siblingCount, difficulty = null
         return;
       }
 
-      // The morning job already creates today's slot-1 trackers; this is the
-      // safety net for anyone starting a quiz outside that path (menu, or a first
-      // quiz on signup day). Idempotent, so calling it twice costs nothing.
-      await Q.scheduleDailyQuizzes(st.id);
-
-      // Resolve the next quiz to run: a pending one, or (for the 2nd/3rd quiz of
-      // the day) unlock the next slot if still under the daily cap.
-      const maxSlots = await Q.entitledSlots(st.id);
-      const target = await Q.ensureNextTracker(st.id, maxSlots);
+      /* WHO PAYS (pay as you answer, 2026-10-28): a live plan (₹99/169/249, or a free-access window) first — its
+         slots, as before; when there is no plan, or today's slots are used, the MCQ balance (chatQuiz.startWallet,
+         which also gives the free 50 to a new or lapsed family). */
+      const CQ = require('./chatQuiz');
+      const live = (await getUserContext(mobile)).isSubscribed;
+      let target = null;
+      if (live) {
+        // The morning job already creates today's slot-1 trackers; this is the
+        // safety net for anyone starting a quiz outside that path (menu, or a first
+        // quiz on signup day). Idempotent, so calling it twice costs nothing.
+        await Q.scheduleDailyQuizzes(st.id);
+        // Resolve the next quiz to run: a pending one, or (for the 2nd/3rd quiz of
+        // the day) unlock the next slot if still under the daily cap.
+        const maxSlots = await Q.entitledSlots(st.id);
+        target = await Q.ensureNextTracker(st.id, maxSlots);
+      }
       if (!target) {
-        await wa.sendText(session.id, mobile,
-          `✅ ${st.student_name} has finished all of today's quizzes. See you tomorrow! 🌙`);
+        const kid = await CQ.studentOf(st.id);
+        if (live) {
+          const W = require('../prepaid/wallet');
+          if ((await W.balance(kid.parent_id)).left <= 0) {
+            await CQ.rechargeOffer(session.id, mobile,
+              `✅ Today's plan practice is done for *${st.student_name}*.\n\nCome back tomorrow — or recharge to practise more today:`);
+            return;
+          }
+          await wa.sendText(session.id, mobile, `✅ Today's plan practice is done — carrying on from your *MCQ balance*.`);
+        }
+        await CQ.startWallet(session.id, mobile, kid);
         return;
       }
       /* The level has to be settled BEFORE startQuiz, because startQuiz is
@@ -1607,7 +1624,7 @@ async function beginQuizFor(session, mobile, st, siblingCount, difficulty = null
         return;
       }
 
-      const q = await Q.nextQuestion(r.trackerId);
+      const q = await CQ.nextQ(r.trackerId);
       if (!q) { await Q.finishQuiz(session.id, mobile, r.trackerId); return; }
 
       await mergeContext(session, { tracker_id: r.trackerId, student_id: st.id });
@@ -1616,23 +1633,14 @@ async function beginQuizFor(session, mobile, st, siblingCount, difficulty = null
 
       // "Quiz N of M today" so the child sees this is the 1st/2nd/3rd of the day.
       const quizNo = Math.min(prog.done + 1, prog.total);
-      const more = prog.total > 1 ? `\n_Quiz ${quizNo} of ${prog.total} today._` : '';
+      const more = prog.total > 1 ? ` · quiz ${quizNo} of ${prog.total} today` : '';
       const isTest = target.quiz_type === 'test';
-      const intro = r.resumed
-        ? '_Resuming where you left off._'
-        : `_${q.total} question${q.total === 1 ? '' : 's'}${isTest ? ' — today is a TEST 📝' : ', about 5 minutes'}._`;
+      await wa.sendText(session.id, mobile, r.resumed
+        ? `▶️ *${st.student_name}* — resuming where you left off.`
+        : `▶️ *${st.student_name}'s ${isTest ? 'test 📝' : 'quiz'}* — ${target.subject_name}, ${q.total} questions${more}. Tap an answer to go on!`);
 
-      // The quiz runs on a web page: full option text (no 24-char truncation)
-      // and the next question appears instantly on tap.
-      const { createQuizLink } = require('../routers/quizWebRouter');
-      const { url } = await createQuizLink(session.id, mobile, r.trackerId);
-      await wa.sendCtaUrl(session.id, mobile, {
-        header: `${st.student_name}'s ${isTest ? 'test' : 'quiz'}`,
-        body: `📚 *${target.subject_name}*\n${intro}${more}\n\nTap below to begin — the score and report come straight back here.`,
-        displayText: isTest ? '📝 Start test' : '▶️ Start quiz',
-        url,
-        footer: 'QuizPe by ServerPe App Solutions',
-      });
+      // In the chat (2026-10-28): the question with 3 options as buttons, no web page.
+      await CQ.sendQ(session.id, mobile, r.trackerId, q);
   } catch (e) {
     console.error('[flow] beginQuizFor failed:', e.message);
     await wa.sendText(session.id, mobile, '😕 Sorry — we couldn\'t start the quiz. Please type *menu* and try again.');
@@ -1689,39 +1697,32 @@ async function handleFlowSubmission(session, mobile, data) {
   const sub = await activateTrial(session, mobile, state);
   const gradeRow = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0];
 
-  // Formal welcome first, then the detail. Silently skipped until Meta
-  // approves the template, so the detail message below is never lost.
-  await require('./lifecycle').sendEnrolment({
-    sessionId: session.id, mobile,
-    parentName: session.context?.parent_name || 'there',
-    students: [studentName],
-    planName: 'Free Trial',
-  });
-
-  await wa.sendText(session.id, mobile, M.trialActivated({
-    studentName, boardCode: board, gradeName: gradeRow.grade_name,
-    endDate: sub.plan_end_date, quizTime: sub.quiz_time,
-  }));
-  await setState(session, 'active', 'trial_activated', { subscription_id: sub.id, via: 'flow' });
-  await offerStartQuizIfOpen(session, mobile);
+  await setState(session, 'active', 'free_mcqs_granted', { free_mcqs: sub.free_mcqs, via: 'flow' });
+  await sendFreeStart(session, mobile, studentName, board, gradeRow.grade_name, sub);
 }
 
-/** Answer id format: ans_<trackerId>_<serial>_<letter> */
+/** After signup: the free 50 MCQs (2026-10-28, replaces the 7-day trial) and a Start button. */
+async function sendFreeStart(session, mobile, studentName, board, gradeName, sub) {
+  const W = require('../prepaid/wallet');
+  await wa.sendButtons(session.id, mobile,
+    `🎉 *${studentName} is all set!* (${board} · ${gradeName})\n\n`
+    + (sub.free_mcqs ? `🎁 *${sub.free_mcqs} free MCQs* are in your family account — valid till *${W.fmtDay(sub.plan_end_date)}*, up to 20 a day.\n\n` : '')
+    + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
+    [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+}
+
+/**
+ * Answer id format: ans_<trackerId>_<serial>_<letter> (the ORIGINAL option letter). In the chat (2026-10-28) the
+ * answer is saved silently and chatQuiz decides what comes next: the next question, "continue?" every 10, or the end.
+ */
 async function handleAnswer(session, mobile, id) {
   const [, trackerId, serial, letter] = id.split('_');
-  const res = await Q.submitAnswer(session.id, mobile, Number(trackerId), Number(serial), letter);
-
+  const res = await Q.submitAnswer(session.id, mobile, Number(trackerId), Number(serial), letter, { silent: true });
   if (res.alreadyAnswered) {
     await wa.sendText(session.id, mobile, '_You already answered that one._');
+    return;
   }
-
-  const next = await Q.nextQuestion(Number(trackerId));
-  if (next) {
-    await Q.sendQuestion(session.id, mobile, Number(trackerId), next);
-  } else {
-    const score = await Q.finishQuiz(session.id, mobile, Number(trackerId));
-    await setState(session, 'main_menu', 'quiz_completed', score);
-  }
+  await require('./chatQuiz').afterAnswer(session.id, mobile, Number(trackerId), Number(serial));
 }
 
 module.exports = { handleInbound, getOrCreateSession, extractText, extractId };

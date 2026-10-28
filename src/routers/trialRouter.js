@@ -146,13 +146,15 @@ router.post('/api/submit', async (req, res) => {
 
     // one trial per mobile number — waived for the demo number (school pitch)
     if (!isDemoMobile(link.mobile_number)) {
+      // The free start is now 50 MCQs (pay as you answer, 2026-10-28), once per family — the old 7-day trial counts too.
       const used = await db.query(
         `SELECT 1 FROM parents p
-           JOIN parents_quizpe_subscriptions s ON s.parent_id = p.id
-           JOIN quizpe_plans pl ON pl.id = s.plan_id
-          WHERE p.parent_mobile_number = $1 AND pl.is_trial`, [link.mobile_number]);
+          WHERE p.parent_mobile_number = $1
+            AND (EXISTS (SELECT 1 FROM mcq_lots l WHERE l.parent_id = p.id AND l.source = 'free')
+                 OR EXISTS (SELECT 1 FROM parents_quizpe_subscriptions s JOIN quizpe_plans pl ON pl.id = s.plan_id
+                             WHERE s.parent_id = p.id AND pl.is_trial))`, [link.mobile_number]);
       if (used.rowCount) {
-        return res.status(409).json({ success: false, error: 'A free trial has already been used on this number.' });
+        return res.status(409).json({ success: false, error: 'The free MCQs have already been used on this number.' });
       }
     }
 
@@ -193,30 +195,11 @@ router.post('/api/submit', async (req, res) => {
         });
       }
 
-      // Supersede any earlier subscription for this parent — only one may be
-      // active at a time, so the daily sweep can never pick up two.
-      await c.query(
-        `UPDATE parents_quizpe_subscriptions
-            SET is_active=false, modified_at=now()
-          WHERE parent_id=$1 AND is_active`, [parentId]);
-
-      // The trial is whichever plan is flagged is_trial — its length comes from
-      // the plan row, so changing `duration` in the DB changes the trial with
-      // no code edit. Refuse rather than guess if no trial is on offer.
-      const trial = (await c.query(
-        `SELECT id, duration FROM quizpe_plans WHERE is_trial AND is_active ORDER BY id LIMIT 1`)).rows[0];
-      if (!trial) throw new Error('NO_ACTIVE_TRIAL_PLAN');
-
-      // spread the evening load instead of putting everyone at 8 PM
-      const { slotFor } = require('../whatsapp/quizSlot');
-      const slot = slotFor(parentId);
-
-      const sub = (await c.query(
-        `INSERT INTO parents_quizpe_subscriptions
-           (parent_id, plan_id, plan_end_date, quiz_time, reminder_time)
-         VALUES ($1, $2, CURRENT_DATE + $3::int, $4::time, $5::time)
-         RETURNING id, plan_end_date, quiz_time`,
-        [parentId, trial.id, trial.duration, slot.quiz_time, slot.reminder_time])).rows[0];
+      // THE FREE START IS 50 MCQs (user, 2026-10-28: replaces the 7-day trial) — valid 7 days, 20 a day,
+      // from the MCQ balance (prepaid/wallet.js). No subscription is created.
+      const W = require('../prepaid/wallet');
+      const lot = await W.grantFree(parentId, c);
+      const sub = { id: null, plan_end_date: lot?.expires_at || null };
 
       await c.query(`UPDATE signup_links SET used_at=now(), is_active=false WHERE id=$1`, [link.id]);
       if (link.session_id) {
@@ -225,19 +208,19 @@ router.post('/api/submit', async (req, res) => {
         await c.query(
           `INSERT INTO whatsapp_session_events (session_id, from_state, to_state, event, payload)
            VALUES ($1,'awaiting_form','active','trial_activated',$2)`,
-          [link.session_id, JSON.stringify({ via: 'web_form', subscription_id: sub.id })]);
+          [link.session_id, JSON.stringify({ via: 'web_form', free_mcqs: lot?.mcqs || 0 })]);
       }
       await c.query('COMMIT');
 
       // confirm on WhatsApp (never let a send failure roll back the signup)
       try {
         const wa = require('../whatsapp/client');
-        const M = require('../whatsapp/messages');
         const gradeName = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0].grade_name;
-        await wa.sendText(link.session_id, link.mobile_number, M.trialActivated({
-          studentName: name, boardCode: board, gradeName,
-          endDate: sub.plan_end_date, quizTime: sub.quiz_time, duration: trial.duration,
-        }));
+        await wa.sendButtons(link.session_id, link.mobile_number,
+          `🎉 *${name} is all set!* (${board} · ${gradeName})\n\n`
+          + (lot ? `🎁 *${lot.mcqs} free MCQs* are in your family account — valid till *${W.fmtDay(lot.expires_at)}*, up to 20 a day.\n\n` : '')
+          + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
+          [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
       } catch (e) {
         console.error('[trial] confirmation message failed:', e.message);
       }
@@ -260,9 +243,9 @@ router.post('/api/submit', async (req, res) => {
           children: [{ name, board: meta.board_code || board, grade: meta.grade_name || grade,
                        medium: meta.medium_name || medium, school: school_name || null }],
           plan: {
-            name: 'Free trial', duration: trial.duration,
-            start: M.fmtDate(new Date()), end: M.fmtDate(sub.plan_end_date),
-            quizTime: M.fmtTime(sub.quiz_time), reminderTime: M.fmtTime(slot.reminder_time),
+            name: 'Free start — 50 MCQs', duration: 7,
+            start: M.fmtDate(new Date()), end: sub.plan_end_date ? M.fmtDate(sub.plan_end_date) : '—',
+            quizTime: '—', reminderTime: '—',
           },
           ctx: fromWhatsApp({ sessionId: link.session_id, mobile: link.mobile_number }),
         });
