@@ -54,7 +54,10 @@ router.get('/stats', async (req, res) => {
           (SELECT COALESCE(ROUND(AVG(rating), 1), 0)::numeric FROM feedbacks
             WHERE rating IS NOT NULL)                                                AS average_rating,
           (SELECT COUNT(*)::int FROM feedbacks WHERE rating IS NOT NULL)             AS ratings_count,
-          (SELECT COUNT(*)::int FROM quizpe_tracker WHERE quiz_date = CURRENT_DATE)  AS quizzes_today
+          (SELECT COUNT(*)::int FROM quizpe_tracker WHERE quiz_date = CURRENT_DATE)  AS quizzes_today,
+          -- Families who agreed to the terms (2026-10-28): "QuizPe so far" shows on the site from 50.
+          (SELECT COUNT(DISTINCT right(regexp_replace(mobile_number, '\\D', '', 'g'), 10))::int
+             FROM policy_consents WHERE is_active AND mobile_number IS NOT NULL)      AS opted_families
       `);
       return r;
     });
