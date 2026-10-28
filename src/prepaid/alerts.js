@@ -46,7 +46,7 @@ async function lowBalance() {
   for (const r of rows) {
     await require('../web/notify').toMobile(r.mobile, {
       title: r.left > 0 ? `QuizPe balance is low: ${r.left} MCQs left` : 'QuizPe balance is used up',
-      body: 'Recharge to continue daily practice — ₹50 / ₹100 / ₹200 (+GST), 20 paise per MCQ. Send "Recharge" on WhatsApp to +91 83173 19463.',
+      body: 'Recharge to continue daily practice — ₹50 / ₹100 / ₹200 (+GST). Send "Recharge" on WhatsApp to +91 83173 19463.',
       tag: 'mcq-low',
     }).catch((e) => console.error('[mcq-alerts] low %s: %s', r.id, e.message));
     await db.query(`UPDATE parents SET mcq_low_alert_at = now() WHERE id = $1`, [r.id]);

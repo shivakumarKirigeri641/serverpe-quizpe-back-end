@@ -387,7 +387,7 @@ async function generateMcqInvoice({ paymentDbId, parent, rupees, mcqs, validTill
     total: gross, students: [],
     baseLine: {
       desc: `MCQ recharge — ${mcqs} MCQs (pay as you answer)`, plan: 'MCQ_PACK', qty: 1, gross,
-      sub: `20 paise per MCQ · valid till 31 Mar`,
+      sub: `Pay as you answer · valid till 31 Mar`,
     },
   };
   return generateInvoice(null, paymentDbId, exec, cart, { head });

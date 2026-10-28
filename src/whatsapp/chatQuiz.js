@@ -105,7 +105,7 @@ const answeredIn = async (trackerId) => (await db.query(
 
 /* ── the recharge offer ── */
 async function rechargeOffer(sessionId, mobile, text) {
-  await wa.sendButtons(sessionId, mobile, text, await W.packButtons(), '20 paise per MCQ + GST · valid till 31 Mar');
+  await wa.sendButtons(sessionId, mobile, text, await W.packButtons(), '+ GST · valid till 31 Mar');
 }
 
 /** Why the balance cannot pay for more today, said plainly; returns true when a message went out. */
@@ -404,7 +404,7 @@ async function showBalance(sessionId, mobile, parentId) {
   const lines = b.left
     ? `💰 *MCQ balance: ${b.left}*${b.free ? `\n🎁 Free: ${b.free} (till ${W.fmtDay(b.nextExpiry)})` : ''}${b.paid ? `\n💳 Paid: ${b.paid} (till ${W.fmtDay(b.lastExpiry)})` : ''}`
     : '💰 *MCQ balance: 0*';
-  await rechargeOffer(sessionId, mobile, `${lines}\n\nPay as you answer — *20 paise per MCQ* (+GST). Recharge any time:`);
+  await rechargeOffer(sessionId, mobile, `${lines}\n\nPay as you answer — recharge any time (+GST):`);
 }
 
 /** A recharge button was tapped: the Razorpay link. */
@@ -415,7 +415,7 @@ async function startRecharge(session, mobile, rupees) {
   if (r.error) { await wa.sendText(session.id, mobile, `😕 ${r.error} Please try again in a moment.`); return; }
   await wa.sendCtaUrl(session.id, mobile, {
     header: `💳 ${r.mcqs} MCQs`,
-    body: `*₹${r.rupees} + GST = ₹${r.amount}* for *${r.mcqs} MCQs* — 20 paise each, valid till 31 March.\n\n`
+    body: `*₹${r.rupees} + GST = ₹${r.amount}* for *${r.mcqs} MCQs*, valid till 31 March.\n\n`
       + `🔒 Secure payment by *Razorpay* (UPI · card · netbanking). The MCQs are added the moment you pay, and the GST invoice comes here.`,
     displayText: `Pay ₹${r.amount}`,
     url: r.short_url,

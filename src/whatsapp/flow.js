@@ -1380,7 +1380,7 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
   // land on the balance and the recharges instead of a checkout. (startInstantPurchase is kept, unused.)
   if (String(choice).startsWith('instant_child_') || choice === 'instant_quiz' || choice === 'instant_again') {
     await wa.sendText(session.id, mobile,
-      `⚡ The Instant Quiz is now *Pay as you answer* — just *20 paise per MCQ* (+GST), no plan, used only when your student answers.`);
+      `⚡ The Instant Quiz is now *Pay as you answer* — no plan, recharge from ₹50 (+GST), used only when your student answers.`);
     await require('./chatQuiz').showBalance(session.id, mobile, ctx.parentId);
     return;
   }
