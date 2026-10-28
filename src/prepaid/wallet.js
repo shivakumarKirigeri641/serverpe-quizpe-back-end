@@ -1,8 +1,8 @@
 /**
  * src/prepaid/wallet.js — PAY AS YOU ANSWER (user, 2026-10-28).
  * ---------------------------------------------------------------------------
- * A family's MCQ balance, counted in MCQs (never "credits"). Recharges (+ GST) per
- * answered MCQ; recharges ₹50 → 250, ₹100 → 500, ₹200 → 1000 (Jan–Mar only ₹50
+ * A family's MCQ balance, counted in MCQs (never "credits"). One MCQ is used per
+ * answered question; recharges (+ GST) ₹50 → 250, ₹100 → 500, ₹200 → 1000 (Jan–Mar only ₹50
  * and ₹100). Everything ends on 31 March — no carry-over, no refund.
  *
  *   free   50 MCQs, once per family ever, for new and lapsed families (not for a
