@@ -1717,6 +1717,14 @@ async function sendFreeStart(session, mobile, studentName, board, gradeName, sub
  */
 async function handleAnswer(session, mobile, id) {
   const [, trackerId, serial, letter] = id.split('_');
+  const CQ = require('./chatQuiz');
+  // A tap on a question of a quiz that has ended (by END, after 30 minutes idle, or at the night cut-off) or is
+  // from another day: not recorded and never charged (2026-10-28).
+  if (!(await CQ.isOpenToday(Number(trackerId)))) {
+    await wa.sendButtons(session.id, mobile, 'This quiz has ended — tap *Start quiz* for a new one.',
+      [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+    return;
+  }
   const res = await Q.submitAnswer(session.id, mobile, Number(trackerId), Number(serial), letter, { silent: true });
   if (res.alreadyAnswered) {
     await wa.sendText(session.id, mobile, '_You already answered that one._');

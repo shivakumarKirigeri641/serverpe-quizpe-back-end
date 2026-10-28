@@ -25,6 +25,8 @@ const DEFAULTS = {
   jan_mar_rupees: [50, 100],
   free_mcqs: 50, free_days: 7, free_per_day: 20,
   daily_limit: 20, round: 10, low_left: 20,
+  // A quiz in the chat with no answer: a reminder after 10 minutes, ended (with the report) after 30.
+  idle_remind_min: 10, idle_end_min: 30,
 };
 
 let cache = { at: 0, cfg: null };

@@ -845,6 +845,9 @@ function startScheduler() {
       // chase parents who agreed but never opened the child-details form
       await runFormNudge();
 
+      // A quiz in the chat with no answer: a reminder at 10 minutes, ended with its report at 30 (2026-10-28).
+      await require('../whatsapp/chatQuiz').idleSweep().catch((e) => console.error('[scheduler] idle sweep:', e.message));
+
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();
 

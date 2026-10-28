@@ -381,7 +381,68 @@ async function startRecharge(session, mobile, rupees) {
   });
 }
 
+/**
+ * NO ANSWER FOR A WHILE (user, 2026-10-28: "what if student didn't respond for a long time?"). Every minute
+ * (scheduler): a quiz running in the chat with no tap for
+ *   idle_remind_min (10)  one reminder — [▶️ Continue] [End quiz 📄] — free, the chat is still open
+ *   idle_end_min    (30)  ended: the summary + PDF for what was answered (only that was charged);
+ *                         nothing answered = closed quietly, nothing used
+ * Both are in the prepaid_mcq setting. The 23:50 cut-off (jobs/dayCutoff.js) stays the night-time safety net.
+ */
+async function idleSweep() {
+  const cfg = await W.config();
+  const remindMin = Number(cfg.idle_remind_min) || 10;
+  const endMin = Number(cfg.idle_end_min) || 30;
+  const { rows } = await db.query(
+    `SELECT s.id AS session_id, s.mobile_number, t.id AS tracker_id, t.student_id,
+            s.context->>'idle_nudged' AS nudged,
+            EXTRACT(EPOCH FROM (now() - greatest(
+              (SELECT max(h.answered_at) FROM student_quizpe_histories h WHERE h.tracker_id = t.id),
+              (SELECT max(h.sent_at) FROM student_quizpe_histories h WHERE h.tracker_id = t.id),
+              t.modified_at))) / 60 AS idle_min
+       FROM whatsapp_sessions s
+       JOIN quizpe_tracker t ON t.id = CASE WHEN s.context->>'tracker_id' ~ '^[0-9]+$' THEN (s.context->>'tracker_id')::bigint END
+       JOIN quizpe_status qs ON qs.id = t.status_id
+      WHERE s.is_active AND s.state = 'in_quiz' AND t.quiz_date = CURRENT_DATE
+        AND qs.status_code IN ('scheduled', 'in_progress', 'delivered', 'yet_to_start')`);
+  for (const r of rows) {
+    try {
+      if (r.idle_min >= endMin) {
+        // Nothing answered: closed quietly, nothing used. Otherwise say why, then the summary + PDF.
+        if ((await answeredIn(r.tracker_id)).done === 0) {
+          await endQuiz(r.session_id, r.mobile_number, r.tracker_id, 'idle', { quiet: true });
+          continue;
+        }
+        const st = await studentOf(r.student_id);
+        await wa.sendText(r.session_id, r.mobile_number,
+          `⏰ *${st?.student_name || 'The'}'s quiz* was closed after ${endMin} minutes without an answer. Here's the report for what was answered:`);
+        await endQuiz(r.session_id, r.mobile_number, r.tracker_id, 'idle');
+      } else if (r.idle_min >= remindMin && String(r.nudged) !== String(r.tracker_id)) {
+        const st = await studentOf(r.student_id);
+        const p = await answeredIn(r.tracker_id);
+        const q = await nextQ(r.tracker_id);
+        await db.query(`UPDATE whatsapp_sessions SET context = context || $2::jsonb WHERE id = $1`,
+          [r.session_id, JSON.stringify({ idle_nudged: String(r.tracker_id) })]);
+        await wa.sendButtons(r.session_id, r.mobile_number,
+          `👋 Still there? *${st.student_name}* ${q ? `is on question ${q.serial_number} of ${q.total}` : `has answered ${p.done}`}.\n\n`
+          + `_The quiz closes by itself in ${endMin - remindMin} minutes, with the report for what's answered._`,
+          [{ id: `qc_yes_${st.id}`, title: '▶️ Continue' }, { id: `qc_end_${st.id}`, title: 'End quiz 📄' }]);
+      }
+    } catch (e) { console.error('[chatQuiz] idle sweep %s: %s', r.tracker_id, e.message); }
+  }
+  return rows.length;
+}
+
+/** Is this quiz still open today? (An answer tapped on an old or closed quiz is refused, and never charged.) */
+async function isOpenToday(trackerId) {
+  const r = (await db.query(
+    `SELECT qs.status_code, t.quiz_date = CURRENT_DATE AS today
+       FROM quizpe_tracker t JOIN quizpe_status qs ON qs.id = t.status_id WHERE t.id = $1`, [trackerId])).rows[0];
+  return Boolean(r && r.today && ['scheduled', 'in_progress', 'delivered', 'yet_to_start'].includes(r.status_code));
+}
+
 module.exports = {
+  idleSweep, isOpenToday,
   threeOptions, originalLetter, nextQ, sendQ, startWallet, afterAnswer, endQuiz, continueFor, currentTracker, studentOf,
   afterRecharge, whoIsPlaying, showBalance, startRecharge, askContinue, carryOn, rechargeOffer, FOOTER,
 };
