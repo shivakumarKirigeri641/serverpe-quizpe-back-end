@@ -73,6 +73,14 @@ router.post('/whatsapp/webhook', (req, res) => {
     if (ENFORCE_SIGNATURE) return;
   }
 
+  /* META'S ACCOUNT NEWS (2026-10-28, as GaadiPe): restricted / banned, quality, the limit, the display name review,
+     template reviews. Each is kept as an admin alert (push + email); a strike is its own alert every time. */
+  for (const entry of req.body?.entry || []) {
+    for (const ch of entry.changes || []) {
+      if (ACCOUNT_FIELDS[ch.field]) accountNews(entry.id, ch.field, ch.value || {}).catch((e) => console.error('[whatsapp] account news:', e.message));
+    }
+  }
+
   const change = req.body?.entry?.[0]?.changes?.[0]?.value;
   if (!change) return;
 
@@ -105,6 +113,48 @@ router.post('/whatsapp/webhook', (req, res) => {
 });
 
 /** Reflect Meta's delivery receipts back onto the outbound message row. */
+const ACCOUNT_FIELDS = {
+  account_update: 'Account update',
+  account_alerts: 'Account alert',
+  account_review_update: 'Account review',
+  business_capability_update: 'Business capability update',
+  business_status_update: 'Business status',
+  phone_number_quality_update: 'Phone number quality / limit',
+  phone_number_name_update: 'Display name review',
+  message_template_status_update: 'Template review',
+  message_template_quality_update: 'Template quality',
+  template_category_update: 'Template category change',
+  security: 'Security change',
+};
+
+/** One account-level webhook, in plain words, as an admin alert (hq_alerts: push + email unless routine). */
+async function accountNews(wabaId, field, value) {
+  console.log('[whatsapp] meta %s: %s', field, JSON.stringify(value).slice(0, 300));
+  const event = value.event || value.decision || value.current_limit || value.alert_type || '';
+  const json = JSON.stringify(value);
+  const strike = /VIOLATION|DISABLED|BANNED|RESTRICT/i.test(json);
+  const bad = /FAILED|REJECT|DEFERRED|NEED_MORE_INFO|FLAGGED|DOWNGRADE|RED\b|PAUSED/i.test(json);
+  const routine = field === 'message_template_status_update' && value.event === 'APPROVED';
+  const bits = [
+    strike && '⛔ Account strike: stop broadcasts and ads, check Business Support Home now.',
+    event && `Event: ${event}`,
+    value.max_daily_conversations_per_business && `Limit: ${value.max_daily_conversations_per_business}`,
+    value.display_phone_number && `Number: ${value.display_phone_number}`,
+    value.requested_verified_name && `Name: ${value.requested_verified_name}`,
+    value.message_template_name && `Template: ${value.message_template_name}`,
+    value.reason && `Reason: ${value.reason}`,
+    value.rejection_reason && value.rejection_reason !== 'NONE' && `Reason: ${value.rejection_reason}`,
+    value.alert_description,
+  ].filter(Boolean);
+  await require('../admin/hq/alerts').raise({
+    // Every piece of news is its own alert: a second strike must never be swallowed as a repeat of the first.
+    key: `meta:${field}:${event || 'x'}:${Date.now()}`,
+    severity: strike ? 'critical' : bad ? 'warning' : 'info',
+    title: `Meta: ${ACCOUNT_FIELDS[field]}${routine ? ' (approved)' : ''}`,
+    description: bits.length ? bits.join('\n') : json.slice(0, 400),
+  });
+}
+
 async function updateStatus(s) {
   if (!s?.id || !s?.status) return;
   const col = { delivered: 'delivered_at', read: 'read_at' }[s.status];

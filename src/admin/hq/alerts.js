@@ -50,7 +50,8 @@ async function check() {
   // 3. Meta's view of the number.
   const meta = await shared.metaStatus();
   if (meta.ok) {
-    await toggle(meta.quality && meta.quality !== 'GREEN', { key: 'wa_quality', severity: meta.quality === 'RED' ? 'critical' : 'warning',
+    // UNKNOWN is a new number with too few messages for a rating yet (2026-10-28) — not a problem.
+    await toggle(meta.quality && !['GREEN', 'UNKNOWN', 'NA'].includes(meta.quality), { key: 'wa_quality', severity: meta.quality === 'RED' ? 'critical' : 'warning',
       title: `WhatsApp quality is ${meta.quality}`, description: 'Fewer marketing messages and more care with templates until it is green again.' });
   }
 

@@ -278,6 +278,48 @@ async function afterReport(sessionId, mobile, st) {
   await wa.sendButtons(sessionId, mobile,
     `What next?${bal.left > 0 ? `\n\n💰 Balance: *${bal.left} MCQs* (valid till ${W.fmtDay(bal.lastExpiry)})` : ''}`,
     buttons.slice(0, 3));
+  // THE DAILY REMINDER IS OPT-IN (user, 2026-10-28: "only opted parents get it"): asked once, after the first report.
+  const asked = (await db.query(
+    `UPDATE parents SET quiz_reminder_asked_at = now() WHERE id = $1 AND quiz_reminder_asked_at IS NULL RETURNING id`,
+    [st.parent_id]).catch(() => ({ rows: [] }))).rows[0];
+  if (asked) {
+    await wa.sendButtons(sessionId, mobile,
+      `🔔 Want a reminder for today's practice every morning at 7 AM?\n\n_Only when there are MCQs to practise — stop any time._`,
+      [{ id: 'rem_yes', title: 'Yes, daily ✅' }, { id: 'rem_no', title: 'No thanks' }]);
+  }
+}
+
+/**
+ * The reminder's own buttons and the opt-in: rem_yes / rem_no, and the template's quick replies "Skip today",
+ * "Stop reminders" (a direct stop until "Turn on again"). Returns true when it handled the message.
+ */
+async function reminderChoice(session, mobile, parentId, id, text) {
+  const t = String(text || '').trim().toLowerCase();
+  const set = (sql, args = []) => db.query(sql, [parentId, ...args]);
+  if (!parentId) return false;
+  if (id === 'rem_yes' || id === 'rem_on' || t === 'turn on again') {
+    await set(`UPDATE parents SET quiz_reminder_on = true, quiz_reminder_ignored = 0 WHERE id = $1`);
+    await wa.sendButtons(session.id, mobile, '🔔 Done — a reminder comes every morning at 7 AM when there are MCQs to practise.',
+      [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+    return true;
+  }
+  if (id === 'rem_no') {
+    await set(`UPDATE parents SET quiz_reminder_on = false WHERE id = $1`);
+    await wa.sendText(session.id, mobile, '👍 No reminders. Send *Hi* any time to start a quiz.');
+    return true;
+  }
+  if (t === 'skip today') {
+    await set(`UPDATE parents SET quiz_reminder_skip_on = (now() AT TIME ZONE 'Asia/Kolkata')::date, quiz_reminder_ignored = 0 WHERE id = $1`);
+    await wa.sendText(session.id, mobile, '👍 No more today. See you tomorrow! 🌙');
+    return true;
+  }
+  if (t === 'stop reminders' || id === 'rem_off') {
+    await set(`UPDATE parents SET quiz_reminder_on = false, quiz_reminder_ignored = 0 WHERE id = $1`);
+    await wa.sendButtons(session.id, mobile, '🔕 Daily reminders are off. You can still start a quiz any time — just send *Hi*.',
+      [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'rem_on', title: 'Turn on again' }, { id: 'back_menu', title: 'Menu' }]);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -442,7 +484,7 @@ async function isOpenToday(trackerId) {
 }
 
 module.exports = {
-  idleSweep, isOpenToday,
+  idleSweep, isOpenToday, reminderChoice,
   threeOptions, originalLetter, nextQ, sendQ, startWallet, afterAnswer, endQuiz, continueFor, currentTracker, studentOf,
   afterRecharge, whoIsPlaying, showBalance, startRecharge, askContinue, carryOn, rechargeOffer, FOOTER,
 };

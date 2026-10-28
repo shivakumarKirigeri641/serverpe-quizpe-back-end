@@ -847,6 +847,8 @@ function startScheduler() {
 
       // A quiz in the chat with no answer: a reminder at 10 minutes, ended with its report at 30 (2026-10-28).
       await require('../whatsapp/chatQuiz').idleSweep().catch((e) => console.error('[scheduler] idle sweep:', e.message));
+      // Pay as you answer, phase 2: the 7 AM reminder (opted-in only), low balance (18:00), expiry (30 / 7 days).
+      await require('../prepaid/alerts').tick(nowHHMM()).catch((e) => console.error('[scheduler] mcq alerts:', e.message));
 
       // Hard stop for the day: settle every unfinished quiz and kill its link.
       if (nowHHMM() === CUTOFF_HHMM) await closeOutDay();

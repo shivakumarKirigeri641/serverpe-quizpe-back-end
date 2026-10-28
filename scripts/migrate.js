@@ -817,6 +817,19 @@ const STEPS = [
        ON CONFLICT (key) DO NOTHING`,
     ],
   },
+  {
+    // Phase 2 (prepaid/alerts.js, 2026-10-28): the daily-reminder opt-in and the low-balance / expiry alert marks.
+    name: 'mcq_reminders',
+    check: `SELECT 1 FROM information_schema.columns WHERE table_name='parents' AND column_name='quiz_reminder_on'`,
+    apply: [
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS quiz_reminder_on boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS quiz_reminder_asked_at timestamptz`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS quiz_reminder_skip_on date`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS quiz_reminder_ignored smallint NOT NULL DEFAULT 0`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS mcq_low_alert_at timestamptz`,
+      `ALTER TABLE parents ADD COLUMN IF NOT EXISTS mcq_expiry_alerted text`,
+    ],
+  },
 ];
 
 (async () => {

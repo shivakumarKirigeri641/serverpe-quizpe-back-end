@@ -538,7 +538,11 @@ async function processInbound(msg, contactName) {
   // nudge. Because that means a paying parent stops receiving the service, the
   // reply has to say so plainly and name the date their plan still runs to —
   // otherwise silence looks like a fault rather than their own choice.
-  if (require('./optOut').wantsToStop(text)) {
+  // OUR OWN BUTTONS ARE NEVER A STOP (2026-10-28): "No, next day", "No thanks" and the reminder template's
+  // "Stop reminders" contain "no" / "stop", which the opt-out check reads as STOP-everything.
+  const ownButton = /^(qc_|rem_|mcq_|ans_|child_)/.test(id || '')
+    || /^(no,? next day|no thanks|stop reminders|skip today|turn on again|end quiz)\b/i.test(String(text || '').replace(/[^\w ,]/g, '').trim());
+  if (!ownButton && require('./optOut').wantsToStop(text)) {
     /*
      * EVERY opt-out is honoured, whether or not this number ever enrolled.
      *
@@ -762,6 +766,9 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
   /* ── pay as you answer (2026-10-28, chatQuiz.js): the quiz buttons, recharges, END ── */
   {
     const CQ = require('./chatQuiz');
+    // Any message means the parent is around: the daily reminder's "no tap" count starts again.
+    if (ctx.parentId) db.query(`UPDATE parents SET quiz_reminder_ignored = 0 WHERE id = $1 AND quiz_reminder_ignored > 0`, [ctx.parentId]).catch(() => {});
+    if (await CQ.reminderChoice(session, mobile, ctx.parentId, id, text)) return;
     const begin = (st) => beginQuizFor(session, mobile, st, 0);
     const kidFor = async (sid) => (await getStudents(ctx.parentId)).find((s) => Number(s.id) === Number(sid));
     if (/^qc_yes_\d+$/.test(id)) {
