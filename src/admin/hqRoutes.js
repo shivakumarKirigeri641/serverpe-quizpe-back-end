@@ -92,7 +92,10 @@ router.get('/hq/journey/:parentId', requireAdmin, requireCap('parents.view'), wr
 router.get('/hq/quizzes-per-child', requireAdmin, requireCap('parents.view'), wrap(async (req, res) =>
   ok(res, await hq('families').quizzesPerChild({ days: req.query.days, minMissed: req.query.missed }))));
 
-/* ── pay as you answer (2026-10-28): a family's MCQ balance, where it went, and a support top-up ── */
+/* ── pay as you answer (2026-10-28): the analytics page (period vs the one before), ── */
+router.get('/hq/mcq-stats', requireAdmin, requireCap('finance.view'), wrap(async (req, res) =>
+  ok(res, await hq('mcq').stats({ days: req.query.days }))));
+/* ── a family's MCQ balance, where it went, and a support top-up ── */
 router.get('/hq/mcq/:parentId', requireAdmin, requireCap('parents.view'), wrap(async (req, res) => {
   const id = String(req.params.parentId).replace(/\D/g, '') || '0';
   const W = require('../prepaid/wallet');
