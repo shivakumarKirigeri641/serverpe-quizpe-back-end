@@ -141,11 +141,17 @@ async function families({ q = '', filter = 'all', limit = 500 } = {}) {
           AND NOT EXISTS (SELECT 1 FROM whatsapp_sessions so WHERE so.opted_out AND ${M('so.mobile_number')} = ${M('c.mobile_number')})
         GROUP BY 1),
      wa_last AS (
-       SELECT ${M('mobile_number')} AS m10, max(created_at) AS last_at FROM whatsapp_messages WHERE direction = 'in' GROUP BY 1),
+       -- Which WhatsApp number (2026-10-28): messages before NEW_SINCE reached the old, banned number; after it,
+       -- the new +91 83173 19463.
+       SELECT ${M('mobile_number')} AS m10, max(created_at) AS last_at,
+              max(created_at) FILTER (WHERE created_at <  $3::timestamptz) AS old_last,
+              min(created_at) FILTER (WHERE created_at >= $3::timestamptz) AS new_first
+         FROM whatsapp_messages WHERE direction IN ('in', 'inbound') GROUP BY 1),
      base AS (SELECT m10 FROM w UNION SELECT m10 FROM wa),
      pu AS (SELECT ${M('mobile_number')} AS m10, count(*)::int AS devices FROM parent_push GROUP BY 1)
      SELECT base.m10, w.first_at, w.last_at, coalesce(w.signins, 0) AS signins, coalesce(w.signed_in, false) AS signed_in,
-            wa.agreed_at, wl.last_at AS wa_last,
+            wa.agreed_at, wl.last_at AS wa_last, wl.old_last AS wa_old_last, wl.new_first AS wa_new_first,
+            (SELECT coalesce(sum(l.mcqs - l.used), 0)::int FROM mcq_lots l WHERE l.parent_id = p.id AND l.expires_at > now()) AS mcq_left,
             CASE WHEN w.m10 IS NOT NULL AND wa.m10 IS NOT NULL THEN 'both' WHEN w.m10 IS NOT NULL THEN 'web' ELSE 'whatsapp' END AS channel,
             coalesce(pu.devices, 0) AS push_devices,
             p.id AS parent_id, p.parent_name, p.email, p.created_at AS enrolled_at,
@@ -160,7 +166,7 @@ async function families({ q = '', filter = 'all', limit = 500 } = {}) {
        ${PLAN}
       WHERE length(base.m10) = 10 AND ($1 <> '' OR ${ME('base.m10')})
         AND ($1 = '' OR base.m10 LIKE '%' || $1 || '%' OR coalesce(p.parent_name, '') ILIKE '%' || $1 || '%')
-      ORDER BY greatest(w.last_at, wl.last_at, wa.agreed_at) DESC NULLS LAST LIMIT $2`, [term, Math.min(2000, Number(limit) || 500)]);
+      ORDER BY greatest(w.last_at, wl.last_at, wa.agreed_at) DESC NULLS LAST LIMIT $2`, [term, Math.min(2000, Number(limit) || 500), NEW_SINCE()]);
   const all = rows.map((r) => ({
     mobile: r.m10, name: r.parent_name || null, email: r.email || null, parent_id: r.parent_id ? String(r.parent_id) : null,
     channel: r.channel,
@@ -168,15 +174,24 @@ async function families({ q = '', filter = 'all', limit = 500 } = {}) {
     push_devices: n(r.push_devices), signins: n(r.signins), signed_in: Boolean(r.signed_in),
     first_at: r.first_at || r.agreed_at, last_at: r.last_at, wa_last: r.wa_last, agreed_at: r.agreed_at, enrolled_at: r.enrolled_at,
     reach: [r.email ? 'email' : null, n(r.push_devices) ? 'push' : null].filter(Boolean),
+    // 'new' = has written to the new number; 'old' = only ever on the old one (still to bring back); null = neither.
+    wa_number: r.wa_new_first ? 'new' : r.wa_old_last ? 'old' : null,
+    wa_new_first: r.wa_new_first || null, wa_old_last: r.wa_old_last || null,
+    mcq_left: r.parent_id ? n(r.mcq_left) : null,
   }));
   const F = {
+    new_number: (x) => x.wa_number === 'new', old_number: (x) => x.wa_number === 'old',
     unreachable: (x) => !x.reach.length, no_email: (x) => !x.email, push: (x) => x.push_devices > 0,
     trial: (x) => x.plan === 'free trial', paid: (x) => x.plan === 'paid plan', not_enrolled: (x) => x.plan === 'not enrolled',
     web: (x) => x.channel === 'web', whatsapp: (x) => x.channel === 'whatsapp', both: (x) => x.channel === 'both',
   }[filter];
   const counts = { web: 0, whatsapp: 0, both: 0 };
   for (const x of all) counts[x.channel] += 1;
-  return { rows: F ? all.filter(F) : all, total: all.length, by_channel: counts };
+  const numbers = { new: all.filter((x) => x.wa_number === 'new').length, old: all.filter((x) => x.wa_number === 'old').length };
+  return { rows: F ? all.filter(F) : all, total: all.length, by_channel: counts, by_number: numbers, new_since: NEW_SINCE() };
 }
+
+/* When the new WhatsApp number went live (2026-10-28 19:00 IST); WHATSAPP_NUMBER_SINCE overrides. */
+const NEW_SINCE = () => process.env.WHATSAPP_NUMBER_SINCE || '2026-10-28T19:00:00+05:30';
 
 module.exports = { overview, signIns, families, deviceOf };
