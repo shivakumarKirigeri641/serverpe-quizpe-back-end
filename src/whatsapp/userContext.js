@@ -103,6 +103,8 @@ async function getUserContext(rawMobile, exec = db) {
 
   const daysLeft = r.plan_end_date
     ? Math.ceil((new Date(r.plan_end_date) - new Date()) / 864e5) : null;
+  // The family's MCQ balance, for the menu row ("120 questions left"); null if it cannot be read.
+  const mcqLeft = await require('../prepaid/wallet').balance(r.parent_id).then((b) => b.left).catch(() => null);
 
   return {
     mobile,
@@ -135,6 +137,7 @@ async function getUserContext(rawMobile, exec = db) {
        the reminders that should still reach them when the window closes. */
     isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status) || !!freeWindow,
     freeAccess: freeWindow || null,
+    mcqLeft,
   };
 }
 
@@ -190,10 +193,13 @@ function buildMainMenu(ctx) {
                     ? `Opens at ${fmtHour(qw.openHHMM())}${allDay ? ' — all day today!' : ' tonight'}. About 5 minutes.`
                     : "Today's quiz has closed — the next one is tomorrow." });
   }
-  // Pay as you answer replaces the ₹9 Instant Quiz (2026-10-28).
+  // Pay as you answer replaces the ₹9 Instant Quiz (2026-10-28). Plain words with the real number (user,
+  // 2026-10-29: "'MCQs balance, MCQs left, recharge 99/169/249' doesn't make sense").
   if (ctx.exists) {
-    rows.push({ id: 'my_balance', title: '💰 MCQ balance',
-                description: 'MCQs left · recharge ₹99 / ₹169 / ₹249 (+GST)' });
+    const left = ctx.mcqLeft;
+    rows.push(left > 0
+      ? { id: 'my_balance', title: '💰 Questions left', description: `${left} questions left for your students · add more` }
+      : { id: 'my_balance', title: '💰 Add questions', description: left === 0 ? 'No questions left — add more to keep practising' : 'See how many questions are left, or add more' });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and students enrolled' },

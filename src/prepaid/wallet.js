@@ -2,8 +2,8 @@
  * src/prepaid/wallet.js — PAY AS YOU ANSWER (user, 2026-10-28).
  * ---------------------------------------------------------------------------
  * A family's MCQ balance, counted in MCQs (never "credits"). One MCQ is used per
- * answered question; recharges (+ GST) ₹99 → 500, ₹169 → 850, ₹249 → 1250 (user, 2026-10-29: "as per
- * 99, 169, 249"; Jan–Mar only ₹99 and ₹169). Everything ends on 31 March — no carry-over, no refund.
+ * answered question; recharges (+ GST) ₹50 → 250, ₹100 → 500, ₹200 → 1000 (Jan–Mar only ₹50
+ * and ₹100). Everything ends on 31 March — no carry-over, no refund.
  *
  *   free   50 MCQs, once per family ever, for new and lapsed families (not for a
  *          family on a live ₹99/169/249 plan); valid 7 days, at most 20 a day
@@ -21,8 +21,8 @@ const db = require('../database/connectDB');
 
 const DEFAULTS = {
   paise_per_mcq: 20,
-  packs: [{ rupees: 99, mcqs: 500 }, { rupees: 169, mcqs: 850 }, { rupees: 249, mcqs: 1250 }],
-  jan_mar_rupees: [99, 169],
+  packs: [{ rupees: 50, mcqs: 250 }, { rupees: 100, mcqs: 500 }, { rupees: 200, mcqs: 1000 }],
+  jan_mar_rupees: [50, 100],
   free_mcqs: 50, free_days: 7, free_per_day: 20,
   daily_limit: 20, round: 10, low_left: 20,
   // A quiz in the chat with no answer: a reminder after 10 minutes, ended (with the report) after 30.
@@ -51,13 +51,13 @@ function yearEnd(d = new Date()) {
   return new Date(`${y}-03-31T23:59:59+05:30`);
 }
 
-/** The recharges on offer today: all three, or only ₹99 and ₹169 from January to March. */
+/** The recharges on offer today: all three, or only ₹50 and ₹100 from January to March. */
 async function packs(d = new Date()) {
   const cfg = await config();
   const all = cfg.packs.map((p) => ({ rupees: Number(p.rupees), mcqs: Number(p.mcqs) }));
   return istMonth(d) <= 3 ? all.filter((p) => cfg.jan_mar_rupees.includes(p.rupees)) : all;
 }
-/** Reply buttons for the recharges: "₹99 · 500 MCQs" (20 characters at most). */
+/** Reply buttons for the recharges: "₹50 · 250 MCQs" (20 characters at most). */
 async function packButtons() {
   return (await packs()).slice(0, 3).map((p) => ({ id: `mcq_${p.rupees}`, title: `₹${p.rupees} · ${p.mcqs} MCQs`.slice(0, 20) }));
 }

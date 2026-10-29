@@ -1321,7 +1321,7 @@ Your *Instant Quiz* for *${studentName}* is starting now — 12 questions.
 /* ─────────────────────────────── MCQ recharge (pay as you answer, 2026-10-28) ─────────────────────────────── */
 
 /**
- * A Razorpay Payment Link for one recharge (₹99 / 169 / 249 + GST). The family is already known (the parent is
+ * A Razorpay Payment Link for one recharge (₹50 / 100 / 200 + GST). The family is already known (the parent is
  * chatting), so there is no form. `resumeStudentId`: the student whose quiz stopped for want of MCQs — their quiz
  * carries on straight after payment.
  *
