@@ -440,6 +440,30 @@ function handleInbound(msg, contactName) {
   return serialise(normaliseMobile(msg.from), () => processInbound(msg, contactName));
 }
 
+/**
+ * "SAID HI" EMAIL (user, 2026-10-29): the first message a number sends to the new QuizPe number (live since
+ * WHATSAPP_NUMBER_SINCE) emails the founder — new person or existing family, and the Meta ad they came from
+ * (msg.referral on a Click-to-WhatsApp tap). Once per number: only when this is its first inbound since then, and
+ * the mail is deduped per number as well. Never awaited by the conversation.
+ */
+async function sayHiMail(mobile, msg, contactName) {
+  const since = process.env.WHATSAPP_NUMBER_SINCE || '2026-10-28T19:00:00+05:30';
+  const { rows: [c] } = await db.query(
+    `SELECT count(*)::int AS n FROM whatsapp_messages WHERE mobile_number = $1 AND direction = 'inbound' AND created_at >= $2`,
+    [mobile, since]);
+  if (c.n !== 1) return;
+  const p = (await db.query(
+    `SELECT p.parent_name,
+            (SELECT string_agg(st.student_name, ', ') FROM students st WHERE st.parent_id = p.id AND st.is_active) AS children
+       FROM parents p WHERE right(p.parent_mobile_number, 10) = $1 LIMIT 1`, [String(mobile).slice(-10)])).rows[0];
+  const r = msg.referral || null;
+  require('../mail/notify').saidHi({
+    mobile, name: contactName || null, text: extractText(msg) || null, at: new Date(),
+    existing: !!p, family: p?.parent_name || null, children: p?.children || null,
+    ad: r ? { headline: r.headline || null, body: r.body || null, source_type: r.source_type || null, source_url: r.source_url || null } : null,
+  });
+}
+
 async function processInbound(msg, contactName) {
   const mobile = normaliseMobile(msg.from);
   const session = await getOrCreateSession(mobile);
@@ -449,6 +473,7 @@ async function processInbound(msg, contactName) {
     console.log(`[flow] duplicate webhook ${msg.id} — skipped`);
     return;
   }
+  sayHiMail(mobile, msg, contactName).catch((e) => console.error('[flow] said-Hi mail skipped:', e.message));
 
   // An impatient parent taps the same row three times. Those are three real
   // messages with different ids, so the wamid check above lets them through —

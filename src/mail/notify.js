@@ -34,4 +34,7 @@ module.exports = {
 
   support: (data) => queue('supportRaised', data,
     data?.ticket ? `sup:${data.ticket}` : null),
+
+  // once per number on the new WhatsApp number (whatsapp/flow.js sayHiMail)
+  saidHi: (data) => queue('saidHi', data, data?.mobile ? `hi:${data.mobile}` : null),
 };

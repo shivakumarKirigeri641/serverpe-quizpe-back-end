@@ -293,4 +293,32 @@ function quizStarted({ student, parent, mobile, board, grade, subject, questions
   };
 }
 
-module.exports = { trialStarted, paymentReceived, feedbackReceived, supportRaised, quizCompleted, quizStarted, ist };
+/* ------------------------------------------------- 7. said Hi on WhatsApp */
+/**
+ * Someone wrote to the QuizPe number for the first time since the new number went live (user, 2026-10-29: like
+ * GaadiPe's "New / Existing customer said Hi"). New = no family on record; existing = a family from the old
+ * number or the website. `ad` is the Click-to-WhatsApp referral when they came from a Meta ad.
+ */
+function saidHi({ mobile, name, text, existing, family, children, ad, at }) {
+  const who = name || mobile;
+  return {
+    subject: `QuizPe · ${existing ? 'Existing family' : 'New person'} said Hi · ${who}${ad ? ' · from ad' : ''}`,
+    html: shell({
+      badge: existing ? 'Existing family said Hi' : 'New on WhatsApp', badgeColor: existing ? '#0277bd' : '#2e7d32',
+      title: `${who} wrote to QuizPe on WhatsApp`,
+      lead: existing ? 'A family already on record — from the old number or the website.' : 'First message ever from this number.',
+      body:
+        section('Message', [
+          ['Mobile', mobile], ['WhatsApp name', name], ['First message', text || '(a tap / non-text message)'],
+          ['When (IST)', ist(at || new Date())],
+        ]) +
+        (ad ? section('Came from an ad', [
+          ['Ad headline', ad.headline], ['Ad text', ad.body ? String(ad.body).slice(0, 160) : null],
+          ['Placement', ad.source_type], ['Ad link', ad.source_url],
+        ]) : '') +
+        (existing ? section('On record', [['Parent', family], ['Children', children]]) : ''),
+    }),
+  };
+}
+
+module.exports = { trialStarted, paymentReceived, feedbackReceived, supportRaised, quizCompleted, quizStarted, saidHi, ist };
