@@ -80,7 +80,7 @@ async function trialTerms() {
 ✅ Valid 7 days · up to 20 a day
 ✅ Mathematics · CBSE/ICSE/KSEAB
 
-💯 *No payment details needed.* After that: pay as you answer — recharge from ₹50 (+GST) — or a daily plan.
+💯 *No payment details needed.* After that: pay as you answer — recharge from ₹99 (+GST) — or a daily plan.
 
 📄 *Terms & disclaimer:*
 ${publicUrl(pol.url)}

@@ -813,8 +813,18 @@ const STEPS = [
       // already bought stay playable — only new purchases stop (createInstantCheckout needs an active row).
       `UPDATE quizpe_plans SET is_active = false WHERE plan_code = 'INSTANT'`,
       `INSERT INTO app_settings (key, value) VALUES ('prepaid_mcq',
-         '{"paise_per_mcq":20,"packs":[{"rupees":50,"mcqs":250},{"rupees":100,"mcqs":500},{"rupees":200,"mcqs":1000}],"jan_mar_rupees":[50,100],"free_mcqs":50,"free_days":7,"free_per_day":20,"daily_limit":20,"round":10,"low_left":20}')
+         '{"paise_per_mcq":20,"packs":[{"rupees":99,"mcqs":500},{"rupees":169,"mcqs":850},{"rupees":249,"mcqs":1250}],"jan_mar_rupees":[99,169],"free_mcqs":50,"free_days":7,"free_per_day":20,"daily_limit":20,"round":10,"low_left":20}')
        ON CONFLICT (key) DO NOTHING`,
+    ],
+  },
+  {
+    // Recharges at the plan prices (user, 2026-10-29: "payment must be as per 99, 169, 249 for MCQs").
+    name: 'mcq_packs_99',
+    check: `SELECT 1 FROM app_settings WHERE key = 'prepaid_mcq' AND value::jsonb -> 'packs' -> 0 ->> 'rupees' = '99'`,
+    apply: [
+      `UPDATE app_settings SET value = (value::jsonb
+         || '{"packs":[{"rupees":99,"mcqs":500},{"rupees":169,"mcqs":850},{"rupees":249,"mcqs":1250}],"jan_mar_rupees":[99,169]}'::jsonb)::text
+        WHERE key = 'prepaid_mcq'`,
     ],
   },
   {

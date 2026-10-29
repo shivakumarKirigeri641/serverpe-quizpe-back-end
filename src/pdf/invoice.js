@@ -360,8 +360,8 @@ async function generateInstantInvoice({ paymentDbId, parent, student, exec = db 
 }
 
 /**
- * Tax invoice for an MCQ recharge (pay as you answer, 2026-10-28) — no subscription. The pack price (₹50 / 100 /
- * 200) is the EX-GST base and GST is added on top, as for the Instant Quiz.
+ * Tax invoice for an MCQ recharge (pay as you answer, 2026-10-28) — no subscription. The pack price (₹99 / 169 /
+ * 249) is the EX-GST base and GST is added on top, as for the Instant Quiz.
  */
 async function generateMcqInvoice({ paymentDbId, parent, rupees, mcqs, validTill, exec = db }) {
   const gstRow = (await exec.query(`SELECT gst_value FROM gst_percent WHERE is_active ORDER BY id DESC LIMIT 1`)).rows[0];

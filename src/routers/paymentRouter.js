@@ -1321,9 +1321,13 @@ Your *Instant Quiz* for *${studentName}* is starting now — 12 questions.
 /* ─────────────────────────────── MCQ recharge (pay as you answer, 2026-10-28) ─────────────────────────────── */
 
 /**
- * A Razorpay Payment Link for one recharge (₹50 / 100 / 200 + GST). The family is already known (the parent is
+ * A Razorpay Payment Link for one recharge (₹99 / 169 / 249 + GST). The family is already known (the parent is
  * chatting), so there is no form. `resumeStudentId`: the student whose quiz stopped for want of MCQs — their quiz
  * carries on straight after payment.
+ *
+ * After paying, Razorpay sends the parent back to /pay/api/mcq-done, which adds the MCQs at once and opens the
+ * WhatsApp chat (user, 2026-10-29: "after payment nothing is happening"). The webhook stays as the safety net,
+ * but no longer has to be set up in the dashboard's TEST mode for the owner's own test payments to work.
  */
 async function createMcqLink({ sessionId = null, mobile, rupees, resumeStudentId = null }) {
   const W = require('../prepaid/wallet');
@@ -1346,10 +1350,13 @@ async function createMcqLink({ sessionId = null, mobile, rupees, resumeStudentId
     [token, sessionId, m, plan.id, gross, JSON.stringify(cart)]);
 
   const rzp = await razorpayCreds(null, m);
+  const base = (process.env.PUBLIC_BASE_URL || process.env.HOST || '').replace(/\/$/, '');
   const plRes = await fetch(`${RZP}/payment_links`, {
     method: 'POST', headers: { Authorization: rzp.authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       amount: Math.round(gross * 100), currency: 'INR', accept_partial: false,
+      reference_id: `mcq_${ins.id}`,
+      ...(base ? { callback_url: `${base}/pay/api/mcq-done`, callback_method: 'get' } : {}),
       description: `QuizPe — ${pack.mcqs} MCQs (₹${pack.rupees} + GST)`,
       customer: { name: String(parent?.parent_name || m).slice(0, 50), contact: `+91${m}` },
       notify: { sms: false, email: false }, reminder_enable: false,
@@ -1456,6 +1463,62 @@ async function finalizeMcq(c, pay) {
 
   return { invoice: inv.invoiceNo };
 }
+
+/** A tiny page for the browser after a recharge: what happened, and the button back to WhatsApp. */
+function mcqDonePage(res, ok, text) {
+  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+  const wa = n ? `https://wa.me/${n}` : 'https://wa.me/';
+  res.status(ok ? 200 : 400).type('html').send(`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>QuizPe</title>
+${ok ? `<meta http-equiv="refresh" content="3;url=${wa}">` : ''}
+<style>body{font-family:system-ui,sans-serif;background:#f6f7fb;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.c{background:#fff;border-radius:16px;padding:28px 22px;max-width:360px;margin:16px;text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.08)}
+h1{font-size:20px;margin:8px 0}p{color:#555;font-size:15px;line-height:1.45}
+a{display:inline-block;margin-top:14px;background:#25d366;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:999px}</style></head>
+<body><div class="c"><div style="font-size:44px">${ok ? '✅' : '⚠️'}</div><h1>${ok ? 'Payment received' : 'Payment not confirmed yet'}</h1>
+<p>${text}</p><a href="${wa}">Back to WhatsApp</a></div></body></html>`);
+}
+
+/**
+ * Razorpay's return after a recharge link is paid (?razorpay_payment_id, _payment_link_id, _reference_id, _status,
+ * _signature). The signature is checked with the key of the mode the link was made in, the payment is fetched and
+ * its amount matched to the cart, then finalizeMcq — the same idempotent path the webhook uses, so whichever
+ * arrives second just finds it done.
+ */
+router.get('/api/mcq-done', async (req, res) => {
+  const q = req.query || {};
+  const payId = String(q.razorpay_payment_id || '');
+  const linkId = String(q.razorpay_payment_link_id || '');
+  const ref = String(q.razorpay_payment_link_reference_id || '');
+  const status = String(q.razorpay_payment_link_status || '');
+  const sig = String(q.razorpay_signature || '');
+  const later = 'If money was deducted, your MCQs will be added in a few minutes and we will message you on WhatsApp.';
+  try {
+    const id = Number(ref.replace(/^mcq_/, ''));
+    if (!/^mcq_\d+$/.test(ref) || !payId || !sig) return mcqDonePage(res, false, later);
+    const c = (await db.query(`SELECT * FROM checkout_sessions WHERE id=$1`, [id])).rows[0];
+    if (!c || !c.cart || !c.cart.mcq) return mcqDonePage(res, false, later);
+    const rzp = await razorpayCreds(c.razorpay_mode);
+    const expected = crypto.createHmac('sha256', rzp.keySecret).update(`${linkId}|${ref}|${status}|${payId}`).digest('hex');
+    const valid = expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
+    if (!valid) { console.warn(`[pay] mcq-done: bad signature ref=${ref}`); return mcqDonePage(res, false, later); }
+    if (status !== 'paid') return mcqDonePage(res, false, 'The payment did not go through. Please try the recharge again from WhatsApp.');
+
+    const payRes = await fetch(`${RZP}/payments/${payId}`, { headers: { Authorization: rzp.authHeader } });
+    const pay = await payRes.json();
+    if (!payRes.ok || !['captured', 'authorized'].includes(pay.status)) return mcqDonePage(res, false, later);
+    if (Math.round(Number(c.cart.total) * 100) !== Number(pay.amount)) {
+      console.error(`[pay] mcq-done amount mismatch ref=${ref}: cart ${c.cart.total} vs paid ${Number(pay.amount) / 100}`);
+      return mcqDonePage(res, false, 'Amount mismatch. Please contact support if money was deducted.');
+    }
+    const result = await finalizeMcq(c, pay);
+    console.log(`[pay] mcq-done ${result.already ? 'already added' : 'ADDED'} ref=${ref} invoice=${result.invoice}`);
+    return mcqDonePage(res, true, `<b>${Number(c.cart.mcqs)} MCQs</b> added to your QuizPe balance. The invoice is on WhatsApp — taking you back there…`);
+  } catch (e) {
+    console.error('[pay] mcq-done failed:', e.message);
+    return mcqDonePage(res, false, later);
+  }
+});
 
 /** Fetch a captured payment for an order (used to reconcile an already-paid order). */
 async function capturedPaymentForOrder(orderId, auth) {
@@ -1664,8 +1727,14 @@ async function reconcileByPaymentId(paymentId, token = null) {
   paymentId = String(paymentId || '').trim();
   if (!/^pay_/.test(paymentId)) return { error: 'Enter a valid Razorpay payment id (starts with pay_).' };
 
-  const rzp = await razorpayCreds();   // current mode; must match the mode the payment was taken in
-  const payRes = await fetch(`${RZP}/payments/${paymentId}`, { headers: { Authorization: rzp.authHeader } });
+  // The current mode first, then the other one: the owner's own payments are always TEST, whatever the toggle.
+  let rzp = await razorpayCreds();
+  let payRes = await fetch(`${RZP}/payments/${paymentId}`, { headers: { Authorization: rzp.authHeader } });
+  if (!payRes.ok) {
+    const other = await razorpayCreds(rzp.mode === 'live' ? 'test' : 'live');
+    const r2 = await fetch(`${RZP}/payments/${paymentId}`, { headers: { Authorization: other.authHeader } });
+    if (r2.ok) { rzp = other; payRes = r2; }
+  }
   const pay = await payRes.json();
   if (!payRes.ok || !pay.id) {
     return { error: pay?.error?.description || `Payment not found in ${rzp.mode} mode — check the test/live toggle matches where it was paid.` };

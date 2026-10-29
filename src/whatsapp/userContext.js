@@ -193,7 +193,7 @@ function buildMainMenu(ctx) {
   // Pay as you answer replaces the ₹9 Instant Quiz (2026-10-28).
   if (ctx.exists) {
     rows.push({ id: 'my_balance', title: '💰 MCQ balance',
-                description: 'MCQs left · recharge ₹50 / ₹100 / ₹200 (+GST)' });
+                description: 'MCQs left · recharge ₹99 / ₹169 / ₹249 (+GST)' });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and students enrolled' },
