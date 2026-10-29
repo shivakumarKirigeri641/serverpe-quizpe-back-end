@@ -212,13 +212,24 @@ router.post('/api/submit', async (req, res) => {
       }
       await c.query('COMMIT');
 
+      /* THE INVITE (2026-10-29): a friend's "JOIN code" is kept on the WhatsApp session; this form is where most
+         families finish signing up, so the referral is recorded here too — the new family's free lot grows by the
+         friend bonus and the referrer is paid later (referrals/engine.js). After COMMIT, on its own connection, so it
+         can never undo the signup. */
+      let bonus = 0;
+      try {
+        const code = link.session_id ? (await db.query(
+          `SELECT context->>'referral_code' AS code FROM whatsapp_sessions WHERE id = $1`, [link.session_id])).rows[0]?.code : null;
+        if (code) bonus = (await require('../referrals/engine').capture(parentId, code))?.friendBonus || 0;
+      } catch (e) { console.error('[trial] referral capture skipped:', e.message); }
+
       // confirm on WhatsApp (never let a send failure roll back the signup)
       try {
         const wa = require('../whatsapp/client');
         const gradeName = (await db.query(`SELECT grade_name FROM grades WHERE grade_code=$1`, [grade])).rows[0].grade_name;
         await wa.sendButtons(link.session_id, link.mobile_number,
           `🎉 *${name} is all set!* (${board} · ${gradeName})\n\n`
-          + (lot ? `🎁 *${lot.mcqs} free MCQs* are in your family account — valid till *${W.fmtDay(lot.expires_at)}*, up to 20 a day.\n\n` : '')
+          + (lot ? `🎁 *${lot.mcqs + bonus} free MCQs* are in your family account${bonus ? ` (includes *+${bonus}* for joining with a friend's invite)` : ''} — valid till *${W.fmtDay(lot.expires_at)}*, up to 20 a day.\n\n` : '')
           + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
           [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
       } catch (e) {
