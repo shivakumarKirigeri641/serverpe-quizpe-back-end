@@ -32,7 +32,8 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        -- a child finished a quiz
        SELECT 'quiz_completed'::text AS kind, t.modified_at AS at,
               st.student_name AS who, p.parent_name AS parent, p.parent_mobile_number AS mobile,
-              ('Quiz ' || t.quiz_slot || ' · ' || r.score_correct || '/' || r.score_total || ' (' || r.score_pct || '%) grade ' || r.grade) AS detail,
+              ('Quiz ' || t.quiz_slot || ' · ' || r.score_correct || '/' || r.score_total || ' (' || r.score_pct || '%) grade ' || r.grade
+               || CASE WHEN t.paid_by = 'wallet' THEN ' · pay as you answer' ELSE '' END) AS detail,
               t.id AS ref_id, st.id AS student_id, p.id AS parent_id, NULL::numeric AS amount
          FROM quizpe_tracker t
          JOIN quizpe_status qs ON qs.id = t.status_id AND qs.status_code = 'completed'
@@ -51,7 +52,8 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
                || ' of ' ||
                COALESCE((SELECT COUNT(*) FROM student_quizpe_histories h2
                           WHERE h2.tracker_id = t.id), t.question_count)
-               || ' answered'),
+               || ' answered'
+               || CASE WHEN t.paid_by = 'wallet' THEN ' · pay as you answer' ELSE '' END),
               t.id, st.id, p.id, NULL::numeric
          FROM quizpe_tracker t
          JOIN quizpe_status qs ON qs.id = t.status_id AND qs.status_code = 'in_progress'
@@ -85,6 +87,24 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
          JOIN quizpe_plans pl ON pl.id = s.plan_id
          JOIN parents p ON p.id = s.parent_id
         ORDER BY s.created_at DESC LIMIT 40
+     ), mcq AS (
+       -- PAY AS YOU ANSWER (2026-10-29: "live monitoring pin to pin"): a recharge, the free 50, an admin top-up.
+       -- An owner's test-mode recharge is marked TEST so it is never mistaken for money.
+       SELECT CASE l.source WHEN 'free' THEN 'mcq_free' WHEN 'admin' THEN 'mcq_topup' ELSE 'mcq_recharge' END, l.created_at,
+              COALESCE((SELECT string_agg(x.student_name, ', ') FROM students x
+                         WHERE x.parent_id = p.id AND x.is_active), '—'),
+              p.parent_name, p.parent_mobile_number,
+              (l.mcqs || ' MCQs'
+               || CASE l.source WHEN 'free' THEN ' free start'
+                                WHEN 'admin' THEN ' top-up' || COALESCE(' · ' || NULLIF(l.note, ''), '')
+                                ELSE COALESCE(' · ₹' || l.rupees::int || ' + GST', '') END
+               || CASE WHEN cs.razorpay_mode = 'test' THEN ' · TEST' ELSE '' END),
+              l.id, NULL::bigint, p.id,
+              CASE WHEN l.source = 'recharge' AND coalesce(cs.razorpay_mode, 'live') <> 'test' THEN l.rupees END
+         FROM mcq_lots l
+         JOIN parents p ON p.id = l.parent_id
+         LEFT JOIN checkout_sessions cs ON cs.id = l.checkout_id
+        ORDER BY l.created_at DESC LIMIT 40
      ), hi AS (
        -- someone wrote to us for the very first time.
        -- The event the founder most wants to see live, and the only one the
@@ -208,7 +228,7 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
        FROM (
          SELECT * FROM events UNION ALL SELECT * FROM started UNION ALL
          SELECT * FROM orphan_reports UNION ALL
-         SELECT * FROM subs   UNION ALL SELECT * FROM hi      UNION ALL
+         SELECT * FROM subs   UNION ALL SELECT * FROM mcq     UNION ALL SELECT * FROM hi      UNION ALL
          SELECT * FROM bc     UNION ALL
          SELECT * FROM fb     UNION ALL SELECT * FROM tick      UNION ALL
          SELECT * FROM web_new UNION ALL SELECT * FROM email_ok UNION ALL SELECT * FROM pay_failed
@@ -236,6 +256,10 @@ async function todayCounts() {
          WHERE p.is_trial AND (s.created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS trials,
        (SELECT COUNT(*)::int FROM parents_quizpe_subscriptions s JOIN quizpe_plans p ON p.id=s.plan_id
          WHERE NOT p.is_trial AND (s.created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS paid,
+       (SELECT COUNT(*)::int FROM mcq_lots
+         WHERE source = 'recharge' AND (created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS recharges,
+       (SELECT COUNT(*)::int FROM mcq_lots
+         WHERE source = 'free' AND (created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS free_starts,
        (SELECT COUNT(*)::int FROM feedbacks
          WHERE rating IS NOT NULL
            AND (created_at AT TIME ZONE '${TZ}')::date = CURRENT_DATE) AS feedback,
