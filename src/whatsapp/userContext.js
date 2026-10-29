@@ -197,9 +197,10 @@ function buildMainMenu(ctx) {
   // 2026-10-29: "'MCQs balance, MCQs left, recharge 99/169/249' doesn't make sense").
   if (ctx.exists) {
     const left = ctx.mcqLeft;
-    rows.push(left > 0
-      ? { id: 'my_balance', title: '💰 Questions left', description: `${left} questions left for your students · add more` }
-      : { id: 'my_balance', title: '💰 Add questions', description: left === 0 ? 'No questions left — add more to keep practising' : 'See how many questions are left, or add more' });
+    // One title always (user, 2026-10-29: "'Add questions' won't be understood"); the description says the rest.
+    rows.push({ id: 'my_balance', title: '💰 My questions',
+                description: left > 0 ? `${left} questions left · tap to see or recharge`
+                  : left === 0 ? '0 left — recharge from ₹50 to keep practising' : 'Questions left, and recharge' });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and students enrolled' },
