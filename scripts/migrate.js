@@ -858,6 +858,22 @@ const STEPS = [
     name: 'old_templates_off',
     check: `SELECT 1 FROM app_settings WHERE key = 'old_templates_off'`,
     apply: [
+      /* The database's own rule tmpl_status_valid (made outside this file) did not allow 'NOT_ON_NUMBER' — the
+         migration failed there on 29 Oct. It is widened to every status Meta reports plus ours. NOT VALID: rows
+         already stored are not re-checked, so an odd old value can never block this step. */
+      `DO $$
+       DECLARE d text;
+       BEGIN
+         SELECT pg_get_constraintdef(oid) INTO d FROM pg_constraint WHERE conname = 'tmpl_status_valid';
+         IF d IS NOT NULL AND d NOT LIKE '%NOT_ON_NUMBER%' THEN
+           ALTER TABLE whatsapp_templates DROP CONSTRAINT tmpl_status_valid;
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tmpl_status_valid') THEN
+           ALTER TABLE whatsapp_templates ADD CONSTRAINT tmpl_status_valid CHECK (upper(approval_status) IN
+             ('APPROVED', 'PENDING', 'REJECTED', 'PAUSED', 'DISABLED', 'IN_APPEAL', 'PENDING_DELETION', 'DELETED',
+              'LIMIT_EXCEEDED', 'ARCHIVED', 'FLAGGED', 'DRAFT', 'NOT_SUBMITTED', 'NOT_ON_NUMBER')) NOT VALID;
+         END IF;
+       END $$`,
       `UPDATE whatsapp_templates SET approval_status = 'NOT_ON_NUMBER', is_active = false, modified_at = now()`,
       `INSERT INTO app_settings (key, value) VALUES ('old_templates_off', now()::text) ON CONFLICT (key) DO NOTHING`,
     ],
