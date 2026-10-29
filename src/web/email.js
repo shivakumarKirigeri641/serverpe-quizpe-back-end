@@ -49,10 +49,10 @@ async function sendCode(mobile, rawEmail) {
     [mobile, email, hash(code)]);
   const html = layout({
     title: `${code} is your QuizPe email code`,
-    body: `<p>Type this code in QuizPe to confirm your email address. It works for 10 minutes.</p>
+    body: `<p>Type this code in your QuizPe WhatsApp chat to confirm your email address. It works for 10 minutes.</p>
            <div style="font-size:32px;font-weight:900;letter-spacing:8px;color:#075e54;margin:14px 0;">${code}</div>
-           <p style="color:#4d6a65;">Your child's reports and quiz reminders will come to this address.</p>`,
-    footer: 'You are receiving this because this address was entered in QuizPe (quizpe.in/app). If it was not you, ignore this email.',
+           <p style="color:#4d6a65;">Your child's reports and your invoices will also come to this address as PDFs.</p>`,
+    footer: 'You are receiving this because this address was entered in QuizPe on WhatsApp. If it was not you, ignore this email.',
   });
   const out = await sendParentMail({ to: email, subject: `${code} is your QuizPe email code`, html });
   if (!out.sent) return { ok: false, status: 502, error: 'We could not send the code just now. Please try again in a minute.' };

@@ -53,6 +53,8 @@ async function getUserContext(rawMobile, exec = db) {
             p.parent_name,
             p.is_active         AS parent_active,
             p.state_code,
+            p.email,
+            p.email_verified_at,
             s.id                AS subscription_id,
             s.plan_start_date,
             s.plan_end_date,
@@ -138,6 +140,8 @@ async function getUserContext(rawMobile, exec = db) {
     isSubscribed: ['TRIAL_ACTIVE', 'ACTIVE'].includes(status) || !!freeWindow,
     freeAccess: freeWindow || null,
     mcqLeft,
+    email: r.email || null,
+    emailVerified: !!(r.email && r.email_verified_at),
   };
 }
 
@@ -214,6 +218,18 @@ function buildMainMenu(ctx) {
   }
   rows.push(
     { id: 'view_plans',      title: '💎 Premium plans',   description: 'Daily plans from ₹99 · or pay as you answer' },
+  );
+  /* THE EMAIL, CONFIRMED (user, 2026-10-29): reports and invoices also by email — the back-up if WhatsApp is ever
+     down. Optional at signup, confirmed here with a code (web/email.js). */
+  if (ctx.exists) {
+    const e = ctx.email ? (ctx.email.length > 34 ? `${ctx.email.slice(0, 31)}…` : ctx.email) : '';
+    rows.push(ctx.emailVerified
+      ? { id: 'my_email', title: '📧 My email', description: `${e} ✅ · reports & invoices sent here` }
+      : ctx.email
+        ? { id: 'my_email', title: '📧 Confirm email', description: `Confirm ${e} to get reports & invoices` }
+        : { id: 'my_email', title: '📧 Add email', description: 'Get reports & invoices by email too' });
+  }
+  rows.push(
     { id: 'support',         title: '💬 Support',         description: 'Get help from our team' },
   );
   return rows.slice(0, 10);

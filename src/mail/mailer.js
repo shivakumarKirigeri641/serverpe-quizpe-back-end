@@ -75,7 +75,7 @@ async function sendAdminMail({ subject, html, text }) {
  * reminders and plan notices, never marketing (user, 2026-10-08: WhatsApp is
  * gone). Same never-throw contract as sendAdminMail.
  */
-async function sendParentMail({ to, subject, html, text }) {
+async function sendParentMail({ to, subject, html, text, attachments }) {
   if (!HOST || !SEND_USER || !SEND_PASS) return { sent: false, reason: 'not_configured' };
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(to || ''))) return { sent: false, reason: 'no_address' };
   try {
@@ -83,6 +83,8 @@ async function sendParentMail({ to, subject, html, text }) {
       from: `"${FROM_NAME}" <${SEND_USER}>`,
       to, subject, html,
       text: text || String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+      // invoices and reports as PDFs (mail/parentDocs.js, 2026-10-29): [{ filename, path }]
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
     });
     return { sent: true, messageId: info.messageId };
   } catch (e) {

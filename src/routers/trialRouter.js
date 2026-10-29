@@ -42,8 +42,9 @@ async function createSignupLink(sessionId, mobile, parentName) {
  * wa.me works on mobile and desktop; the prefilled text is optional.
  */
 function waDeepLink() {
-  // WhatsApp is retired (2026-10-08): after signing up, back to quizpe.in/app.
-  return require('../web/notify').APP_URL();
+  // Back on WhatsApp (2026-10-29): after signing up, straight back into the chat.
+  const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
+  return n ? `https://wa.me/${n}` : require('../web/notify').APP_URL();
 }
 
 async function loadToken(token) {
@@ -126,11 +127,11 @@ router.post('/api/submit', async (req, res) => {
 
     const name = String(student_name || '').trim().slice(0, 60);
     if (name.length < 2) return res.status(400).json({ success: false, error: "Please enter your child's name." });
-    // Email is required: quiz reminders, reports and plan notices go there
-    // now that WhatsApp is retired (user, 2026-10-08).
-    const mail = String(email || '').trim().toLowerCase().slice(0, 120);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
-      return res.status(400).json({ success: false, error: 'Please enter a valid email address — reminders and reports are sent there.' });
+    // Email is OPTIONAL again (user, 2026-10-29: WhatsApp is back). Saved unconfirmed; reports and invoices are
+    // mailed only once it is confirmed with a code (WhatsApp menu → "📧 My email", mail/parentDocs.js).
+    const mail = String(email || '').trim().toLowerCase().slice(0, 120) || null;
+    if (mail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+      return res.status(400).json({ success: false, error: 'That email does not look right — fix it, or leave it empty.' });
     }
 
     // validate every choice against the DB rather than trusting the form
@@ -167,7 +168,7 @@ router.post('/api/submit', async (req, res) => {
          ON CONFLICT (parent_mobile_number) DO UPDATE
            -- starting a trial (re)activates the family so the scheduler resumes;
            -- this is also what lets the deactivated demo number come alive again
-           SET state_code=EXCLUDED.state_code, email=EXCLUDED.email, is_active=true, service_paused=false,
+           SET state_code=EXCLUDED.state_code, email=COALESCE(EXCLUDED.email, parents.email), is_active=true, service_paused=false,
                reminders_enabled=true, paused_at=NULL, modified_at=now()
          RETURNING id`,
         [link.parent_name || 'Parent', link.mobile_number, state, mail])).rows[0].id;
@@ -265,6 +266,7 @@ router.post('/api/submit', async (req, res) => {
       res.json({
         success: true,
         student_name: name,
+        free_mcqs: (lot?.mcqs || 0) + bonus,
         end_date: sub.plan_end_date,
         quiz_time: sub.quiz_time,
         // deep link back into the WhatsApp chat (no prefilled message)

@@ -632,6 +632,11 @@ Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTi
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
       });
+      require('../mail/parentDocs').mailDoc(c.mobile_number, {
+        subject: `QuizPe tax invoice ${inv.invoiceNo}`, title: `Payment received — ${c.plan_name}`,
+        lines: [`Invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`, `Valid till ${M.fmtDate(subId.plan_end_date)}`],
+        filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+      });
 
       // A warm thank-you, sent right AFTER the invoice. Uses an approved template
       // (branded + reliable); skipped silently until Meta clears it, so nothing
@@ -964,6 +969,11 @@ ${s.name}'s daily quiz starts tonight. 🚀`);
         await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
           filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
           caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
+        });
+        require('../mail/parentDocs').mailDoc(c.mobile_number, {
+          subject: `QuizPe tax invoice ${inv.invoiceNo}`, title: `${s.name} added to your QuizPe plan`,
+          lines: [`Invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`],
+          filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         });
       } catch (e) { console.error('[pay] add-child confirm send failed:', e.message); }
     }
@@ -1440,6 +1450,11 @@ async function finalizeMcq(c, pay) {
       filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
       caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`,
     }).catch((e) => console.error('[pay] mcq invoice send failed:', e.message));
+    require('../mail/parentDocs').mailDoc(c.mobile_number, {
+      subject: `QuizPe tax invoice ${inv.invoiceNo}`, title: `${cart.mcqs} MCQs added to your balance`,
+      lines: [`Invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`, `Balance now ${bal.left} MCQs, valid till ${W.fmtDay(lot?.expires_at || W.yearEnd())}`],
+      filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
+    });
     await require('../whatsapp/chatQuiz').afterRecharge(c.whatsapp_session_id, c.mobile_number, cart.resume_student_id, {
       paid: Number(pay.amount / 100).toFixed(2), mcqs: Number(cart.mcqs), left: bal.left,
       validTill: W.fmtDay(lot?.expires_at || W.yearEnd()), invoiceNo: inv.invoiceNo,

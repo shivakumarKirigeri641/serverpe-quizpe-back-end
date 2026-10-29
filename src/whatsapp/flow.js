@@ -131,8 +131,13 @@ async function recordConsent(session, policyId, mobile, waMessageId, parentId = 
 /* -------------------------------------------------------------------- steps */
 
 async function showWelcome(session, mobile) {
-  const w = await M.welcome();
-  await mergeContext(session, { terms_policy_id: w.policyId });
+  // A family that can still take the free 50 gets the welcome AND the free-start terms in ONE message, one button
+  // (2026-10-29); anyone else gets the plain welcome, then the menu.
+  const free = (await getUserContext(mobile).catch(() => ({ canStartTrial: false }))).canStartTrial;
+  const w = free ? await M.welcomeFree() : await M.welcome();
+  await mergeContext(session, free
+    ? { terms_policy_id: w.termsPolicyId, trial_policy_id: w.trialPolicyId, welcome_free: true }
+    : { terms_policy_id: w.policyId, welcome_free: false });
 
   // Brand the first impression with the QuizPe logo as an image header.
   let logoId;
@@ -142,8 +147,24 @@ async function showWelcome(session, mobile) {
   } catch (e) { console.error('[flow] logo header skipped:', e.message); }
 
   await wa.sendButtons(session.id, mobile, w.text,
-    [{ id: 'agree_terms', title: '✅ Agree & Continue' }], w.footer, logoId);
+    [{ id: 'agree_terms', title: free ? '✅ Agree & Start' : '✅ Agree & Continue' }], w.footer, logoId);
   await setState(session, 'welcome', 'said_hi');
+}
+
+/** The student form link (the one step before the free 50) — after the free-start terms are agreed. */
+async function sendSignupForm(session, mobile) {
+  const { createSignupLink } = require('../routers/trialRouter');
+  const { url } = await createSignupLink(session.id, mobile, session.context.parent_name);
+  await setState(session, 'awaiting_form', 'agreed_trial');
+  await wa.sendCtaUrl(session.id, mobile, {
+    header: '🎉 One last step!',
+    body: `Your student's *50 free MCQs* are ready — the first quiz can start today. 🌟\n\n`
+      + `All that's left: your student's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
+      + `👇 Tap below and you're done — the first quiz is ready right after.`,
+    displayText: '✅ Fill student form',
+    url,
+    footer: '50 free MCQs · no card · ~30 seconds',
+  });
 }
 
 async function showMainMenu(session, mobile, ctx) {
@@ -956,6 +977,11 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
     await handleMenuChoice(session, mobile, ctx, 'refer_friend');
     return;
   }
+  // The email menu and its buttons, from wherever the conversation is (2026-10-29).
+  if (['my_email', 'email_send', 'email_change'].includes(id) && ctx.exists) {
+    await handleEmail(session, mobile, ctx, id);
+    return;
+  }
 
   // Global escapes — work from any state.
   if (isGreeting(text) || id === 'back_menu') {
@@ -976,7 +1002,11 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
         // step to the thing they came for. The trial-terms consent is still
         // captured. Everyone else (already enrolled, trial already used, a
         // returning parent) lands on the menu exactly as before.
-        if (ctx.canStartTrial) {
+        if (ctx.canStartTrial && session.context?.welcome_free && session.context?.trial_policy_id) {
+          // One message held both terms: record the free-start consent too, and go straight to the form.
+          await recordConsent(session, session.context.trial_policy_id, mobile, msg.id, ctx.parentId);
+          await sendSignupForm(session, mobile);
+        } else if (ctx.canStartTrial) {
           await showTrialTerms(session, mobile);
         } else {
           await setState(session, 'main_menu', 'agreed_terms');
@@ -1019,20 +1049,8 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
     case 'trial_terms':
       if (id === 'agree_trial') {
         await recordConsent(session, session.context.trial_policy_id, mobile, msg.id, ctx.parentId);
-
         // One short web form instead of a chain of questions.
-        const { createSignupLink } = require('../routers/trialRouter');
-        const { url } = await createSignupLink(session.id, mobile, session.context.parent_name);
-        await setState(session, 'awaiting_form', 'agreed_trial');
-        await wa.sendCtaUrl(session.id, mobile, {
-          header: '🎉 One last step!',
-          body: `Your student's *50 free MCQs* are ready — the first quiz can start today. 🌟\n\n`
-            + `All that's left: your student's *name, board, grade & medium*. It takes about *30 seconds*, and there's *no payment* now.\n\n`
-            + `👇 Tap below and you're done — the first quiz is ready right after.`,
-          displayText: '✅ Fill student form',
-          url,
-          footer: '50 free MCQs · no card · ~30 seconds',
-        });
+        await sendSignupForm(session, mobile);
       } else {
         await wa.sendText(session.id, mobile, 'Tap *✅ Agree & Proceed* to continue, or *⬅️ Back* for the menu.');
       }
@@ -1099,6 +1117,38 @@ Sorry that didn't fully solve it. Our team will take another look and get back t
 
       await setState(session, 'active', 'free_mcqs_granted', { free_mcqs: sub.free_mcqs });
       await sendFreeStart(session, mobile, session.context.student_name, session.context.board_code, grade.grade_name, sub);
+      break;
+    }
+
+    case 'ask_email': {
+      const email = text.trim().toLowerCase();
+      const E = require('../web/email');
+      if (!E.EMAIL_RE.test(email)) {
+        await wa.sendText(session.id, mobile, `That doesn't look like an email address. Please type it again, e.g. *name@gmail.com* — or type *menu*.`);
+        break;
+      }
+      await mergeContext(session, { pending_email: email });
+      await sendEmailCode(session, mobile, email);
+      break;
+    }
+
+    case 'ask_email_code': {
+      const code = text.replace(/\D/g, '');
+      if (code.length !== 4) {
+        await wa.sendButtons(session.id, mobile, `Please type the *4-digit code* from the email we sent to *${session.context.pending_email}*.`,
+          [{ id: 'email_send', title: '🔁 Send new code' }, { id: 'email_change', title: '✏️ Change email' }]);
+        break;
+      }
+      const r = await require('../web/email').verifyCode(mobile, session.context.pending_email, code);
+      if (!r.ok) {
+        await wa.sendButtons(session.id, mobile, `⚠️ ${r.message}`,
+          [{ id: 'email_send', title: '🔁 Send new code' }, { id: 'email_change', title: '✏️ Change email' }]);
+        break;
+      }
+      await setState(session, 'main_menu', 'email_confirmed', { email: r.email });
+      await wa.sendButtons(session.id, mobile,
+        `✅ *Email confirmed — ${r.email}*\n\nFrom now on, every *report* and *invoice* also comes to this email as a PDF — a handy copy, and a back-up if WhatsApp is ever down.`,
+        [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
       break;
     }
 
@@ -1757,6 +1807,54 @@ async function handleFlowSubmission(session, mobile, data) {
 
   await setState(session, 'active', 'free_mcqs_granted', { free_mcqs: sub.free_mcqs, via: 'flow' });
   await sendFreeStart(session, mobile, studentName, board, gradeRow.grade_name, sub);
+}
+
+/**
+ * 📧 MY EMAIL (user, 2026-10-29: "ask them in a menu option to confirm, so if WhatsApp is disabled, invoices and
+ * reports are mailed"). Confirmed with a 4-digit code (web/email.js); reports and invoices then go there too
+ * (mail/parentDocs.js).
+ *   my_email      confirmed → shows it (change?) · typed at signup → offer the code · none → ask for it
+ *   email_send    a (new) code to the email being confirmed
+ *   email_change  ask for a different address
+ */
+async function handleEmail(session, mobile, ctx, id) {
+  const pending = session.context?.pending_email || null;
+  if (id === 'email_change' || (id === 'my_email' && !ctx.email)) {
+    await setState(session, 'ask_email', 'asked_email');
+    await wa.sendText(session.id, mobile,
+      `📧 *Type your email address*\n\nWe'll send a 4-digit code to confirm it. Reports and invoices then come there too — a back-up copy if WhatsApp is ever down.\n\n_e.g. name@gmail.com · or type *menu*_`);
+    return;
+  }
+  if (id === 'email_send') {
+    const email = pending || ctx.email;
+    if (!email) return handleEmail(session, mobile, ctx, 'email_change');
+    await mergeContext(session, { pending_email: email });
+    await sendEmailCode(session, mobile, email);
+    return;
+  }
+  // my_email with an address on file
+  if (ctx.emailVerified) {
+    await wa.sendButtons(session.id, mobile,
+      `📧 *Your email: ${ctx.email}* ✅ confirmed\n\nEvery report and invoice also comes here as a PDF.`,
+      [{ id: 'email_change', title: '✏️ Change email' }, { id: 'back_menu', title: 'Menu' }]);
+    return;
+  }
+  await mergeContext(session, { pending_email: ctx.email });
+  await wa.sendButtons(session.id, mobile,
+    `📧 *Confirm ${ctx.email}?*\n\nWe'll send a 4-digit code there. Once confirmed, reports and invoices also come to this email.`,
+    [{ id: 'email_send', title: '✅ Send code' }, { id: 'email_change', title: '✏️ Change email' }]);
+}
+
+async function sendEmailCode(session, mobile, email) {
+  const r = await require('../web/email').sendCode(mobile, email);
+  if (!r.ok) {
+    await wa.sendButtons(session.id, mobile, `⚠️ ${r.error}`,
+      [{ id: 'email_send', title: '🔁 Try again' }, { id: 'email_change', title: '✏️ Change email' }]);
+    return;
+  }
+  await setState(session, 'ask_email_code', 'email_code_sent', { email });
+  await wa.sendText(session.id, mobile,
+    `📨 We sent a *4-digit code* to *${email}*.\n\nType the code here to confirm. _(Check Spam/Promotions if you don't see it.)_`);
 }
 
 /** After signup: the free 50 MCQs (2026-10-28, replaces the 7-day trial) and a Start button. */

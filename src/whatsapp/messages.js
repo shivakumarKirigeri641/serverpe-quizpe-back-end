@@ -43,16 +43,49 @@ async function welcome() {
     text:
 `👋 Welcome to *${b.product_name}* — _${b.product_tagline}_
 
-India's simplest daily learning habit for school kids, right here on WhatsApp. No app to download.
+Daily Maths revision for your child, right here on WhatsApp. No app to download.
 
-📚 A fresh *15-question quiz* every day
-✅ Instant answers with kid-friendly explanations
-📊 Weekly progress reports for parents
+📚 Questions in the chat, matched to class & syllabus
+📊 A report with every answer explained
+💰 Pay as your child answers — no fixed plan
 
 By continuing, you accept our *Terms & Privacy Policy* of QuizPe. 😊
 ${publicUrl(terms.url)}`,
     footer: `${b.company_name}`,
     policyId: terms.id,
+  };
+}
+
+/**
+ * WELCOME + FREE START IN ONE (user, 2026-10-29: "can't we club points 2 & 3 in one?"): for a new family the
+ * welcome, the 50 free MCQs and BOTH policies (Terms & Privacy, and the free-start terms) in one message with ONE
+ * button — "Agree & Start" records both consents and opens the student form. Under the 1024-character limit.
+ */
+async function welcomeFree() {
+  const b = await business();
+  const terms = (await db.query(
+    `SELECT * FROM policies WHERE policy_code='terms' AND is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  const pol = (await db.query(
+    `SELECT * FROM policies WHERE policy_code='trial_conditions' AND is_active ORDER BY id DESC LIMIT 1`)).rows[0];
+  return {
+    text:
+`👋 Welcome to *${b.product_name}* — _${b.product_tagline}_
+
+Daily Maths revision for your child, right here on WhatsApp. No app to download.
+
+🎁 *Start with 50 FREE MCQs* — no payment details
+✅ Questions in the chat, matched to class & syllabus
+✅ A report with every answer explained
+✅ Valid 7 days · up to 20 a day
+💰 Then pay only for what your child answers — from ₹50 (+GST)
+
+📄 Terms & Privacy: ${publicUrl(terms.url)}
+📄 Free-start terms: ${publicUrl(pol.url)}
+
+_By tapping *Agree & Start* you confirm you are the parent/guardian and accept both._`,
+    footer: `${b.company_name}`,
+    termsPolicyId: terms.id,
+    trialPolicyId: pol.id,
   };
 }
 
@@ -317,7 +350,7 @@ function socialInvite() {
 }
 
 module.exports = {
-  welcome, trialTerms, plansList, subscriptionDetails,
+  welcome, welcomeFree, trialTerms, plansList, subscriptionDetails,
   quizSchedule, quizReport, reportsPortalUrl, publicUrl, support, trialActivated, parentGuidance, business, fmtDate, fmtTime,
   SOCIAL, socialInvite,
 };

@@ -33,6 +33,13 @@ async function dailyReport({ trackerId, sessionId, mobile }) {
                `Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · *${rep.score.grade}* — ${rep.score.label}\n` +
                `_Includes every question, the correct answer and why._`,
     });
+    require('../mail/parentDocs').mailDoc(mobile, {
+      subject: `${rep.head.student_name}'s QuizPe report — ${rep.score.correct}/${rep.score.total}`,
+      title: `${rep.head.student_name}'s report — ${rep.head.subject_name}`,
+      lines: [`Score ${rep.score.correct}/${rep.score.total} (${rep.score.pct}%) · ${rep.score.grade} — ${rep.score.label}`,
+              'Every question, the correct answer and why are in the PDF.'],
+      filePath: rep.filePath, filename: `${rep.head.student_name}-${rep.head.subject_name}-report.pdf`,
+    });
     // WhatsApp is retired (2026-10-08): the report is in the parent's account
     // on quizpe.in/app — tell their phone it is ready. Push only; never throws.
     if (mobile) {
@@ -353,6 +360,12 @@ async function weeklyReport({ studentId, weekStart, weekEnd, sessionId, mobile }
       filePath: rep.filePath, filename,
     });
   }
+  require('../mail/parentDocs').mailDoc(mobile, {
+    subject: `${rep.head.student_name}'s QuizPe weekly report — ${range}`,
+    title: `${rep.head.student_name}'s weekly report`,
+    lines: [`${range}`, `${s.days}/7 days active · Average ${s.avgPct}% · ${s.grade}`],
+    filePath: rep.filePath, filename,
+  });
 }
 
 /**
