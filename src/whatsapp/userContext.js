@@ -198,9 +198,9 @@ function buildMainMenu(ctx) {
   if (ctx.exists) {
     const left = ctx.mcqLeft;
     // One title always (user, 2026-10-29: "'Add questions' won't be understood"); the description says the rest.
-    rows.push({ id: 'my_balance', title: '💰 My questions',
-                description: left > 0 ? `${left} questions left · tap to see or recharge`
-                  : left === 0 ? '0 left — recharge from ₹50 to keep practising' : 'Questions left, and recharge' });
+    rows.push({ id: 'my_balance', title: '💰 My MCQs',
+                description: left > 0 ? `${left} MCQs left · tap to see or recharge`
+                  : left === 0 ? '0 left — recharge from ₹50 to keep practising' : 'MCQs left, and recharge' });
   }
   rows.push(
     { id: 'my_subscription', title: '📄 My subscription', description: 'Plan, validity and students enrolled' },
