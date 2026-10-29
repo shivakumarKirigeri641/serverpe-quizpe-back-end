@@ -145,7 +145,7 @@ async function getUserContext(rawMobile, exec = db) {
 async function getStudents(parentId, exec = db) {
   if (!parentId) return [];
   const { rows } = await exec.query(
-    `SELECT st.id, st.student_name, st.school_name, st.difficulty_level,
+    `SELECT st.id, st.parent_id, st.student_name, st.school_name, st.difficulty_level,
             b.board_code, g.grade_code, g.grade_name
        FROM students st
        JOIN boards b ON b.id = st.board_id

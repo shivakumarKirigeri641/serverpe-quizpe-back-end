@@ -1636,6 +1636,16 @@ async function beginQuizFor(session, mobile, st, siblingCount, difficulty = null
         return;
       }
 
+      // PLAN FIRST, said plainly (user, 2026-10-29: "plan and MCQs both — what to do?"): a family with a balance
+      // too is told this quiz comes from the plan, so the MCQs not going down is never a surprise.
+      if (!(await Q.trackerFilled(target.id))) {
+        const left = (await require('../prepaid/wallet').balance(st.parent_id).catch(() => ({ left: 0 }))).left;
+        if (left > 0) {
+          await wa.sendText(session.id, mobile,
+            `📅 This quiz is from your *daily plan* — your *${left} MCQs* are not used. They're kept for extra practice after today's plan quizzes.`);
+        }
+      }
+
       const prog = await Q.dailyQuizProgress(st.id);
       const r = await Q.startQuiz(target.id, difficulty);
       if (r.error || !r.trackerId) {

@@ -257,7 +257,7 @@ async function afterAnswer(sessionId, mobile, trackerId, serial) {
   if (more) return roundDone ? askContinue(sessionId, mobile, st, p.done) : carryOn(sessionId, mobile, trackerId, st);
   await Q.finishQuiz(sessionId, mobile, trackerId, { noOffer: true });
   await setState(sessionId, 'main_menu');
-  return afterReport(sessionId, mobile, st);
+  return afterReport(sessionId, mobile, st, trackerId);
 }
 
 /** "Do you still want to continue?" after every 10. */
@@ -273,16 +273,27 @@ async function askContinue(sessionId, mobile, st, done) {
     `🎯 *${done} done!*${balLine}${low}\n\nDo you still want to continue?`, buttons, FOOTER);
 }
 
-/** After a report: who's next. */
-async function afterReport(sessionId, mobile, st) {
+/**
+ * After a report: what this quiz cost, then who's next. Says plainly which pocket paid (user, 2026-10-29: "after
+ * End, balance didn't deduct?"): a balance quiz shows the MCQs it used; a plan quiz says the MCQs were not touched.
+ */
+async function afterReport(sessionId, mobile, st, trackerId = null) {
   const buttons = [];
   if (Number(st.siblings) > 1) buttons.push({ id: 'qc_next', title: '👦 Next student' });
   buttons.push({ id: `qc_yes_${st.id}`, title: `▶️ ${st.student_name}`.slice(0, 14) + ' again' });
   buttons.push({ id: 'qc_done', title: '✔️ Done' });
   const bal = await W.balance(st.parent_id);
-  await wa.sendButtons(sessionId, mobile,
-    `What next?${bal.left > 0 ? `\n\n💰 Balance: *${bal.left} MCQs* (valid till ${W.fmtDay(bal.lastExpiry)})` : ''}`,
-    buttons.slice(0, 3));
+  const t = trackerId ? await trackerOf(trackerId) : null;
+  let cost = '';
+  if (t && t.paid_by === 'wallet') {
+    const used = (await db.query(`SELECT count(*)::int AS n FROM mcq_usage WHERE tracker_id = $1`, [trackerId])).rows[0].n;
+    cost = `💰 This quiz used *${used} MCQ${used === 1 ? '' : 's'}* · *${bal.left} left*${bal.left > 0 ? ` (valid till ${W.fmtDay(bal.lastExpiry)})` : ''}`;
+  } else if (t) {
+    cost = `📅 This quiz was from your *daily plan* — no MCQs used.${bal.left > 0 ? ` Your *${bal.left} MCQs* stay saved for extra practice.` : ''}`;
+  } else if (bal.left > 0) {
+    cost = `💰 Balance: *${bal.left} MCQs* (valid till ${W.fmtDay(bal.lastExpiry)})`;
+  }
+  await wa.sendButtons(sessionId, mobile, `${cost ? `${cost}\n\n` : ''}What next?`, buttons.slice(0, 3));
   // THE DAILY REMINDER IS OPT-IN (user, 2026-10-28: "only opted parents get it"): asked once, after the first report.
   const asked = (await db.query(
     `UPDATE parents SET quiz_reminder_asked_at = now() WHERE id = $1 AND quiz_reminder_asked_at IS NULL RETURNING id`,
@@ -353,7 +364,7 @@ async function endQuiz(sessionId, mobile, trackerId, why = 'ended', opts = {}) {
   await db.query(`UPDATE quizpe_tracker SET question_count = $2, modified_at = now() WHERE id = $1`, [trackerId, p.done]);
   await Q.finishQuiz(sessionId, mobile, trackerId, { noOffer: true });
   await setState(sessionId, 'main_menu');
-  if (!opts.quiet) await afterReport(sessionId, mobile, st);
+  if (!opts.quiet) await afterReport(sessionId, mobile, st, trackerId);
 }
 
 /** The quiz running in this chat right now, if any. */
