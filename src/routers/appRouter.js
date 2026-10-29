@@ -198,6 +198,16 @@ router.get('/me', wrap(async (req, res) => {
       const n = String(process.env.WHATSAPP_BUSINESS_NUMBER || '').replace(/\D/g, '');
       return n ? `https://wa.me/${n}?text=${encodeURIComponent('Hi')}` : null;
     })(),
+    /* REFER & EARN on the app too (2026-10-29): the parent's invite link and how it is going. */
+    referral: await (async () => {
+      try {
+        const s = await require('../referrals/engine').summary(ctx.parentId);
+        if (!s.enabled || !s.link) return null;
+        const free = (await require('../prepaid/wallet').config()).free_mcqs;
+        return { code: s.code, link: s.link, reward_mcqs: s.reward_mcqs, friend_mcqs: s.friend_mcqs, free_mcqs: free,
+                 qualify_answers: s.qualify_answers, joined: s.joined, rewarded: s.rewarded, mcqs_earned: s.mcqs_earned };
+      } catch { return null; }
+    })(),
   });
 }));
 
