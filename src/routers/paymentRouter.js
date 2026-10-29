@@ -1431,19 +1431,19 @@ async function finalizeMcq(c, pay) {
     client.release();
   }
 
-  // Tell them, send the invoice, and carry on the stopped quiz. Never undoes the payment.
+  // On WhatsApp: the invoice PDF, then the MCQs credited + balance with a [Start quiz] button last, so it sits at
+  // the bottom of the chat when the parent comes back. Never undoes the payment.
   try {
     const wa = require('../whatsapp/client');
     const bal = await W.balance(parentId);
-    await wa.sendText(c.whatsapp_session_id, c.mobile_number,
-      `✅ *Payment received — ₹${Number(pay.amount / 100).toFixed(2)}*\n\n`
-      + `*${cart.mcqs} MCQs* added. Balance now: *${bal.left} MCQs*, valid till *${W.fmtDay(lot?.expires_at || W.yearEnd())}*.\n`
-      + `🧾 Invoice: ${inv.invoiceNo}`);
     await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
       filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
       caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ₹${inv.amounts.total.toFixed(2)} (incl. GST)`,
+    }).catch((e) => console.error('[pay] mcq invoice send failed:', e.message));
+    await require('../whatsapp/chatQuiz').afterRecharge(c.whatsapp_session_id, c.mobile_number, cart.resume_student_id, {
+      paid: Number(pay.amount / 100).toFixed(2), mcqs: Number(cart.mcqs), left: bal.left,
+      validTill: W.fmtDay(lot?.expires_at || W.yearEnd()), invoiceNo: inv.invoiceNo,
     });
-    await require('../whatsapp/chatQuiz').afterRecharge(c.whatsapp_session_id, c.mobile_number, cart.resume_student_id);
   } catch (e) { console.error('[pay] mcq deliver failed:', e.message); }
 
   try {
@@ -1470,7 +1470,7 @@ function mcqDonePage(res, ok, text) {
   const wa = n ? `https://wa.me/${n}` : 'https://wa.me/';
   res.status(ok ? 200 : 400).type('html').send(`<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>QuizPe</title>
-${ok ? `<meta http-equiv="refresh" content="3;url=${wa}">` : ''}
+${ok ? `<meta http-equiv="refresh" content="1;url=${wa}">` : ''}
 <style>body{font-family:system-ui,sans-serif;background:#f6f7fb;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
 .c{background:#fff;border-radius:16px;padding:28px 22px;max-width:360px;margin:16px;text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.08)}
 h1{font-size:20px;margin:8px 0}p{color:#555;font-size:15px;line-height:1.45}
@@ -1513,7 +1513,7 @@ router.get('/api/mcq-done', async (req, res) => {
     }
     const result = await finalizeMcq(c, pay);
     console.log(`[pay] mcq-done ${result.already ? 'already added' : 'ADDED'} ref=${ref} invoice=${result.invoice}`);
-    return mcqDonePage(res, true, `<b>${Number(c.cart.mcqs)} MCQs</b> added to your QuizPe balance. The invoice is on WhatsApp — taking you back there…`);
+    return mcqDonePage(res, true, `<b>${Number(c.cart.mcqs)} MCQs</b> credited to your QuizPe balance. Your invoice and the Start quiz button are on WhatsApp — taking you back there…`);
   } catch (e) {
     console.error('[pay] mcq-done failed:', e.message);
     return mcqDonePage(res, false, later);

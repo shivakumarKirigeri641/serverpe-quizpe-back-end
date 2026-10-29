@@ -375,14 +375,20 @@ async function continueFor(session, mobile, studentId, begin) {
   return begin(st);   // flow.beginQuizFor: the next plan quiz, or the balance when the plan is done
 }
 
-/** After a recharge: carry on the quiz that stopped, or offer to start. */
-async function afterRecharge(sessionId, mobile, studentId) {
-  if (!sessionId) return;
-  if (studentId) {
-    const st = await studentOf(studentId);
-    if (st) return startWallet(sessionId, mobile, st);
-  }
-  await wa.sendButtons(sessionId, mobile, 'Ready when you are! 🚀', [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+/**
+ * After a recharge (the invoice PDF is already sent): how many MCQs were credited, the balance, and a button to
+ * start (user, 2026-10-29: "go back to WhatsApp, give invoice, ask for start quiz showing x MCQs credited").
+ * The student whose quiz stopped for want of MCQs gets "Continue <name>"; nothing starts until the parent taps.
+ */
+async function afterRecharge(sessionId, mobile, studentId, info = {}) {
+  const st = studentId ? await studentOf(studentId).catch(() => null) : null;
+  const lines = [`✅ *Payment received${info.paid ? ` — ₹${info.paid}` : ''}*`, ''];
+  if (info.mcqs) lines.push(`🎉 *${info.mcqs} MCQs credited* to your QuizPe balance.`);
+  if (info.left != null) lines.push(`💰 Balance now: *${info.left} MCQs*${info.validTill ? `, valid till ${info.validTill}` : ''}.`);
+  if (info.invoiceNo) lines.push(`🧾 Invoice ${info.invoiceNo} is above.`);
+  lines.push('', st ? `Shall *${st.student_name}* carry on with the quiz? 🚀` : 'Shall we start the quiz now? 🚀');
+  const start = st ? { id: `child_${st.id}`, title: `▶️ Continue ${st.student_name}`.slice(0, 20) } : { id: 'start_quiz', title: '▶️ Start quiz' };
+  await wa.sendButtons(sessionId, mobile, lines.join('\n'), [start, { id: 'back_menu', title: 'Menu' }]);
 }
 
 /** "Who is playing?" — buttons for up to 3 students, a list beyond. */
