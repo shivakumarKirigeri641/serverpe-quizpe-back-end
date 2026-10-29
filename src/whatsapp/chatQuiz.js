@@ -236,6 +236,11 @@ async function afterAnswer(sessionId, mobile, trackerId, serial) {
   const cfg = await W.config();
   const more = p.done < p.total;
   const roundDone = p.done % cfg.round === 0;
+  // Every 10 answers: a referred family may have just earned their friend's invite bonus (paid once; not awaited).
+  if (roundDone) {
+    require('../jobs/handlers').creditReferralForParent(st.parent_id)
+      .catch((e) => console.error('[chatQuiz] referral credit skipped:', e.message));
+  }
 
   if (t.paid_by === 'wallet') {
     // The balance quiz stays open across rounds, so END gives one report for the whole sitting.

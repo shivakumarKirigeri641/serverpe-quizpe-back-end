@@ -88,9 +88,8 @@ async function inviteLine(parentId, { days } = {}) {
     if (!s.enabled) return '';
     const link = engine.shareLink(await engine.codeFor(parentId));
     if (!link) return '';
-    const n = days || s.rewardDays;
-    return `\n\n🎁 *Know another parent?* Send them this — you get *${n} free days* `
-         + `when their child starts:\n${link}`;
+    return `\n\n🎁 *Know another parent?* Send them this — you get *${s.rewardMcqs} free questions* `
+         + `when their child starts, and they get ${s.friendMcqs} extra:\n${link}`;
   } catch (e) {
     console.error('[referral-prompt] invite line skipped:', e.message);
     return '';
@@ -136,7 +135,7 @@ async function maybeAsk({ sessionId, mobile, studentId, parentId, childName, pct
 
     await wa.sendButtons(sessionId, mobile,
       `${praise}\n\nKnow another parent whose child would like this? `
-      + `Invite them and you get *${s.reward_days} free days* when their child starts.`,
+      + `Invite them — you get *${s.reward_mcqs} free questions* when their child starts, and they get ${s.friend_mcqs} extra.`,
       [{ id: 'refer_friend', title: '🎁 Invite a friend' }]);
 
     await markAsked(pid, studentId, mobile);

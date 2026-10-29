@@ -842,6 +842,16 @@ const STEPS = [
     ],
   },
   {
+    // REFER & EARN IN QUESTIONS (user, 2026-10-29, referrals/engine.js): the referrer's +50 is an MCQ lot of its own.
+    name: 'mcq_referral',
+    check: `SELECT 1 FROM pg_constraint WHERE conname = 'mcq_lots_source_check' AND pg_get_constraintdef(oid) LIKE '%referral%'`,
+    apply: [
+      `ALTER TABLE mcq_lots DROP CONSTRAINT IF EXISTS mcq_lots_source_check`,
+      `ALTER TABLE mcq_lots ADD CONSTRAINT mcq_lots_source_check CHECK (source IN ('free', 'recharge', 'admin', 'referral'))`,
+      `ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_mcqs integer`,
+    ],
+  },
+  {
     /* THE OLD ACCOUNT'S TEMPLATES OFF (user, 2026-10-28: "disable all 15 older ones"). Every template on file was
        the banned account's; all are switched off now. The new number's own come back from Meta with their real
        status (whatsapp/templateSync.js), and only an APPROVED one on the new account is ever sent. */

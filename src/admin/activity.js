@@ -90,12 +90,13 @@ async function feed({ limit = 60, since = null, kinds = null } = {}) {
      ), mcq AS (
        -- PAY AS YOU ANSWER (2026-10-29: "live monitoring pin to pin"): a recharge, the free 50, an admin top-up.
        -- An owner's test-mode recharge is marked TEST so it is never mistaken for money.
-       SELECT CASE l.source WHEN 'free' THEN 'mcq_free' WHEN 'admin' THEN 'mcq_topup' ELSE 'mcq_recharge' END, l.created_at,
+       SELECT CASE l.source WHEN 'free' THEN 'mcq_free' WHEN 'admin' THEN 'mcq_topup' WHEN 'referral' THEN 'mcq_referral' ELSE 'mcq_recharge' END, l.created_at,
               COALESCE((SELECT string_agg(x.student_name, ', ') FROM students x
                          WHERE x.parent_id = p.id AND x.is_active), '—'),
               p.parent_name, p.parent_mobile_number,
               (l.mcqs || ' MCQs'
-               || CASE l.source WHEN 'free' THEN ' free start'
+               || CASE l.source WHEN 'free' THEN ' free start' || CASE WHEN l.note LIKE '%invite%' THEN ' (with a friend''s invite)' ELSE '' END
+                                WHEN 'referral' THEN ' invite bonus — a friend they invited started practising'
                                 WHEN 'admin' THEN ' top-up' || COALESCE(' · ' || NULLIF(l.note, ''), '')
                                 ELSE COALESCE(' · ₹' || l.rupees::int || ' + GST', '') END
                || CASE WHEN cs.razorpay_mode = 'test' THEN ' · TEST' ELSE '' END),

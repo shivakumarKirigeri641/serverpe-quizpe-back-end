@@ -208,8 +208,8 @@ function buildMainMenu(ctx) {
   // Only offered to enrolled parents: someone still deciding has nothing to
   // recommend yet, and asking them to would be presumptuous.
   if (ctx.exists) {
-    rows.push({ id: 'refer_friend', title: '🎁 Refer a friend',
-                description: 'Earn free days when a friend joins & starts' });
+    rows.push({ id: 'refer_friend', title: '🎁 Refer & earn',
+                description: '50 free questions for every friend who joins' });
   }
   rows.push(
     { id: 'view_plans',      title: '💎 Premium plans',   description: 'Daily plans from ₹99 · or pay as you answer' },

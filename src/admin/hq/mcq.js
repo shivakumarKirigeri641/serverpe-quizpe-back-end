@@ -36,7 +36,11 @@ async function period(from, to) {
        (SELECT count(*) FROM mcq_lots f WHERE f.source = 'free' AND f.created_at >= $1 AND f.created_at < $2
            AND EXISTS (SELECT 1 FROM mcq_lots x WHERE x.parent_id = f.parent_id AND x.source = 'recharge'))::int AS free_then_paid,
        (SELECT count(*) FROM mcq_lots WHERE source = 'admin' AND created_at >= $1 AND created_at < $2)::int AS topups,
-       (SELECT coalesce(sum(mcqs), 0) FROM mcq_lots WHERE source = 'admin' AND created_at >= $1 AND created_at < $2)::int AS topup_mcqs`,
+       (SELECT coalesce(sum(mcqs), 0) FROM mcq_lots WHERE source = 'admin' AND created_at >= $1 AND created_at < $2)::int AS topup_mcqs,
+       -- Refer & earn (2026-10-29): friends who joined with an invite, and the referrers' +50s paid out
+       (SELECT count(*) FROM referrals WHERE joined_at >= $1 AND joined_at < $2)::int AS referred_joined,
+       (SELECT count(*) FROM mcq_lots WHERE source = 'referral' AND created_at >= $1 AND created_at < $2)::int AS referral_rewards,
+       (SELECT coalesce(sum(mcqs), 0) FROM mcq_lots WHERE source = 'referral' AND created_at >= $1 AND created_at < $2)::int AS referral_mcqs`,
     [from, to])).rows[0];
   for (const k of Object.keys(r)) r[k] = Number(r[k]);
   r.avg_recharge = r.recharges ? Math.round(r.rupees / r.recharges) : 0;
@@ -91,7 +95,7 @@ async function stats({ days = 30 } = {}) {
        JOIN parents p ON p.id = l.parent_id
        LEFT JOIN payments pay ON pay.id = l.payment_id
        LEFT JOIN invoices i ON i.payment_id = l.payment_id
-      WHERE l.source IN ('recharge', 'admin')
+      WHERE l.source IN ('recharge', 'admin', 'referral')
       ORDER BY l.created_at DESC LIMIT 100`)).rows;
 
   const top = (await db.query(

@@ -22,12 +22,22 @@
  * Rewards are paid in DAYS, never cash or a discount. Days cost delivery
  * rather than margin, they deepen the habit on both sides, and they extend the
  * plan through the same stacking rule as any renewal.
+ *
+ * NOW PAID IN QUESTIONS (user, 2026-10-29, "go"): pay as you answer has no plan
+ * to stretch, so days meant nothing to most families. Both sides earn MCQs:
+ *   • the FRIEND — a brand-new number only — gets +25 on top of the free 50, at
+ *     signup (their free lot grows to 75, same 7 days);
+ *   • the REFERRER gets +50, ONCE per friend, when that friend's children have
+ *     answered 10 questions (a throwaway number never will). Valid to 31 March.
+ *   • at most 20 rewarded friends per academic year (April–March).
+ * Days, banking and releaseBankedOnRenewal stay only for referrals already
+ * banked under the old model.
  * ---------------------------------------------------------------------------
  */
 
 const db = require('../database/connectDB');
 
-const DEFAULTS = { enabled: true, rewardDays: 7, maxRewarded: 20 };
+const DEFAULTS = { enabled: true, rewardDays: 7, maxRewarded: 20, rewardMcqs: 50, friendMcqs: 25, qualifyAnswers: 10 };
 
 /**
  * Deliberately excludes 0/O/1/I/5/S and vowels: the code gets read aloud,
@@ -43,7 +53,16 @@ async function settings(client = db) {
     enabled: (m.referral_enabled ?? String(DEFAULTS.enabled)) === 'true',
     rewardDays: Number(m.referral_reward_days ?? DEFAULTS.rewardDays) || DEFAULTS.rewardDays,
     maxRewarded: Number(m.referral_max_rewarded ?? DEFAULTS.maxRewarded) || DEFAULTS.maxRewarded,
+    rewardMcqs: Number(m.referral_reward_mcqs ?? DEFAULTS.rewardMcqs) || DEFAULTS.rewardMcqs,
+    friendMcqs: Number(m.referral_friend_mcqs ?? DEFAULTS.friendMcqs) || 0,
+    qualifyAnswers: Number(m.referral_qualify_answers ?? DEFAULTS.qualifyAnswers) || DEFAULTS.qualifyAnswers,
   };
+}
+
+/** 1 April of the current academic year (IST) — the yearly cap counts from here. */
+function yearStart() {
+  const end = require('../prepaid/wallet').yearEnd();          // the coming 31 March
+  return new Date(`${end.getUTCFullYear() - 1}-04-01T00:00:00+05:30`);
 }
 
 function randomCode(len = 6) {
@@ -104,12 +123,15 @@ async function capture(refereeId, code, client = db) {
   if (!owner) return { ok: false, reason: 'unknown_code' };
   if (owner.id === refereeId) return { ok: false, reason: 'self_referral' };
 
-  // A parent who has already paid is an existing customer, not a new joiner.
+  // Only a BRAND-NEW family counts: never on any plan or trial before, and the free 50 granted just now. A
+  // lapsed family coming back is a returning customer, not someone a friend brought.
   const established = await client.query(
-    `SELECT 1 FROM parents_quizpe_subscriptions s
-       JOIN quizpe_plans p ON p.id = s.plan_id
-      WHERE s.parent_id = $1 AND COALESCE(p.is_trial,false) = false LIMIT 1`, [refereeId]);
+    `SELECT 1 FROM parents_quizpe_subscriptions WHERE parent_id = $1 LIMIT 1`, [refereeId]);
   if (established.rowCount) return { ok: false, reason: 'already_a_customer' };
+  const fresh = (await client.query(
+    `SELECT id FROM mcq_lots WHERE parent_id = $1 AND source = 'free' AND created_at > now() - interval '1 day'`,
+    [refereeId])).rows[0];
+  if (!fresh) return { ok: false, reason: 'not_a_new_family' };
 
   const ins = await client.query(
     `INSERT INTO referrals (referrer_id, referee_id, code_used)
@@ -117,7 +139,18 @@ async function capture(refereeId, code, client = db) {
      RETURNING id`, [owner.id, refereeId, owner.referral_code || String(code).toUpperCase()]);
   if (!ins.rowCount) return { ok: false, reason: 'already_referred' };
 
-  return { ok: true, referrer: owner, rewardDays: s.rewardDays };
+  // The friend's welcome bonus: their free lot grows by friendMcqs (same 7 days).
+  let friendBonus = 0;
+  if (s.friendMcqs > 0) {
+    const up = await client.query(
+      `UPDATE mcq_lots SET mcqs = mcqs + $2, note = 'free start + invite bonus' WHERE id = $1 RETURNING mcqs`,
+      [fresh.id, s.friendMcqs]);
+    if (up.rowCount) {
+      friendBonus = s.friendMcqs;
+      await client.query(`UPDATE referrals SET referee_rewarded_at = now() WHERE id = $1`, [ins.rows[0].id]);
+    }
+  }
+  return { ok: true, referrer: owner, rewardDays: s.rewardDays, friendBonus, rewardMcqs: s.rewardMcqs };
 }
 
 /**
@@ -134,6 +167,7 @@ async function ensureSchema(client = db) {
   await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS banked boolean NOT NULL DEFAULT false`);
   await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_kind text`);
   await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS referee_rewarded_at timestamptz`);
+  await client.query(`ALTER TABLE referrals ADD COLUMN IF NOT EXISTS reward_mcqs integer`);
 }
 
 /** Total already-rewarded referrals for a referrer (the per-referrer cap). */
@@ -143,65 +177,55 @@ async function rewardedCount(referrerId, client) {
   return n;
 }
 
-/** The start of the referrer's current cover, or null if they have none live. */
-async function currentPeriodStart(parentId, client) {
-  const { rows } = await client.query(
-    `SELECT plan_start_date FROM parents_quizpe_subscriptions
-      WHERE parent_id=$1 AND is_active AND plan_end_date >= CURRENT_DATE
-      ORDER BY plan_end_date DESC LIMIT 1`, [parentId]);
-  return rows[0] ? rows[0].plan_start_date : null;
-}
-
 /**
- * Called when a referred friend completes their FIRST quiz. Qualifies their
- * referral and rewards the REFERRER — immediately if this is the first
- * qualified referral of the referrer's current period, otherwise banked for a
- * future renewal. The friend gets nothing (they already have their trial).
+ * Called after the referred friend's children answer questions (each finished quiz, and every 10 answers in the
+ * chat). Once they have answered `qualifyAnswers` in all, the REFERRER gets `rewardMcqs` as a lot (source
+ * 'referral', valid to 31 March) — ONCE per friend. Over the yearly cap the referral is closed as 'blocked'.
  *
- * Idempotent: only a still-unqualified referral is ever acted on.
+ * Idempotent: the referral row is locked and only a still-pending, unqualified one is ever acted on.
+ * Returns { referrerId, mcqs, lot } when it paid now, else null.
  */
-async function qualifyOnFirstQuiz(refereeId, client = db) {
-  const s = await settings(client);
+async function qualifyOnFirstQuiz(refereeId) {
+  const s = await settings();
   if (!s.enabled) return null;
+  const c = await db.getClient();
+  try {
+    await c.query('BEGIN');
+    const ref = (await c.query(
+      `SELECT * FROM referrals WHERE referee_id=$1 AND status='pending' AND qualified_at IS NULL FOR UPDATE`,
+      [refereeId])).rows[0];
+    if (!ref) { await c.query('ROLLBACK'); return null; }
 
-  const { rows } = await client.query(
-    `SELECT * FROM referrals
-      WHERE referee_id=$1 AND status='pending' AND qualified_at IS NULL
-      FOR UPDATE`, [refereeId]);
-  const ref = rows[0];
-  if (!ref) return null;
+    const { rows: [{ n }] } = await c.query(
+      `SELECT count(*)::int AS n FROM student_quizpe_histories h
+         JOIN quizpe_tracker t ON t.id = h.tracker_id
+         JOIN students st ON st.id = t.student_id
+        WHERE st.parent_id = $1 AND h.answered_option IS NOT NULL`, [refereeId]);
+    if (n < s.qualifyAnswers) { await c.query('ROLLBACK'); return null; }
 
-  await client.query(`UPDATE referrals SET qualified_at=now() WHERE id=$1`, [ref.id]);
+    await c.query(`UPDATE referrals SET qualified_at=now() WHERE id=$1`, [ref.id]);
+    const { rows: [{ y }] } = await c.query(
+      `SELECT count(*)::int AS y FROM referrals WHERE referrer_id=$1 AND status='rewarded' AND rewarded_at >= $2`,
+      [ref.referrer_id, yearStart().toISOString()]);
+    if (y >= s.maxRewarded) {
+      await c.query(`UPDATE referrals SET status='blocked', banked=false, blocked_reason='referrer_cap_reached' WHERE id=$1`, [ref.id]);
+      await c.query('COMMIT');
+      return null;
+    }
 
-  if (await rewardedCount(ref.referrer_id, client) >= s.maxRewarded) {
-    await client.query(
-      `UPDATE referrals SET status='blocked', banked=false, blocked_reason='referrer_cap_reached' WHERE id=$1`, [ref.id]);
-    return null;
+    const lot = await require('../prepaid/wallet').addLot(c, {
+      parentId: ref.referrer_id, source: 'referral', mcqs: s.rewardMcqs, note: `invite bonus · referral ${ref.id}` });
+    await c.query(
+      `UPDATE referrals SET status='rewarded', reward_kind='mcqs', reward_mcqs=$2, rewarded_at=now() WHERE id=$1`,
+      [ref.id, s.rewardMcqs]);
+    await c.query('COMMIT');
+    return { referrerId: ref.referrer_id, mcqs: s.rewardMcqs, lot, kind: 'mcqs' };
+  } catch (e) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    c.release();
   }
-
-  const periodStart = await currentPeriodStart(ref.referrer_id, client);
-  let immediateUsed = true;
-  if (periodStart) {
-    const { rows: [{ m }] } = await client.query(
-      `SELECT COUNT(*)::int m FROM referrals
-        WHERE referrer_id=$1 AND reward_kind='immediate' AND rewarded_at >= $2::date`,
-      [ref.referrer_id, periodStart]);
-    immediateUsed = m > 0;
-  }
-
-  // Immediate only if the referrer has a live plan AND has not already taken
-  // the one immediate bonus this period. Otherwise bank it for a renewal.
-  if (periodStart && !immediateUsed) {
-    const referrerNewEnd = await extendPlan(ref.referrer_id, s.rewardDays, client);
-    await client.query(
-      `UPDATE referrals SET status='rewarded', reward_kind='immediate', reward_days=$2, rewarded_at=now() WHERE id=$1`,
-      [ref.id, s.rewardDays]);
-    return { referrerId: ref.referrer_id, days: s.rewardDays, kind: 'immediate',
-             referrerNewEnd, referrerRewardedCount: (await rewardedCount(ref.referrer_id, client)) };
-  }
-
-  await client.query(`UPDATE referrals SET banked=true WHERE id=$1`, [ref.id]);
-  return { referrerId: ref.referrer_id, days: s.rewardDays, kind: 'banked' };
 }
 
 /**
@@ -280,17 +304,23 @@ async function summary(parentId, client = db) {
     `SELECT COUNT(*) FILTER (WHERE status='pending' AND NOT banked)::int AS joined,
             COUNT(*) FILTER (WHERE banked AND status='pending')::int      AS banked,
             COUNT(*) FILTER (WHERE status='rewarded')::int                AS rewarded,
-            COALESCE(SUM(reward_days) FILTER (WHERE status='rewarded'),0)::int AS days_earned
-       FROM referrals WHERE referrer_id = $1`, [parentId]);
+            COUNT(*) FILTER (WHERE status='rewarded' AND rewarded_at >= $2)::int AS rewarded_year,
+            COALESCE(SUM(reward_days) FILTER (WHERE status='rewarded'),0)::int AS days_earned,
+            COALESCE(SUM(reward_mcqs) FILTER (WHERE status='rewarded'),0)::int AS mcqs_earned
+       FROM referrals WHERE referrer_id = $1`, [parentId, yearStart().toISOString()]);
   return {
     code,
     link: shareLink(code),
-    joined: c.joined,               // joined, first quiz still pending
-    banked: c.banked,               // qualified, waiting for a renewal to release
+    joined: c.joined,               // joined, still to answer their first 10 questions
+    banked: c.banked,               // old model: qualified, waiting for a renewal to release
     rewarded: c.rewarded,
     days_earned: c.days_earned,
+    mcqs_earned: c.mcqs_earned,
     reward_days: s.rewardDays,
-    remaining_slots: Math.max(0, s.maxRewarded - c.rewarded),
+    reward_mcqs: s.rewardMcqs,
+    friend_mcqs: s.friendMcqs,
+    qualify_answers: s.qualifyAnswers,
+    remaining_slots: Math.max(0, s.maxRewarded - c.rewarded_year),
     enabled: s.enabled,
   };
 }
@@ -315,7 +345,7 @@ function parseCode(text) {
 module.exports = {
   ensureSchema, settings, codeFor, ownerOf, capture, extendPlan,
   summary, shareLink, parseCode,
-  qualifyOnFirstQuiz,          // friend's first quiz -> reward referrer (now or bank)
+  qualifyOnFirstQuiz,          // friend's first 10 answers -> referrer +50 MCQs, once
   releaseBankedOnRenewal,      // referrer pays -> release one banked +7
   creditRefereeOnFirstPayment, // no-op: referrer-only model, friend gets no bonus
 };

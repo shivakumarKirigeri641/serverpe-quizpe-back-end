@@ -362,7 +362,9 @@ async function activateTrial(session, mobile, stateCode) {
     // enrolment, which was the original intent.
     if (session.context?.referral_code) {
       try {
-        await require('../referrals/engine').capture(parent, session.context.referral_code);
+        const r = await require('../referrals/engine').capture(parent, session.context.referral_code);
+        // A brand-new family invited by a friend starts with the bonus on top (50 + 25), so the welcome says 75.
+        if (r?.friendBonus) { sub.free_mcqs = (sub.free_mcqs || 0) + r.friendBonus; sub.invite_bonus = r.friendBonus; }
       } catch (e) { console.error('[flow] referral capture skipped:', e.message); }
     }
 
@@ -855,7 +857,7 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
       if (owner && ctx.parentId && owner.id === ctx.parentId) {
         await wa.sendText(session.id, mobile,
           `😊 That's *your own* invite link — share it with another parent, not yourself!\n\n` +
-          `When a friend joins with it, you *both* get free days. Type *menu* → *🎁 Refer a friend* for the message to forward.`);
+          `When a friend joins with it, you *both* get free questions. Type *menu* → *🎁 Refer & earn* for the message to forward.`);
         return;
       }
 
@@ -863,9 +865,12 @@ Still stuck? Type *menu* and choose *💬 Support*.`);
       if (owner) {
         await mergeContext(session, { referral_code: code });
         const first = String(owner.parent_name || '').trim().split(/\s+/)[0] || 'A friend';
+        const free = (await require('../prepaid/wallet').config()).free_mcqs;
+        const bonus = (await referrals.settings()).friendMcqs;
         await wa.sendText(session.id, mobile,
           `🎁 *${first} invited you to QuizPe!*\n\n` +
-          `Start with *50 free MCQs* — no app, no login. Just say hi and today's quiz begins.`);
+          `New families who join with an invite start with *${free + bonus} free questions* (${free} + ${bonus} bonus) — no app, no login. ` +
+          `Daily Maths revision, right here on WhatsApp.`);
       } else {
         // Unknown code — remember it anyway so a typo can be looked at later,
         // but say nothing; a stranger typing "JOIN" should not get an error.
@@ -1455,26 +1460,30 @@ async function handleMenuChoice(session, mobile, ctx, choice) {
       // Two messages on purpose. The second contains ONLY the invite text, so
       // a parent can forward it straight into a school group without having to
       // edit our explanation out of it first.
-      const earned = s.rewarded > 0
-        ? `\n\n✅ So far: *${s.rewarded}* friend${s.rewarded === 1 ? '' : 's'} subscribed · *${s.days_earned} free days* earned.`
-        : s.joined > 0
-          ? `\n\n👀 *${s.joined}* ${s.joined === 1 ? 'person has' : 'people have'} joined with your code — you get your days when they subscribe.`
-          : '';
+      // REFER & EARN IN QUESTIONS (2026-10-29): +50 for the parent per friend, +25 for the friend.
+      const free = (await require('../prepaid/wallet').config()).free_mcqs;
+      const earned = [
+        s.rewarded > 0 ? `✅ *${s.rewarded}* friend${s.rewarded === 1 ? '' : 's'} joined · *${s.mcqs_earned} questions* earned${s.days_earned ? ` (+ ${s.days_earned} free days earlier)` : ''}` : '',
+        s.joined > 0 ? `⏳ *${s.joined}* joined, still to answer their first ${s.qualify_answers} questions` : '',
+      ].filter(Boolean).join('\n');
 
       await wa.sendText(session.id, mobile,
-`🎁 *Earn ${s.reward_days} free days*
+`🎁 *Refer & earn free questions*
 
-Share the message below with another parent. When they join and start their quizzes, *you* get *${s.reward_days} free days* added to your plan.
+Share the message below with other parents — family, friends, your child's class group.
 
-Your code: *${s.code}*${earned}
+• *You get +${s.reward_mcqs} questions* for every friend who joins (once their child answers ${s.qualify_answers} questions)
+• *Your friend gets +${s.friend_mcqs}* on top of their ${free} free — *${free + s.friend_mcqs} to start*
+
+Your code: *${s.code}*${earned ? `\n\n${earned}` : ''}${s.remaining_slots <= 0 ? `\n\nYou've reached this year's limit of rewarded invites — thank you! 💚` : ''}
 
 _Forward the next message 👇_`);
 
       await wa.sendText(session.id, mobile,
-`My child does a 10-question maths quiz every day on WhatsApp — it arrives on its own, marks itself and sends a full report. It's called QuizPe. 📚
+`My child does a daily Maths revision quiz right here on WhatsApp — matched to their class, it marks itself and sends me a report. It's called QuizPe. 📚
 
-Try it free for 7 days — no app, no login:
-${s.link || `Message and send: JOIN ${s.code}`}`);
+Join with my link and get *${free + s.friend_mcqs} questions free* — no app, no login, no card. You pay only for the questions your child answers after that:
+${s.link || `Message QuizPe and send: JOIN ${s.code}`}`);
       break;
     }
 
@@ -1720,7 +1729,7 @@ async function sendFreeStart(session, mobile, studentName, board, gradeName, sub
   const W = require('../prepaid/wallet');
   await wa.sendButtons(session.id, mobile,
     `🎉 *${studentName} is all set!* (${board} · ${gradeName})\n\n`
-    + (sub.free_mcqs ? `🎁 *${sub.free_mcqs} free MCQs* are in your family account — valid till *${W.fmtDay(sub.plan_end_date)}*, up to 20 a day.\n\n` : '')
+    + (sub.free_mcqs ? `🎁 *${sub.free_mcqs} free MCQs* are in your family account${sub.invite_bonus ? ` (includes *+${sub.invite_bonus}* for joining with a friend's invite)` : ''} — valid till *${W.fmtDay(sub.plan_end_date)}*, up to 20 a day.\n\n` : '')
     + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
     [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
 }
