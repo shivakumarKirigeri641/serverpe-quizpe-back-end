@@ -122,8 +122,25 @@ function retired(what) {
   return true;
 }
 
+/*
+ * THE OLD FLOW'S TEMPLATES NEVER GO ON THE NEW NUMBER (user, 2026-10-29: "better remove them"). Their jobs
+ * (daily quiz nudges, day-missed recap, weekly report, finish-the-form, free-quiz announcement) were written
+ * for the banned account's families. Even if a template of the same name is approved on the new account
+ * later, it is not sent: a new daily message needs a new name and the user's go-ahead. Replies to a payment
+ * or a ticket (qp_thankyou_v1, qp_ticketresolution_v1) and qp_daily_reminder_v1 are not on this list.
+ */
+const OLD_FLOW_TEMPLATES = new Set([
+  'qp_quizstart_daily_v2', 'qp_openallday_v1', 'qp_daymissed_v1', 'qp_weeklyreport_v1', 'qp_finish_form_v1', 'qp_announcement_v1',
+  ...['MORNING_TEMPLATE', 'OPENALLDAY_TEMPLATE', 'DAYRECAP_TEMPLATE', 'WEEKLY_REPORT_TEMPLATE', 'FORM_NUDGE_TEMPLATE', 'FREE_QUIZ_TEMPLATE']
+    .map((k) => String(process.env[k] || '').trim()).filter(Boolean),
+]);
+
 async function send(sessionId, to, payload, bodyForLog, type) {
   if (retired(type || 'message')) return null;   // nothing goes to Meta; treated as a no-op
+  if (type === 'template' && OLD_FLOW_TEMPLATES.has(payload?.template?.name)) {
+    console.log(`[wa] template ${payload?.template?.name} not sent — an old-flow template, retired on the new number`);
+    return null;
+  }
   // Only a template APPROVED on the new number's account (templateSync.js) — never an old one, whatever the mode.
   if (type === 'template' && !require('./templateSync').canSend(payload?.template?.name)) {
     console.log(`[wa] template ${payload?.template?.name} not sent — not approved on this number`);
