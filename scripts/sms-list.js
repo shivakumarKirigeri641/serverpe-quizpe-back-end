@@ -6,6 +6,8 @@
  *   node scripts/sms-list.js              the list with each family's status, and the counts
  *   node scripts/sms-list.js --numbers    only the 10-digit numbers, one a line (for the SMS panel's upload)
  *   node scripts/sms-list.js --numbers --skip-active    the same, without families on a running plan
+ *   node scripts/sms-list.js --gone[=N]   only those who have not written on WhatsApp in the last N days (default 2)
+ *                                         (user, 2026-10-31: "took free/paid and gone - I will send once more")
  *
  * READ-ONLY: only SELECTs, QuizPe's own database only.
  *
@@ -20,6 +22,8 @@ const ME = require('../src/admin/hq/notMe').mobile;
 
 const NUMBERS = process.argv.includes('--numbers');
 const SKIP_ACTIVE = process.argv.includes('--skip-active');
+const GONE_ARG = process.argv.find((a) => a === '--gone' || a.startsWith('--gone='));
+const GONE_DAYS = GONE_ARG ? Math.max(1, parseInt(GONE_ARG.split('=')[1], 10) || 2) : null;
 
 (async () => {
   const { rows } = await db.query(
@@ -38,7 +42,9 @@ const SKIP_ACTIVE = process.argv.includes('--skip-active');
                      WHERE s.parent_id = p.id AND s.is_active AND s.plan_end_date >= CURRENT_DATE) AS active_plan,
             (SELECT coalesce(sum(x.mcqs - x.used), 0) FROM mcq_lots x WHERE x.parent_id = p.id AND x.expires_at > now())::int AS mcqs_left,
             EXISTS (SELECT 1 FROM mcq_lots x WHERE x.parent_id = p.id AND x.source = 'recharge') AS recharged,
-            EXISTS (SELECT 1 FROM mcq_lots x WHERE x.parent_id = p.id) AS has_mcqs
+            EXISTS (SELECT 1 FROM mcq_lots x WHERE x.parent_id = p.id) AS has_mcqs,
+            (SELECT max(m.created_at) FROM whatsapp_messages m
+              WHERE m.direction = 'inbound' AND right(m.mobile_number, 10) = p.m10) AS last_seen
        FROM ten p LEFT JOIN last l ON l.parent_id = p.id
       WHERE (l.parent_id IS NOT NULL OR EXISTS (SELECT 1 FROM mcq_lots x WHERE x.parent_id = p.id))
         AND p.m10 ~ '^[6-9][0-9]{9}$'
@@ -56,10 +62,13 @@ const SKIP_ACTIVE = process.argv.includes('--skip-active');
     name: r.parent_name || '—', mobile: r.mobile, status: status(r),
     plan: r.plan_name ? `${r.is_trial ? 'Free trial' : r.plan_name} · ends ${new Date(r.plan_end_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}` : '—',
     mcqs_left: r.mcqs_left,
+    last_seen: r.last_seen ? new Date(r.last_seen).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : 'never on WhatsApp',
+    gone: !r.last_seen || Date.now() - new Date(r.last_seen).getTime() > (GONE_DAYS || 0) * 864e5,
   }));
   // One row per number (a number on two parent rows is sent once).
   const seen = new Set();
-  const uniq = list.filter((x) => (seen.has(x.mobile) ? false : seen.add(x.mobile)));
+  const all = list.filter((x) => (seen.has(x.mobile) ? false : seen.add(x.mobile)));
+  const uniq = GONE_DAYS ? all.filter((x) => x.gone) : all;
   const pick = SKIP_ACTIVE ? uniq.filter((x) => !x.status.endsWith('running')) : uniq;
 
   if (NUMBERS) {
@@ -67,11 +76,11 @@ const SKIP_ACTIVE = process.argv.includes('--skip-active');
     process.exit(0);
   }
   const by = (s) => uniq.filter((x) => x.status === s).length;
-  console.log(`\nPARENTS TO TELL: ${uniq.length}  (STOP / paused / deactivated / admin numbers left out)`);
+  console.log(`\nPARENTS TO TELL: ${uniq.length}${GONE_DAYS ? ` of ${all.length} (silent on WhatsApp for ${GONE_DAYS}+ days)` : ''}  (STOP / paused / deactivated / admin numbers left out)`);
   for (const s of ['paid plan running', 'trial running', 'paid before, lapsed', 'trial ended, never paid', 'MCQs only (new)']) {
     console.log(`  ${s.padEnd(26)} ${by(s)}`);
   }
   console.log('');
-  console.table(uniq);
+  console.table(uniq.map(({ gone, ...x }) => x));
   process.exit(0);
 })().catch((e) => { console.error(e.message); process.exit(1); });
