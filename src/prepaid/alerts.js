@@ -7,6 +7,7 @@
  *   daily quiz    07:00 IST — the WhatsApp template qp_daily_reminder_v1, ONLY to parents who said yes
  *                 (parents.quiz_reminder_on). Skipped: a family with no balance and no plan, a day the parent
  *                 skipped, a student who already practised today, and after 3 reminders in a row with no tap.
+ *                 A parent who wrote within the last 23 h 30 min gets our own message with 3 buttons instead (free).
  *                 Templates go only while WHATSAPP_MODE=on and the template is approved (whatsapp/client.js,
  *                 lifecycle.approved) — so nothing is sent during the replies-only weeks.
  *
@@ -84,7 +85,11 @@ async function dailyReminders() {
   const { rows } = await db.query(
     `SELECT p.id, p.parent_name, p.parent_mobile_number AS mobile,
             (SELECT id FROM whatsapp_sessions s WHERE s.mobile_number = p.parent_mobile_number AND s.is_active ORDER BY id DESC LIMIT 1) AS session_id,
-            (SELECT string_agg(split_part(st.student_name, ' ', 1), ' & ' ORDER BY st.id) FROM students st WHERE st.parent_id = p.id AND st.is_active) AS kids
+            (SELECT string_agg(split_part(st.student_name, ' ', 1), ' & ' ORDER BY st.id) FROM students st WHERE st.parent_id = p.id AND st.is_active) AS kids,
+            -- 23 h 30 min, not 24: a margin so the free-form message never lands just outside Meta's window
+            EXISTS (SELECT 1 FROM whatsapp_messages m
+                     WHERE m.direction = 'inbound' AND right(m.mobile_number, 10) = right(p.parent_mobile_number, 10)
+                       AND m.created_at > now() - interval '23 hours 30 minutes') AS in_window
        FROM parents p
       WHERE p.is_active AND p.quiz_reminder_on AND NOT coalesce(p.service_paused, false)
         AND coalesce(p.quiz_reminder_ignored, 0) < 3
@@ -103,7 +108,13 @@ async function dailyReminders() {
       const first = String(r.parent_name || 'Parent').trim().split(/\s+/)[0] || 'Parent';
       const kids = String(r.kids || 'your student');
       const names = kids.split(' & ').length > 3 ? `${kids.split(' & ').slice(0, 3).join(', ')} & ${kids.split(' & ').length - 3} more` : kids;
-      const id = await wa.sendTemplate(r.session_id, r.mobile, REMINDER_TEMPLATE, [first, names, String(bal.left)]);
+      // INSIDE THE 24-HOUR WINDOW, OUR OWN MESSAGE (user, 2026-10-31): a parent who wrote in the last ~24 h gets a
+      // normal message with three buttons (free); only the others get the approved template.
+      const id = r.in_window
+        ? await wa.sendButtons(r.session_id, r.mobile,
+          `🌅 Good morning ${first}! Today's practice for *${names}* is ready.\n\n💰 Balance: *${bal.left} MCQs*${onPlan ? ' · daily plan active' : ''}`,
+          [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'rem_skip', title: 'Skip today' }, { id: 'rem_off', title: 'Stop reminders' }])
+        : await wa.sendTemplate(r.session_id, r.mobile, REMINDER_TEMPLATE, [first, names, String(bal.left)]);
       if (id) {
         sent += 1;
         await db.query(`UPDATE parents SET quiz_reminder_ignored = coalesce(quiz_reminder_ignored, 0) + 1 WHERE id = $1`, [r.id]);

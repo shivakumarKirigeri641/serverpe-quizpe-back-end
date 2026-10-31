@@ -327,7 +327,7 @@ async function reminderChoice(session, mobile, parentId, id, text) {
     await wa.sendText(session.id, mobile, '👍 No reminders. Send *Hi* any time to start a quiz.');
     return true;
   }
-  if (t === 'skip today') {
+  if (t === 'skip today' || id === 'rem_skip') {
     await set(`UPDATE parents SET quiz_reminder_skip_on = (now() AT TIME ZONE 'Asia/Kolkata')::date, quiz_reminder_ignored = 0 WHERE id = $1`);
     await wa.sendText(session.id, mobile, '👍 No more today. See you tomorrow! 🌙');
     return true;
