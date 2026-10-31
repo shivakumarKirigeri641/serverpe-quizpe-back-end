@@ -90,7 +90,9 @@ function extractId(msg) {
   return '';
 }
 
-const isGreeting = (t) => /^(hi|hii+|hello+|hey|start|menu|namaste|hi quizpe)$/i.test(t.trim());
+// The QuizPe ad pre-fills "I want the free questions" (2026-10-31): any "free question(s) / MCQ(s)" message is a hello too.
+const isGreeting = (t) => /^(hi|hii+|hello+|hey|start|menu|namaste|hi quizpe)$/i.test(t.trim())
+  || /\bfree\s+(questions?|mcqs?|quiz)\b/i.test(t);
 
 /** 'HH:MM' shifted by whole hours, wrapping within the day. */
 function shiftHour(hhmm, by) {
