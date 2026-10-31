@@ -137,9 +137,12 @@ async function startWallet(sessionId, mobile, st) {
   if ((await W.balance(st.parent_id)).left <= 0) {
     const lot = await W.grantFree(st.parent_id);
     if (lot) {
+      // Three buttons, as at signup (user, 2026-10-31): the quiz starts on "Start quiz", so "No reminders" is seen first.
       const cfg = await W.config();
-      await wa.sendText(sessionId, mobile,
-        `🎁 *${cfg.free_mcqs} free MCQs* added for your family — valid ${cfg.free_days} days, up to ${cfg.free_per_day} a day. Let's begin! 🚀\n\n${W.REMINDER_NOTE.replace('tap *No reminders*', 'reply *Stop reminders*')}`);
+      await wa.sendButtons(sessionId, mobile,
+        `🎁 *${cfg.free_mcqs} free MCQs* added for your family — valid ${cfg.free_days} days, up to ${cfg.free_per_day} a day.\n\n${W.REMINDER_NOTE}`,
+        [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }, W.NO_REMINDERS]);
+      return;
     }
   }
   const a = await W.allowance(st.parent_id, st.id);
