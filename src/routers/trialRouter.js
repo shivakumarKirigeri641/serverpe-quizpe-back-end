@@ -231,8 +231,9 @@ router.post('/api/submit', async (req, res) => {
         await wa.sendButtons(link.session_id, link.mobile_number,
           `🎉 *${name} is all set!* (${board} · ${gradeName})\n\n`
           + (lot ? `🎁 *${lot.mcqs + bonus} free MCQs* are in your family account${bonus ? ` (includes *+${bonus}* for joining with a friend's invite)` : ''} — valid till *${W.fmtDay(lot.expires_at)}*, up to 20 a day.\n\n` : '')
-          + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
-          [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+          + `Questions come right here in the chat: tap an answer, and a report follows when you end.`
+          + (lot ? `\n\n${W.REMINDER_NOTE}` : ''),
+          [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }, ...(lot ? [W.NO_REMINDERS] : [])]);
       } catch (e) {
         console.error('[trial] confirmation message failed:', e.message);
       }

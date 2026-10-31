@@ -139,7 +139,7 @@ async function startWallet(sessionId, mobile, st) {
     if (lot) {
       const cfg = await W.config();
       await wa.sendText(sessionId, mobile,
-        `🎁 *${cfg.free_mcqs} free MCQs* added for your family — valid ${cfg.free_days} days, up to ${cfg.free_per_day} a day. Let's begin! 🚀`);
+        `🎁 *${cfg.free_mcqs} free MCQs* added for your family — valid ${cfg.free_days} days, up to ${cfg.free_per_day} a day. Let's begin! 🚀\n\n${W.REMINDER_NOTE.replace('tap *No reminders*', 'reply *Stop reminders*')}`);
     }
   }
   const a = await W.allowance(st.parent_id, st.id);

@@ -95,6 +95,15 @@ async function freeEligible(parentId, exec = db) {
   return !(await hadFree(parentId, exec)) && !(await onPlan(parentId, exec));
 }
 
+/*
+ * THE FREE 50 TURN THE 7 AM REMINDER ON (user, 2026-10-31: "once parent opts for free 50 MCQs, we will send them
+ * daily at 7am"). Said in the same message that announces the MCQs (REMINDER_NOTE), with a "No reminders" button
+ * (rem_off, whatsapp/chatQuiz.reminderChoice); "Stop reminders" on any reminder ends it too. Marked as asked, so the
+ * after-report question is not put again.
+ */
+const REMINDER_NOTE = '🔔 A reminder comes every morning at *7 AM* while there are MCQs to practise — tap *No reminders* to stop.';
+const NO_REMINDERS = { id: 'rem_off', title: 'No reminders' };
+
 /** Give the free 50 (7 days). Returns the lot, or null when already given / not eligible. */
 async function grantFree(parentId, exec = db) {
   if (!(await freeEligible(parentId, exec))) return null;
@@ -104,6 +113,11 @@ async function grantFree(parentId, exec = db) {
      VALUES ($1, 'free', $2, least(now() + make_interval(days => $3), $4::timestamptz), 'free start')
      ON CONFLICT DO NOTHING RETURNING *`,
     [parentId, cfg.free_mcqs, cfg.free_days, yearEnd().toISOString()])).rows[0];
+  if (r) {
+    await exec.query(
+      `UPDATE parents SET quiz_reminder_on = true, quiz_reminder_ignored = 0,
+              quiz_reminder_asked_at = coalesce(quiz_reminder_asked_at, now()) WHERE id = $1`, [parentId]);
+  }
   return r || null;
 }
 
@@ -185,6 +199,6 @@ async function debit({ parentId, studentId, trackerId, historyId }) {
 const fmtDay = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) : '');
 
 module.exports = {
-  config, packs, packButtons, balance, hadFree, onPlan, freeEligible, grantFree, addLot,
+  config, packs, packButtons, balance, hadFree, onPlan, freeEligible, grantFree, REMINDER_NOTE, NO_REMINDERS, addLot,
   usedToday, allowance, debit, yearEnd, fmtDay,
 };

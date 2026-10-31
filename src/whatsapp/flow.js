@@ -1863,8 +1863,9 @@ async function sendFreeStart(session, mobile, studentName, board, gradeName, sub
   await wa.sendButtons(session.id, mobile,
     `🎉 *${studentName} is all set!* (${board} · ${gradeName})\n\n`
     + (sub.free_mcqs ? `🎁 *${sub.free_mcqs} free MCQs* are in your family account${sub.invite_bonus ? ` (includes *+${sub.invite_bonus}* for joining with a friend's invite)` : ''} — valid till *${W.fmtDay(sub.plan_end_date)}*, up to 20 a day.\n\n` : '')
-    + `Questions come right here in the chat: tap an answer, and a report follows when you end.`,
-    [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }]);
+    + `Questions come right here in the chat: tap an answer, and a report follows when you end.`
+    + (sub.free_mcqs ? `\n\n${W.REMINDER_NOTE}` : ''),
+    [{ id: 'start_quiz', title: '▶️ Start quiz' }, { id: 'back_menu', title: 'Menu' }, ...(sub.free_mcqs ? [W.NO_REMINDERS] : [])]);
 }
 
 /**
