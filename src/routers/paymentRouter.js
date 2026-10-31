@@ -597,6 +597,7 @@ async function finalize(c, pay, mailCtx = null) {
          VALUES ($1,'awaiting_payment','active','payment_success',$2)`,
         [c.whatsapp_session_id, JSON.stringify({ subscription_id: subId.id, payment_id: pay.id, invoice: inv.invoiceNo })]);
     }
+    const reminderOn = await require('../prepaid/wallet').remindOnPaid(parentId, client);
     await client.query('COMMIT');
 
     try {
@@ -627,7 +628,7 @@ async function finalize(c, pay, mailCtx = null) {
 ⏰ *Quiz time:* ${M.fmtTime(subId.quiz_time)} daily
 🧾 *Invoice:* ${inv.invoiceNo}
 ${carried ? `\n${carried}\n` : ''}
-Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀${period.stacked ? '' : `\n\n${M.parentGuidance(names)}`}`);
+Your daily quizzes ${period.stacked ? 'continue' : 'start'} tonight at ${M.fmtTime(subId.quiz_time)}. 🚀${period.stacked ? '' : `\n\n${M.parentGuidance(names)}`}${reminderOn ? `\n\n${require('../prepaid/wallet').REMINDER_NOTE.replace('tap *No reminders*', 'reply *Stop reminders*')}` : ''}`);
       await wa.sendDocument(c.whatsapp_session_id, c.mobile_number, {
         filePath: inv.filePath, filename: `QuizPe-Invoice-${inv.invoiceNo}.pdf`,
         caption: `🧾 Tax invoice ${inv.invoiceNo} · Total ${inv.amounts.total.toFixed(2)} (incl. GST)`,
@@ -1392,7 +1393,7 @@ async function finalizeMcq(c, pay) {
   if (done) return { already: true, invoice: done.invoice_id };
 
   const client = await db.getClient();
-  let inv, parentId, lot;
+  let inv, parentId, lot, reminderOn = false;
   try {
     await client.query('BEGIN');
     const locked = (await client.query(`SELECT id, used_at, status FROM checkout_sessions WHERE id=$1 FOR UPDATE`, [c.id])).rows[0];
@@ -1420,6 +1421,7 @@ async function finalizeMcq(c, pay) {
 
     lot = await W.addLot(client, { parentId, source: 'recharge', mcqs: Number(cart.mcqs), rupees: Number(cart.rupees),
       paymentId: paymentDbId, checkoutId: c.id, note: `₹${cart.rupees} + GST` });
+    reminderOn = lot ? await W.remindOnPaid(parentId, client) : false;
     const { generateMcqInvoice } = require('../pdf/invoice');
     inv = await generateMcqInvoice({ paymentDbId, parent, rupees: cart.rupees, mcqs: cart.mcqs,
       validTill: lot?.expires_at, exec: client });
@@ -1457,7 +1459,7 @@ async function finalizeMcq(c, pay) {
     });
     await require('../whatsapp/chatQuiz').afterRecharge(c.whatsapp_session_id, c.mobile_number, cart.resume_student_id, {
       paid: Number(pay.amount / 100).toFixed(2), mcqs: Number(cart.mcqs), left: bal.left,
-      validTill: W.fmtDay(lot?.expires_at || W.yearEnd()), invoiceNo: inv.invoiceNo,
+      validTill: W.fmtDay(lot?.expires_at || W.yearEnd()), invoiceNo: inv.invoiceNo, reminderOn,
     });
   } catch (e) { console.error('[pay] mcq deliver failed:', e.message); }
 

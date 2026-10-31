@@ -405,9 +405,10 @@ async function afterRecharge(sessionId, mobile, studentId, info = {}) {
   if (info.mcqs) lines.push(`🎉 *${info.mcqs} MCQs credited* to your QuizPe balance.`);
   if (info.left != null) lines.push(`💰 Balance now: *${info.left} MCQs*${info.validTill ? `, valid till ${info.validTill}` : ''}.`);
   if (info.invoiceNo) lines.push(`🧾 Invoice ${info.invoiceNo} is above.`);
+  if (info.reminderOn) lines.push('', W.REMINDER_NOTE);   // turned on by this payment (wallet.remindOnPaid)
   lines.push('', st ? `Shall *${st.student_name}* carry on with the quiz? 🚀` : 'Shall we start the quiz now? 🚀');
   const start = st ? { id: `child_${st.id}`, title: `▶️ Continue ${st.student_name}`.slice(0, 20) } : { id: 'start_quiz', title: '▶️ Start quiz' };
-  await wa.sendButtons(sessionId, mobile, lines.join('\n'), [start, { id: 'back_menu', title: 'Menu' }]);
+  await wa.sendButtons(sessionId, mobile, lines.join('\n'), [start, { id: 'back_menu', title: 'Menu' }, ...(info.reminderOn ? [W.NO_REMINDERS] : [])]);
 }
 
 /** "Who is playing?" — buttons for up to 3 students, a list beyond. */

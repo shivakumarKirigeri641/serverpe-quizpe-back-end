@@ -121,6 +121,18 @@ async function grantFree(parentId, exec = db) {
   return r || null;
 }
 
+/*
+ * PAYING FAMILIES GET THE 7 AM REMINDER TOO (user, 2026-10-31: "even for paid right?"). A recharge or a plan turns it
+ * on — but only for a parent never asked: one who said "No thanks" or stopped it stays off. True when it was turned
+ * on now, so the payment message can say so (REMINDER_NOTE + the No reminders button).
+ */
+async function remindOnPaid(parentId, exec = db) {
+  const r = await exec.query(
+    `UPDATE parents SET quiz_reminder_on = true, quiz_reminder_ignored = 0, quiz_reminder_asked_at = now()
+      WHERE id = $1 AND quiz_reminder_asked_at IS NULL AND NOT quiz_reminder_on RETURNING id`, [parentId]);
+  return r.rowCount > 0;
+}
+
 /** Add a recharge (or an admin top-up). Idempotent per checkout. */
 async function addLot(exec, { parentId, source = 'recharge', mcqs, rupees = null, paymentId = null, checkoutId = null, note = null }) {
   const r = (await exec.query(
@@ -199,6 +211,6 @@ async function debit({ parentId, studentId, trackerId, historyId }) {
 const fmtDay = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) : '');
 
 module.exports = {
-  config, packs, packButtons, balance, hadFree, onPlan, freeEligible, grantFree, REMINDER_NOTE, NO_REMINDERS, addLot,
+  config, packs, packButtons, balance, hadFree, onPlan, freeEligible, grantFree, REMINDER_NOTE, NO_REMINDERS, remindOnPaid, addLot,
   usedToday, allowance, debit, yearEnd, fmtDay,
 };
